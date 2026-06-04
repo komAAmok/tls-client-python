@@ -26,18 +26,22 @@ jobs:
             goos: linux
             goarch: amd64
             ext: .so
+            cgo_ldflags: "-Wl,--gc-sections" # Linux 移除未引用代码
           - runner: macos-latest
             goos: darwin
             goarch: amd64
             ext: .dylib
+            cgo_ldflags: "-Wl,-dead_strip"   # macOS 对应的安全死代码剥离参数
           - runner: macos-latest
             goos: darwin
             goarch: arm64
             ext: .dylib
+            cgo_ldflags: "-Wl,-dead_strip"   # macOS M系列芯片同理
           - runner: windows-latest
             goos: windows
             goarch: amd64
             ext: .dll
+            cgo_ldflags: "-Wl,--gc-sections" # Windows 移除未引用代码
 
     steps:
       - name: Checkout Code
@@ -55,7 +59,7 @@ jobs:
           CGO_ENABLED: 1
           # -Os 优化体积，-g0 彻底移除 C 语言侧的调试信息
           CGO_CFLAGS: "-Os -g0 -fdata-sections -ffunction-sections"
-          CGO_LDFLAGS: "-Wl,--gc-sections"
+          CGO_LDFLAGS: ${{ matrix.cgo_ldflags }} # 根据当前构建平台动态下发对应的链接参数
           GOOS: ${{ matrix.goos }}
           GOARCH: ${{ matrix.goarch }}
         run: |
