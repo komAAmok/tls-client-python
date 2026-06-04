@@ -13,7 +13,7 @@ permissions:
 
 jobs:
   # -----------------------------------------------------------------------
-  # 1. Build native and macOS architectures (64-bit platforms, glibc based)
+  # 1. Build native and macOS architectures (64-bit platforms)
   # -----------------------------------------------------------------------
   build-native:
     name: Build ${{ matrix.goos }}-${{ matrix.goarch }}
@@ -53,15 +53,29 @@ jobs:
         working-directory: cffi_binding
         env:
           CGO_ENABLED: 1
+          # -Os 优化体积，-g0 彻底移除 C 语言侧的调试信息
+          CGO_CFLAGS: "-Os -g0 -fdata-sections -ffunction-sections"
+          CGO_LDFLAGS: "-Wl,--gc-sections"
           GOOS: ${{ matrix.goos }}
           GOARCH: ${{ matrix.goarch }}
         run: |
           mkdir -p dist
           go build -buildmode=c-shared -buildvcs=false -trimpath -ldflags="-s -w" -o "dist/tls-client-${{ matrix.goos }}-${{ matrix.goarch }}${{ matrix.ext }}" .
 
-      - name: Strip binary (Linux/macOS)
-        if: runner.os != 'Windows'
-        run: strip "cffi_binding/dist/tls-client-${{ matrix.goos }}-${{ matrix.goarch }}${{ matrix.ext }}" || true
+      - name: Strip Binary Safely
+        shell: bash
+        run: |
+          TARGET="cffi_binding/dist/tls-client-${{ matrix.goos }}-${{ matrix.goarch }}${{ matrix.ext }}"
+          if [ "${{ matrix.goos }}" = "darwin" ]; then
+            # macOS .dylib 必须使用 -x，否则会破坏动态链接导致不可用
+            strip -x "$TARGET" || true
+          elif [ "${{ matrix.goos }}" = "windows" ]; then
+            # Windows 环境下使用 msys2/mingw 自带的 strip
+            strip --strip-unneeded "$TARGET" || true
+          else
+            # Linux 原生平台
+            strip --strip-unneeded "$TARGET" || true
+          fi
 
       - name: Upload Intermediary Artifact
         uses: actions/upload-artifact@v4
@@ -94,12 +108,19 @@ jobs:
         working-directory: cffi_binding
         env:
           CGO_ENABLED: 1
+          CGO_CFLAGS: "-Os -g0 -fdata-sections -ffunction-sections"
+          CGO_LDFLAGS: "-Wl,--gc-sections"
           GOOS: windows
           GOARCH: "386"
           CC: i686-w64-mingw32-gcc
         run: |
           mkdir -p dist
           go build -buildmode=c-shared -buildvcs=false -trimpath -ldflags="-s -w" -o "dist/tls-client-windows-386.dll" .
+
+      - name: Strip Windows 32-bit Binary
+        run: |
+          # 必须使用对应的交叉编译 strip 工具，防止损坏
+          i686-w64-mingw32-strip --strip-unneeded cffi_binding/dist/tls-client-windows-386.dll || true
 
       - name: Upload Intermediary Artifact
         uses: actions/upload-artifact@v4
@@ -108,7 +129,7 @@ jobs:
           path: cffi_binding/dist/tls-client-windows-386.dll
 
   # -----------------------------------------------------------------------
-  # 3. Cross-compile Linux ARM architectures (glibc based)
+  # 3. Cross-compile Linux ARM & 386 architectures (glibc based)
   # -----------------------------------------------------------------------
   build-linux-cross:
     name: Cross Linux-${{ matrix.goarch }}
@@ -121,16 +142,19 @@ jobs:
             goarm: "7"
             compiler_pkg: gcc-arm-linux-gnueabihf
             cc: arm-linux-gnueabihf-gcc
+            strip_cmd: arm-linux-gnueabihf-strip
             ext: .so
           - goarch: arm64
             goarm: ""
             compiler_pkg: gcc-aarch64-linux-gnu
             cc: aarch64-linux-gnu-gcc
+            strip_cmd: aarch64-linux-gnu-strip
             ext: .so
           - goarch: "386"
             goarm: ""
             compiler_pkg: gcc-multilib
             cc: gcc
+            strip_cmd: strip
             ext: .so
 
     steps:
@@ -141,6 +165,7 @@ jobs:
         uses: actions/setup-go@v5
         with:
           go-version: "1.24"
+          cache: true
 
       - name: Install Cross-Compiler
         run: |
@@ -151,6 +176,8 @@ jobs:
         working-directory: cffi_binding
         env:
           CGO_ENABLED: 1
+          CGO_CFLAGS: "-Os -g0 -fdata-sections -ffunction-sections"
+          CGO_LDFLAGS: "-Wl,--gc-sections"
           GOOS: linux
           GOARCH: ${{ matrix.goarch }}
           GOARM: ${{ matrix.goarm }}
@@ -159,8 +186,10 @@ jobs:
           mkdir -p dist
           go build -buildmode=c-shared -buildvcs=false -trimpath -ldflags="-s -w" -o "dist/tls-client-linux-${{ matrix.goarch }}${{ matrix.ext }}" .
 
-      - name: Strip binary
-        run: strip "cffi_binding/dist/tls-client-linux-${{ matrix.goarch }}${{ matrix.ext }}" || true
+      - name: Strip Binary Safely
+        run: |
+          # 使用矩阵中定义的高级交叉编译专用 strip 工具
+          ${{ matrix.strip_cmd }} --strip-unneeded "cffi_binding/dist/tls-client-linux-${{ matrix.goarch }}${{ matrix.ext }}" || true
 
       - name: Upload Intermediary Artifact
         uses: actions/upload-artifact@v4
@@ -181,20 +210,22 @@ jobs:
         uses: actions/checkout@v4
 
       - name: Install Build Dependencies
-        run: apk add --no-cache gcc musl-dev git
+        run: apk add --no-cache gcc musl-dev git binutils
 
       - name: Build Core
         working-directory: cffi_binding
         env:
           CGO_ENABLED: 1
+          CGO_CFLAGS: "-Os -g0 -fdata-sections -ffunction-sections"
+          CGO_LDFLAGS: "-Wl,--gc-sections"
           GOOS: linux
           GOARCH: amd64
         run: |
           mkdir -p dist
           go build -buildmode=c-shared -buildvcs=false -trimpath -ldflags="-s -w" -o "dist/tls-client-alpine-amd64.so" .
 
-      - name: Strip binary
-        run: strip "cffi_binding/dist/tls-client-alpine-amd64.so" || true
+      - name: Strip Binary
+        run: strip --strip-unneeded "cffi_binding/dist/tls-client-alpine-amd64.so" || true
 
       - name: Upload Intermediary Artifact
         uses: actions/upload-artifact@v4
