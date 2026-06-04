@@ -1,53 +1,45 @@
-name: Build tls-client CFFI Bindings
+name: Build and Sync tls-client Cores
 
 on:
   push:
     branches: [master, main]
-    tags: ["v*"]
-  pull_request:
-    branches: [master, main]
-  workflow_dispatch:
+    paths:
+      - 'cffi_binding/**' # 只有当 Go 核心代码或绑定层改变时才触发编译，节约 Actions 额度
+  workflow_dispatch:      # 支持手动一键触发
 
 permissions:
-  contents: write
-  actions: write
+  contents: write         # 必须赋予写权限，否则无法自动提交二进制文件回项目路径
 
 jobs:
   # -----------------------------------------------------------------------
-  # 1. 原生或无痛交叉编译任务 (AMD64 及 macOS 混合矩阵)
+  # 1. 编译原生及 macOS 架构
   # -----------------------------------------------------------------------
-  build:
+  build-native:
     name: Build ${{ matrix.goos }}-${{ matrix.goarch }}
     runs-on: ${{ matrix.runner }}
     strategy:
       fail-fast: false
       matrix:
         include:
-          # ---- Linux AMD64 宿主机原生编译 ----
           - runner: ubuntu-latest
             goos: linux
             goarch: amd64
             ext: .so
-
-          # ---- macOS (Clang 天生支持跨架构，无需额外交叉编译器) ----
           - runner: macos-latest
             goos: darwin
             goarch: amd64
             ext: .dylib
-
           - runner: macos-latest
             goos: darwin
             goarch: arm64
             ext: .dylib
-
-          # ---- Windows AMD64 ----
           - runner: windows-latest
             goos: windows
             goarch: amd64
             ext: .dll
 
     steps:
-      - name: Checkout
+      - name: Checkout Code
         uses: actions/checkout@v4
 
       - name: Set up Go
@@ -56,7 +48,7 @@ jobs:
           go-version: "1.24"
           cache: true
 
-      - name: Build shared library
+      - name: Build Core
         working-directory: cffi_binding
         env:
           CGO_ENABLED: 1
@@ -66,41 +58,35 @@ jobs:
           mkdir -p dist
           go build -buildmode=c-shared -buildvcs=false -o "dist/tls-client-${{ matrix.goos }}-${{ matrix.goarch }}${{ matrix.ext }}" .
 
-      - name: Upload artifact
+      - name: Upload Intermediary Artifact
         uses: actions/upload-artifact@v4
         with:
-          name: tls-client-${{ matrix.goos }}-${{ matrix.goarch }}
+          name: core-${{ matrix.goos }}-${{ matrix.goarch }}
           path: cffi_binding/dist/tls-client-${{ matrix.goos }}-${{ matrix.goarch }}${{ matrix.ext }}
-          if-no-files-found: error
 
   # -----------------------------------------------------------------------
-  # 2. Linux 严格交叉编译任务 (收拢至单台 Ubuntu 依赖特定 GCC 编译)
+  # 2. 严格交叉编译 Linux ARM 架构
   # -----------------------------------------------------------------------
   build-linux-cross:
-    name: Cross ${{ matrix.label }}
+    name: Cross Linux-${{ matrix.goarch }}
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
       matrix:
         include:
-          # ARMv7 (32位) 交叉编译配置
-          - label: linux-armv7
-            goarch: arm
+          - goarch: arm
             goarm: "7"
             compiler_pkg: gcc-arm-linux-gnueabihf
             cc: arm-linux-gnueabihf-gcc
             ext: .so
-
-          # ARM64 (64位) 交叉编译配置 (从上面移到这里修复报错)
-          - label: linux-arm64
-            goarch: arm64
+          - goarch: arm64
             goarm: ""
             compiler_pkg: gcc-aarch64-linux-gnu
             cc: aarch64-linux-gnu-gcc
             ext: .so
 
     steps:
-      - name: Checkout
+      - name: Checkout Code
         uses: actions/checkout@v4
 
       - name: Set up Go
@@ -108,12 +94,12 @@ jobs:
         with:
           go-version: "1.24"
 
-      - name: Install cross-compiler
+      - name: Install Cross-Compiler
         run: |
           sudo apt-get update
           sudo apt-get install -y ${{ matrix.compiler_pkg }}
 
-      - name: Build shared library
+      - name: Build Core
         working-directory: cffi_binding
         env:
           CGO_ENABLED: 1
@@ -125,37 +111,45 @@ jobs:
           mkdir -p dist
           go build -buildmode=c-shared -buildvcs=false -o "dist/tls-client-linux-${{ matrix.goarch }}${{ matrix.ext }}" .
 
-      - name: Upload artifact
+      - name: Upload Intermediary Artifact
         uses: actions/upload-artifact@v4
         with:
-          name: tls-client-linux-${{ matrix.goarch }}
+          name: core-linux-${{ matrix.goarch }}
           path: cffi_binding/dist/tls-client-linux-${{ matrix.goarch }}${{ matrix.ext }}
-          if-no-files-found: error
 
   # -----------------------------------------------------------------------
-  # 3. 统一发布打包
+  # 3. 核心收拢：自动下载所有编译产物并提交回项目路径
   # -----------------------------------------------------------------------
-  release:
-    name: Create Release
-    if: startsWith(github.ref, 'refs/tags/v')
-    needs: [build, build-linux-cross]
+  sync-to-project-path:
+    name: Sync Binaries into Project Path
+    needs: [build-native, build-linux-cross]
     runs-on: ubuntu-latest
-    permissions:
-      contents: write
     steps:
-      - name: Download all artifacts
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }} # 使用原生 Token 即可
+
+      - name: Create Target Binary Directory
+        run: mkdir -p cffi_binding/bin
+
+      - name: Download All Artifacts
         uses: actions/download-artifact@v4
         with:
-          path: artifacts
+          path: tmp_artifacts
 
-      - name: Generate checksums
+      - name: Organize and Move Binaries
         run: |
-          cd artifacts
-          find . -type f -not -name 'SHA256SUMS' -exec sha256sum {} \; | sort > SHA256SUMS
+          # 检索临时目录，将所有编译好的 .so, .dll, .dylib 提取到项目源码的 bin 目录下
+          find tmp_artifacts/ -type f \( -name "*.so" -o -name "*.dll" -o -name "*.dylib" \) -exec cp {} cffi_binding/bin/ \;
+          echo "=== 移入项目路径下的核心文件列表 ==="
+          ls -la cffi_binding/bin/
 
-      - name: Create GitHub Release
-        uses: softprops/action-gh-release@v2
+      - name: Auto Commit and Push back to Repo
+        uses: stefanzweifel/git-auto-commit-action@v5
         with:
-          files: artifacts/**/*
-          draft: false
-          generate_release_notes: true
+          commit_message: "chore: automated cross-compiled cores synchronization [skip ci]"
+          branch: ${{ github.head_ref || github.ref_name }}
+          file_pattern: 'cffi_binding/bin/*'
+          commit_user_name: "github-actions[bot]"
+          commit_user_email: "github-actions[bot]@users.noreply.github.com"
