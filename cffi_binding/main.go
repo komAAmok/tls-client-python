@@ -845,8 +845,11 @@ func readBodyStreamToFile(body io.Reader, opts *C.RequestOptions) ([]byte, error
 		}
 	}
 
-	// Optional EOF marker
-	eof := C.GoString(opts.stream_output_eof_symbol)
+	// Optional EOF marker – guard against NULL pointer.
+	var eof string
+	if opts.stream_output_eof_symbol != nil {
+		eof = C.GoString(opts.stream_output_eof_symbol)
+	}
 	if eof != "" {
 		f.Write([]byte(eof))
 	}
@@ -973,7 +976,11 @@ func ExecuteRequest(opts *C.RequestOptions) *C.ResponseResult {
 		resp.Body = http.DecompressBodyByType(resp.Body, ce)
 	}
 
-	streamPath := C.GoString(opts.stream_output_path)
+	// Guard against NULL pointer from Python's ffi.NULL (cffi → C boundary).
+	var streamPath string
+	if opts.stream_output_path != nil {
+		streamPath = C.GoString(opts.stream_output_path)
+	}
 	var respBody []byte
 	var readErr error
 

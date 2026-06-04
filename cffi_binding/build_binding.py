@@ -254,6 +254,8 @@ def build_go_library(
         "go", "build",
         "-buildmode=c-shared",
         "-buildvcs=false",
+        "-trimpath",
+        "-ldflags=-s -w",
         "-o", str(outpath),
         ".",
     ]

@@ -12,7 +12,7 @@ Quick start
 >>> from tls_client import Session
 >>> s = Session(client_identifier="chrome_146")
 >>> resp = s.get("https://httpbin.org/json")
->>> print(resp["status_code"], resp["text"][:50])
+>>> print(resp.status_code, resp.text[:50])
 
 Async
 -----
@@ -27,6 +27,8 @@ from tls_client._core import (
     Request,
     Response,
     clear_client_pool,
+    SUPPORTED_CLIENT_IDENTIFIERS,
+    list_client_identifiers,
 )
 
 __all__ = [
@@ -35,5 +37,7 @@ __all__ = [
     "Request",
     "Response",
     "clear_client_pool",
+    "SUPPORTED_CLIENT_IDENTIFIERS",
+    "list_client_identifiers",
 ]
-__version__ = "1.0.0"
+__version__ = "1.14.0"

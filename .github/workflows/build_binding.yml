@@ -57,7 +57,11 @@ jobs:
           GOARCH: ${{ matrix.goarch }}
         run: |
           mkdir -p dist
-          go build -buildmode=c-shared -buildvcs=false -o "dist/tls-client-${{ matrix.goos }}-${{ matrix.goarch }}${{ matrix.ext }}" .
+          go build -buildmode=c-shared -buildvcs=false -trimpath -ldflags="-s -w" -o "dist/tls-client-${{ matrix.goos }}-${{ matrix.goarch }}${{ matrix.ext }}" .
+
+      - name: Strip binary (Linux/macOS)
+        if: runner.os != 'Windows'
+        run: strip "cffi_binding/dist/tls-client-${{ matrix.goos }}-${{ matrix.goarch }}${{ matrix.ext }}" || true
 
       - name: Upload Intermediary Artifact
         uses: actions/upload-artifact@v4
@@ -95,7 +99,7 @@ jobs:
           CC: i686-w64-mingw32-gcc
         run: |
           mkdir -p dist
-          go build -buildmode=c-shared -buildvcs=false -o "dist/tls-client-windows-386.dll" .
+          go build -buildmode=c-shared -buildvcs=false -trimpath -ldflags="-s -w" -o "dist/tls-client-windows-386.dll" .
 
       - name: Upload Intermediary Artifact
         uses: actions/upload-artifact@v4
@@ -153,7 +157,10 @@ jobs:
           CC: ${{ matrix.cc }}
         run: |
           mkdir -p dist
-          go build -buildmode=c-shared -buildvcs=false -o "dist/tls-client-linux-${{ matrix.goarch }}${{ matrix.ext }}" .
+          go build -buildmode=c-shared -buildvcs=false -trimpath -ldflags="-s -w" -o "dist/tls-client-linux-${{ matrix.goarch }}${{ matrix.ext }}" .
+
+      - name: Strip binary
+        run: strip "cffi_binding/dist/tls-client-linux-${{ matrix.goarch }}${{ matrix.ext }}" || true
 
       - name: Upload Intermediary Artifact
         uses: actions/upload-artifact@v4
@@ -184,7 +191,10 @@ jobs:
           GOARCH: amd64
         run: |
           mkdir -p dist
-          go build -buildmode=c-shared -buildvcs=false -o "dist/tls-client-alpine-amd64.so" .
+          go build -buildmode=c-shared -buildvcs=false -trimpath -ldflags="-s -w" -o "dist/tls-client-alpine-amd64.so" .
+
+      - name: Strip binary
+        run: strip "cffi_binding/dist/tls-client-alpine-amd64.so" || true
 
       - name: Upload Intermediary Artifact
         uses: actions/upload-artifact@v4
