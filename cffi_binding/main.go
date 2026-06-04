@@ -156,6 +156,15 @@ typedef struct {
 } ResponseResult;
 
 typedef void (*async_callback_fn)(uintptr_t request_id, ResponseResult* response);
+
+// C helper: invoke the callback from Go.
+// cgo cannot call C function pointers directly (they appear as opaque [0]byte),
+// so we wrap the call in a static inline C function that takes a void*.
+static inline void invoke_async_callback(void* fn, uintptr_t request_id, ResponseResult* response) {
+	if (fn != NULL) {
+		((async_callback_fn)fn)(request_id, response);
+	}
+}
 */
 import "C"
 
@@ -1960,7 +1969,7 @@ func ClearClientPool() {
 }
 
 //export RequestAsync
-func RequestAsync(opts *C.RequestOptions, requestID C.uintptr_t, cb C.async_callback_fn) C.int {
+func RequestAsync(opts *C.RequestOptions, requestID C.uintptr_t, cb unsafe.Pointer) C.int {
 	if opts == nil || cb == nil {
 		return -1
 	}
@@ -1975,7 +1984,7 @@ func RequestAsync(opts *C.RequestOptions, requestID C.uintptr_t, cb C.async_call
 				result.err_msg = C.CString(fmt.Sprintf("go panic in RequestAsync: %v", r))
 				result.status_code = 0
 			}
-			(*cb)(requestID, result)
+			C.invoke_async_callback(cb, requestID, result)
 		}
 	}()
 
@@ -1999,7 +2008,7 @@ func RequestAsync(opts *C.RequestOptions, requestID C.uintptr_t, cb C.async_call
 					res.err_msg = C.CString(fmt.Sprintf("go panic in async goroutine: %v", r))
 					res.status_code = 0
 				}
-				(*cb)(requestID, res)
+				C.invoke_async_callback(cb, requestID, res)
 			}
 
 			// Clean up custom TLS client memory regardless of panic
@@ -2022,7 +2031,7 @@ func RequestAsync(opts *C.RequestOptions, requestID C.uintptr_t, cb C.async_call
 				result.status_code = 0
 			}
 		}
-		(*cb)(requestID, result)
+		C.invoke_async_callback(cb, requestID, result)
 	}()
 
 	return 0
