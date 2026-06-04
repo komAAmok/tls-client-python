@@ -55,6 +55,7 @@ jobs:
 
       - name: Build Core
         working-directory: cffi_binding
+        shell: bash # 💡 关键修复：强制 Windows 平台也使用 bash 执行，从而原生支持 \ 换行符和 mkdir -p
         env:
           CGO_ENABLED: 1
           # -Os: 极致体积优化; -fno-stack-check: 避免某些特殊并发高频调用下的栈探测开销
