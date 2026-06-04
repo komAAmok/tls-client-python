@@ -26,22 +26,22 @@ jobs:
             goos: linux
             goarch: amd64
             ext: .so
-            cgo_ldflags: "-Wl,--gc-sections" # Linux 移除未引用代码
+            cgo_ldflags: "-Wl,--gc-sections -Wl,-z,relro -Wl,-z,now" # 增强高并发动态库的安全与符号解析效率
           - runner: macos-latest
             goos: darwin
             goarch: amd64
             ext: .dylib
-            cgo_ldflags: "-Wl,-dead_strip"   # macOS 对应的安全死代码剥离参数
+            cgo_ldflags: "-Wl,-dead_strip"
           - runner: macos-latest
             goos: darwin
             goarch: arm64
             ext: .dylib
-            cgo_ldflags: "-Wl,-dead_strip"   # macOS M系列芯片同理
+            cgo_ldflags: "-Wl,-dead_strip"
           - runner: windows-latest
             goos: windows
             goarch: amd64
             ext: .dll
-            cgo_ldflags: "-Wl,--gc-sections" # Windows 移除未引用代码
+            cgo_ldflags: "-Wl,--gc-sections"
 
     steps:
       - name: Checkout Code
@@ -57,27 +57,28 @@ jobs:
         working-directory: cffi_binding
         env:
           CGO_ENABLED: 1
-          # -Os 优化体积，-g0 彻底移除 C 语言侧的调试信息
-          CGO_CFLAGS: "-Os -g0 -fdata-sections -ffunction-sections"
-          CGO_LDFLAGS: ${{ matrix.cgo_ldflags }} # 根据当前构建平台动态下发对应的链接参数
+          # -Os: 极致体积优化; -fno-stack-check: 避免某些特殊并发高频调用下的栈探测开销
+          CGO_CFLAGS: "-Os -g0 -fdata-sections -ffunction-sections -fno-asynchronous-unwind-tables"
+          CGO_LDFLAGS: ${{ matrix.cgo_ldflags }}
           GOOS: ${{ matrix.goos }}
           GOARCH: ${{ matrix.goarch }}
         run: |
           mkdir -p dist
-          go build -buildmode=c-shared -buildvcs=false -trimpath -ldflags="-s -w" -o "dist/tls-client-${{ matrix.goos }}-${{ matrix.goarch }}${{ matrix.ext }}" .
+          # -ldflags="-s -w": 移除调试和符号表; -tags=netgo: 强制使用Go原生纯网络实现，规避CGO高并发下对系统glibc DNS解析器的线程锁竞争
+          go build -buildmode=c-shared \
+                   -buildvcs=false \
+                   -trimpath \
+                   -tags="netgo osusergo" \
+                   -ldflags="-s -w" \
+                   -o "dist/tls-client-${{ matrix.goos }}-${{ matrix.goarch }}${{ matrix.ext }}" .
 
       - name: Strip Binary Safely
         shell: bash
         run: |
           TARGET="cffi_binding/dist/tls-client-${{ matrix.goos }}-${{ matrix.goarch }}${{ matrix.ext }}"
           if [ "${{ matrix.goos }}" = "darwin" ]; then
-            # macOS .dylib 必须使用 -x，否则会破坏动态链接导致不可用
             strip -x "$TARGET" || true
-          elif [ "${{ matrix.goos }}" = "windows" ]; then
-            # Windows 环境下使用 msys2/mingw 自带的 strip
-            strip --strip-unneeded "$TARGET" || true
           else
-            # Linux 原生平台
             strip --strip-unneeded "$TARGET" || true
           fi
 
@@ -112,18 +113,22 @@ jobs:
         working-directory: cffi_binding
         env:
           CGO_ENABLED: 1
-          CGO_CFLAGS: "-Os -g0 -fdata-sections -ffunction-sections"
+          CGO_CFLAGS: "-Os -g0 -fdata-sections -ffunction-sections -fno-asynchronous-unwind-tables"
           CGO_LDFLAGS: "-Wl,--gc-sections"
           GOOS: windows
           GOARCH: "386"
           CC: i686-w64-mingw32-gcc
         run: |
           mkdir -p dist
-          go build -buildmode=c-shared -buildvcs=false -trimpath -ldflags="-s -w" -o "dist/tls-client-windows-386.dll" .
+          go build -buildmode=c-shared \
+                   -buildvcs=false \
+                   -trimpath \
+                   -tags="netgo osusergo" \
+                   -ldflags="-s -w" \
+                   -o "dist/tls-client-windows-386.dll" .
 
       - name: Strip Windows 32-bit Binary
         run: |
-          # 必须使用对应的交叉编译 strip 工具，防止损坏
           i686-w64-mingw32-strip --strip-unneeded cffi_binding/dist/tls-client-windows-386.dll || true
 
       - name: Upload Intermediary Artifact
@@ -180,19 +185,23 @@ jobs:
         working-directory: cffi_binding
         env:
           CGO_ENABLED: 1
-          CGO_CFLAGS: "-Os -g0 -fdata-sections -ffunction-sections"
-          CGO_LDFLAGS: "-Wl,--gc-sections"
+          CGO_CFLAGS: "-Os -g0 -fdata-sections -ffunction-sections -fno-asynchronous-unwind-tables"
+          CGO_LDFLAGS: "-Wl,--gc-sections -Wl,-z,relro -Wl,-z,now"
           GOOS: linux
           GOARCH: ${{ matrix.goarch }}
           GOARM: ${{ matrix.goarm }}
           CC: ${{ matrix.cc }}
         run: |
           mkdir -p dist
-          go build -buildmode=c-shared -buildvcs=false -trimpath -ldflags="-s -w" -o "dist/tls-client-linux-${{ matrix.goarch }}${{ matrix.ext }}" .
+          go build -buildmode=c-shared \
+                   -buildvcs=false \
+                   -trimpath \
+                   -tags="netgo osusergo" \
+                   -ldflags="-s -w" \
+                   -o "dist/tls-client-linux-${{ matrix.goarch }}${{ matrix.ext }}" .
 
       - name: Strip Binary Safely
         run: |
-          # 使用矩阵中定义的高级交叉编译专用 strip 工具
           ${{ matrix.strip_cmd }} --strip-unneeded "cffi_binding/dist/tls-client-linux-${{ matrix.goarch }}${{ matrix.ext }}" || true
 
       - name: Upload Intermediary Artifact
@@ -226,7 +235,13 @@ jobs:
           GOARCH: amd64
         run: |
           mkdir -p dist
-          go build -buildmode=c-shared -buildvcs=false -trimpath -ldflags="-s -w" -o "dist/tls-client-alpine-amd64.so" .
+          # 对于 Alpine (musl)，强制纯静态、不依赖系统库的编译方式
+          go build -buildmode=c-shared \
+                   -buildvcs=false \
+                   -trimpath \
+                   -tags="netgo osusergo musl" \
+                   -ldflags="-s -w" \
+                   -o "dist/tls-client-alpine-amd64.so" .
 
       - name: Strip Binary
         run: strip --strip-unneeded "cffi_binding/dist/tls-client-alpine-amd64.so" || true
