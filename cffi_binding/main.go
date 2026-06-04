@@ -1975,7 +1975,7 @@ func RequestAsync(opts *C.RequestOptions, requestID C.uintptr_t, cb C.async_call
 				result.err_msg = C.CString(fmt.Sprintf("go panic in RequestAsync: %v", r))
 				result.status_code = 0
 			}
-			cb(requestID, result)
+			(*cb)(requestID, result)
 		}
 	}()
 
@@ -1999,7 +1999,7 @@ func RequestAsync(opts *C.RequestOptions, requestID C.uintptr_t, cb C.async_call
 					res.err_msg = C.CString(fmt.Sprintf("go panic in async goroutine: %v", r))
 					res.status_code = 0
 				}
-				cb(requestID, res)
+				(*cb)(requestID, res)
 			}
 
 			// Clean up custom TLS client memory regardless of panic
@@ -2022,7 +2022,7 @@ func RequestAsync(opts *C.RequestOptions, requestID C.uintptr_t, cb C.async_call
 				result.status_code = 0
 			}
 		}
-		cb(requestID, result)
+		(*cb)(requestID, result)
 	}()
 
 	return 0
