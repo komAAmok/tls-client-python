@@ -27,7 +27,7 @@ CANDIDATES = [
     "cloudscraper",
 ]
 
-URL = "https://httpbin.org/ip"
+URL = "https://jzsc.mohurd.gov.cn/home"
 PASS = 0
 FAIL = 0
 

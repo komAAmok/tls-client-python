@@ -1,7 +1,9 @@
 # tls-client-python MANIFEST.in
 # Include pre-compiled shared libraries for all platforms in the source distribution.
+# Source distributions (sdist) include everything — users can build or use binaries.
 
 recursive-include tls_client/bin *.so *.dylib *.dll
+include tls_client/py.typed
 include pyproject.toml
 include Readme.md
 include LICENSE

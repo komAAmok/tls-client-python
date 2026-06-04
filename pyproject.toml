@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "tls-client-python"
-version = "1.0.0"
+version = "1.14.0"
 description = "High-performance Python binding for bogdanfinn/tls-client via CFFI – zero-copy, panic-proof, full TLS fingerprint control"
 readme = { file = "Readme.md", content-type = "text/markdown" }
 license = "MIT"

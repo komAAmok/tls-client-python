@@ -4,22 +4,27 @@ tls_client._core  –  Low‑level CFFI binding for the Go tls-client engine.
 
 Architecture
 ────────────
-• Go shared library compiled with `-buildmode=c-shared` exports three
-  symbols: ExecuteRequest, FreeResponse, ClearClientPool.
-• Every request parameter travels across the FFI boundary as a raw C
-  struct (RequestOptions).  No JSON serialisation overhead.
+• Go shared library compiled with `-buildmode=c-shared` exports four
+  symbols: ExecuteRequest, RequestAsync, FreeResponse, ClearClientPool.
+• Sync path: ExecuteRequest blocks until completion, returns CResponseResult*.
+  Python wraps it with `raw_res = ffi.gc(raw_res, lib.FreeResponse)` for
+  automatic cleanup.
+• Async path: RequestAsync deep-copies all C data into Go heap, dispatches a
+  goroutine, and returns immediately.  The goroutine executes the HTTP request
+  and calls a CFFI callback with (request_id, CResponseResult*).  Python
+  unpacks the response in the callback, calls FreeResponse, and resolves an
+  asyncio.Future via `loop.call_soon_threadsafe()`.  No thread pool — Python's
+  event loop is never blocked.
 • Response body is read via `ffi.buffer(res.body, res.body_len)[:]` for
   a single zero-copy-style memory view → Python bytes conversion.
-• `ffi.gc(raw_res, _lib.FreeResponse)` guarantees that Go heap memory is
-  reclaimed even when Python exceptions unwind the stack.
 • All temporary C allocations are anchored in a `keep_alive` list for the
   duration of the call, preventing premature GC and dangling pointers.
 
 Classes
 ───────
 • Session – synchronous client.  Supports `with` context manager.
-• AsyncSession – asynchronous client using a shared ThreadPoolExecutor
-  to offload blocking C calls without stalling the asyncio event loop.
+• AsyncSession – asynchronous client using Go goroutines + CFFI callbacks.
+  Compatible with uvloop / winloop for maximum event-loop performance.
 """
 
 from __future__ import annotations
@@ -29,7 +34,7 @@ import ctypes
 import os
 import platform
 import sys
-from concurrent.futures import ThreadPoolExecutor
+import threading
 from pathlib import Path
 from typing import Any, ClassVar, Dict, List, Optional, TypedDict
 
@@ -501,6 +506,9 @@ typedef struct {
 ResponseResult* ExecuteRequest(RequestOptions* opts);
 void           FreeResponse(ResponseResult* res);
 void           ClearClientPool(void);
+
+typedef void (*async_callback_fn)(uintptr_t request_id, ResponseResult* response);
+int            RequestAsync(RequestOptions* opts, uintptr_t request_id, async_callback_fn cb);
 """
 
 # ---------------------------------------------------------------------------
@@ -946,6 +954,77 @@ def _build_custom_tls_client(ffi, cfg: Optional[Dict[str, Any]], keep_alive: lis
         ctc.header_priority = chp
 
     return ctc
+
+
+# ---------------------------------------------------------------------------
+# Response unpacking — shared between sync ExecuteRequest and async callback
+# ---------------------------------------------------------------------------
+
+def _unpack_c_response(ffi, raw_res) -> Response:
+    """Unpack a C ResponseResult* into a Python Response object.
+
+    Used by both the synchronous execute_request path and the async
+    CFFI callback path.  Does NOT call FreeResponse — the caller is
+    responsible for that.
+    """
+    status = raw_res.status_code
+    blen = raw_res.body_len
+
+    if blen > 0 and raw_res.body != ffi.NULL:
+        body_bytes = ffi.buffer(raw_res.body, blen)[:]
+    else:
+        body_bytes = b""
+
+    response_headers: Dict[str, List[str]] = {}
+    rh_len = raw_res.response_headers_len
+    if rh_len > 0 and raw_res.response_headers != ffi.NULL:
+        for i in range(rh_len):
+            h = raw_res.response_headers[i]
+            if h.key != ffi.NULL and h.value != ffi.NULL:
+                k = ffi.string(h.key).decode("utf-8", errors="replace")
+                v = ffi.string(h.value).decode("utf-8", errors="replace")
+                response_headers.setdefault(k, []).append(v)
+
+    ct = ""
+    for k, v in response_headers.items():
+        if k.lower() == "content-type":
+            ct = v[0] if v else ""
+            break
+    encoding = _charset_from_content_type(ct)
+    try:
+        text = body_bytes.decode(encoding)
+    except (UnicodeDecodeError, LookupError):
+        encoding = "utf-8"
+        text = body_bytes.decode("utf-8", errors="replace")
+
+    response_cookies: Dict[str, str] = {}
+    ck_len = raw_res.cookies_len
+    if ck_len > 0 and raw_res.cookies != ffi.NULL:
+        for i in range(ck_len):
+            ck_entry = raw_res.cookies[i]
+            if ck_entry.key != ffi.NULL and ck_entry.value != ffi.NULL:
+                cn = ffi.string(ck_entry.key).decode("utf-8", errors="replace")
+                cv = ffi.string(ck_entry.value).decode("utf-8", errors="replace")
+                response_cookies[cn] = cv
+
+    target_url: Optional[str] = None
+    if raw_res.target_url != ffi.NULL:
+        target_url = ffi.string(raw_res.target_url).decode("utf-8", errors="replace")
+
+    used_protocol: Optional[str] = None
+    if raw_res.used_protocol != ffi.NULL:
+        used_protocol = ffi.string(raw_res.used_protocol).decode("utf-8", errors="replace")
+
+    return Response(
+        status_code=status,
+        headers=response_headers,
+        content=body_bytes,
+        text=text,
+        encoding=encoding,
+        url=target_url,
+        cookies=response_cookies,
+        used_protocol=used_protocol,
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -1562,73 +1641,13 @@ class Session:
         if raw_res == ffi.NULL:
             raise RuntimeError("Go engine returned NULL – likely memory allocation failure")
 
-        ffi.gc(raw_res, lib.FreeResponse)
+        raw_res = ffi.gc(raw_res, lib.FreeResponse)
 
         if raw_res.err_msg != ffi.NULL:
             err = ffi.string(raw_res.err_msg).decode("utf-8", errors="replace")
             raise RuntimeError(err)
 
-        status = raw_res.status_code
-        blen = raw_res.body_len
-
-        if blen > 0 and raw_res.body != ffi.NULL:
-            body_bytes = ffi.buffer(raw_res.body, blen)[:]
-        else:
-            body_bytes = b""
-
-        response_headers: Dict[str, List[str]] = {}
-        rh_len = raw_res.response_headers_len
-        if rh_len > 0 and raw_res.response_headers != ffi.NULL:
-            for i in range(rh_len):
-                h = raw_res.response_headers[i]
-                if h.key != ffi.NULL and h.value != ffi.NULL:
-                    k = ffi.string(h.key).decode("utf-8", errors="replace")
-                    v = ffi.string(h.value).decode("utf-8", errors="replace")
-                    response_headers.setdefault(k, []).append(v)
-
-        # ---- charset detection & text decoding ---------------------------
-        ct = ""
-        for k, v in response_headers.items():
-            if k.lower() == "content-type":
-                ct = v[0] if v else ""
-                break
-        encoding = _charset_from_content_type(ct)
-        try:
-            text = body_bytes.decode(encoding)
-        except (UnicodeDecodeError, LookupError):
-            encoding = "utf-8"
-            text = body_bytes.decode("utf-8", errors="replace")
-
-        # ---- cookies ----------------------------------------------------
-        response_cookies: Dict[str, str] = {}
-        ck_len = raw_res.cookies_len
-        if ck_len > 0 and raw_res.cookies != ffi.NULL:
-            for i in range(ck_len):
-                ck_entry = raw_res.cookies[i]
-                if ck_entry.key != ffi.NULL and ck_entry.value != ffi.NULL:
-                    cn = ffi.string(ck_entry.key).decode("utf-8", errors="replace")
-                    cv = ffi.string(ck_entry.value).decode("utf-8", errors="replace")
-                    response_cookies[cn] = cv
-
-        # ---- target URL & protocol --------------------------------------
-        target_url: Optional[str] = None
-        if raw_res.target_url != ffi.NULL:
-            target_url = ffi.string(raw_res.target_url).decode("utf-8", errors="replace")
-
-        used_protocol: Optional[str] = None
-        if raw_res.used_protocol != ffi.NULL:
-            used_protocol = ffi.string(raw_res.used_protocol).decode("utf-8", errors="replace")
-
-        return Response(
-            status_code=status,
-            headers=response_headers,
-            content=body_bytes,
-            text=text,
-            encoding=encoding,
-            url=target_url,
-            cookies=response_cookies,
-            used_protocol=used_protocol,
-        )
+        return _unpack_c_response(ffi, raw_res)
 
     def typed_request(self, req: Request) -> Response:
         """使用 :class:`Request` 强类型对象执行 HTTP 请求。
@@ -1666,26 +1685,115 @@ class Session:
 
 
 # ---------------------------------------------------------------------------
-# Asynchronous Session
+# Async callback bridge — Go goroutine → Python CFFI callback → asyncio Future
 # ---------------------------------------------------------------------------
 
-class AsyncSession:
-    """异步 HTTP 客户端，封装 Go tls-client 引擎（基于 :class:`Session`）。
+# Registry of pending async requests: request_id (int) → asyncio.Future
+_pending_requests: Dict[int, asyncio.Future] = {}
+_pending_lock = threading.Lock()
+_request_counter = 0
 
-    Async HTTP client wrapping the Go tls-client engine (based on :class:`Session`).
+
+def _next_request_id() -> int:
+    global _request_counter
+    _request_counter += 1
+    return _request_counter
+
+
+def _make_async_callback(ffi, lib):
+    """Create a CFFI callback that Go goroutines invoke with results.
+
+    The callback is called from a Go-managed OS thread (not the Python main
+    thread).  CFFI internally calls PyGILState_Ensure to safely acquire the
+    GIL before entering Python code.
+
+    Lifecycle (per the 9-step user blueprint):
+    1. Python calls RequestAsync → Go deep-copies → returns immediately
+    2. Go goroutine executes HTTP request
+    3. Go allocates CResponseResult on C heap via C.malloc
+    4. Go calls this callback with (request_id, CResponseResult*)
+    5. Python unpacks CResponseResult → Response object
+    6. Python calls FreeResponse to release C memory
+    7. Python uses loop.call_soon_threadsafe to resolve the Future
     """
 
-    _executor: ClassVar[Optional[ThreadPoolExecutor]] = None
-    _executor_max_workers: ClassVar[int] = 512
+    @ffi.callback("void(uintptr_t, ResponseResult*)")
+    def _on_async_response(request_id: int, raw_res: Any) -> None:
+        # The ENTIRE callback body MUST be wrapped in try/except Exception.
+        # This callback executes on a Go-managed OS thread.  If any Python
+        # exception escapes uncaught, the Python interpreter crashes with
+        # Fatal Python error: Segmentation fault (Constraint 3).
+        try:
+            # Step 5-6: Unpack response
+            if raw_res == ffi.NULL or raw_res.err_msg != ffi.NULL:
+                err = "Go engine returned NULL"
+                if raw_res != ffi.NULL and raw_res.err_msg != ffi.NULL:
+                    err = ffi.string(raw_res.err_msg).decode("utf-8", errors="replace")
+                response: Any = RuntimeError(err)
+            else:
+                response = _unpack_c_response(ffi, raw_res)
+        except Exception as exc:
+            response = exc
+        finally:
+            # Step 6: Free C memory in all code paths (success, error, panic)
+            if raw_res != ffi.NULL:
+                lib.FreeResponse(raw_res)
+
+        # Step 9: Schedule Future resolution on the event loop thread.
+        # Must use call_soon_threadsafe — direct set_result/set_exception
+        # from a non-event-loop thread is NOT thread-safe (Constraint 4).
+        try:
+            with _pending_lock:
+                future = _pending_requests.pop(request_id, None)
+
+            if future is None:
+                return  # request was cancelled or timed out
+
+            if not future.done():
+                loop = future.get_loop()
+                if isinstance(response, Exception):
+                    loop.call_soon_threadsafe(future.set_exception, response)
+                else:
+                    loop.call_soon_threadsafe(future.set_result, response)
+        except Exception:
+            # If even Future resolution fails, there is nothing we can do —
+            # the event loop may be shut down.  Silently swallow to prevent
+            # a process crash.
+            pass
+
+    return _on_async_response
+
+
+# Lazy-initialised callback — must be created after ffi is loaded and kept alive.
+# Protected by a lock to prevent race conditions when multiple AsyncSession
+# instances are created concurrently from different threads.
+_async_callback = None
+_async_callback_lock = threading.Lock()
+
+
+def _get_async_callback(ffi, lib):
+    global _async_callback
+    if _async_callback is None:
+        with _async_callback_lock:
+            if _async_callback is None:
+                _async_callback = _make_async_callback(ffi, lib)
+    return _async_callback
+
+
+class AsyncSession:
+    """True async HTTP client — no thread pool, no blocking.
+
+    Uses Go goroutines + CFFI callbacks + asyncio Future:
+    - Python calls RequestAsync (returns instantly after Go deep-copies)
+    - Go goroutine executes HTTP I/O in the background
+    - Go invokes CFFI callback when done
+    - Python resolves asyncio.Future via call_soon_threadsafe
+
+    Compatible with uvloop / winloop for maximum event-loop performance.
+    """
 
     def __init__(self, **kwargs: Any) -> None:
         self._session = Session(**kwargs)
-
-    @classmethod
-    def _get_executor(cls) -> ThreadPoolExecutor:
-        if cls._executor is None:
-            cls._executor = ThreadPoolExecutor(max_workers=cls._executor_max_workers)
-        return cls._executor
 
     async def __aenter__(self) -> "AsyncSession":
         return self
@@ -1693,64 +1801,243 @@ class AsyncSession:
     async def __aexit__(self, *args: Any) -> None:
         pass
 
-    async def _run_in_executor(self, method_name: str, *args: Any, **kwargs: Any) -> Response:
+    async def _execute_async(self, method: str, url: str, **kwargs: Any) -> Response:
+        ffi, lib = _get_ffi()
+        callback = _get_async_callback(ffi, lib)
         loop = asyncio.get_running_loop()
-        executor = self._get_executor()
 
-        def _call() -> Response:
-            fn = getattr(self._session, method_name)
-            return fn(*args, **kwargs)
+        # Build RequestOptions (same as sync path)
+        keep_alive: list = []
+        opts = ffi.new("RequestOptions *")
+        keep_alive.append(opts)
 
-        return await loop.run_in_executor(executor, _call)
+        c_method = ffi.new("char[]", method.encode("utf-8"))
+        c_url = ffi.new("char[]", url.encode("utf-8"))
+        keep_alive.extend([c_method, c_url])
+        opts.method = c_method
+        opts.url = c_url
 
-    async def typed_request(self, req: Request) -> Response:
-        """异步执行 :class:`Request` 强类型请求。
+        # Headers
+        headers = kwargs.pop("headers", None)
+        hdr_ptr, hdr_len = _build_headers(ffi, headers, keep_alive)
+        opts.headers = hdr_ptr
+        opts.headers_len = hdr_len
 
-        Execute a :class:`Request` strongly-typed request asynchronously.
+        header_order = kwargs.pop("header_order", None)
+        ho_ptr, ho_len = _build_string_array(ffi, header_order, keep_alive)
+        opts.header_order = ho_ptr
+        opts.header_order_len = ho_len
+
+        # Body
+        body = kwargs.pop("body", None)
+        if body is not None:
+            c_body = ffi.new("char[]", body)
+            keep_alive.append(c_body)
+            opts.body = c_body
+            opts.body_len = len(body)
+
+        # Overrides (use defaults from the session, overridden by kwargs)
+        def _val(name: str, as_bool: bool = False):
+            v = kwargs.pop(name, None)
+            if v is None:
+                v = self._session.defaults[name]
+            if as_bool:
+                return 1 if v else 0
+            return v
+
+        opts.timeout_seconds = _val("timeout_seconds")
+        opts.timeout_milliseconds = _val("timeout_milliseconds")
+        opts.follow_redirects = _val("follow_redirects", True)
+        opts.insecure_skip_verify = _val("insecure_skip_verify", True)
+        opts.force_http1 = _val("force_http1", True)
+        opts.with_random_tls_extension_order = _val("with_random_tls_extension_order", True)
+        opts.with_protocol_racing = _val("with_protocol_racing", True)
+        opts.max_idle_connections = _val("max_idle_connections")
+        opts.max_idle_connections_per_host = _val("max_idle_connections_per_host")
+        opts.max_connections_per_host = _val("max_connections_per_host")
+        opts.disable_keep_alives = _val("disable_keep_alives", True)
+        opts.disable_compression = _val("disable_compression", True)
+        opts.idle_conn_timeout_seconds = _val("idle_conn_timeout_seconds")
+        opts.max_response_header_bytes = _val("max_response_header_bytes")
+        opts.write_buffer_size = _val("write_buffer_size")
+        opts.read_buffer_size = _val("read_buffer_size")
+        opts.allow_empty_cookies = _val("allow_empty_cookies", True)
+        opts.without_cookie_jar = _val("without_cookie_jar", True)
+        opts.disable_http3 = _val("disable_http3", True)
+        opts.disable_ipv4 = _val("disable_ipv4", True)
+        opts.disable_ipv6 = _val("disable_ipv6", True)
+        opts.catch_panics = _val("catch_panics", True)
+        opts.with_debug = _val("with_debug", True)
+
+        # String fields
+        for name, field in [
+            ("client_identifier", "client_identifier"),
+            ("proxy", "proxy"),
+            ("server_name_overwrite", "server_name_overwrite"),
+            ("request_host_override", "request_host_override"),
+            ("local_address", "local_address"),
+        ]:
+            c_val = _c_string(ffi, _val(name))
+            setattr(opts, field, c_val)
+            if c_val != ffi.NULL:
+                keep_alive.append(c_val)
+
+        # Pseudo-header orders
+        pho = _val("pseudo_header_order")
+        ph_ptr, ph_len = _build_string_array(ffi, pho, keep_alive)
+        opts.pseudo_header_order = ph_ptr
+        opts.pseudo_header_order_len = ph_len
+
+        h3pho = _val("h3_pseudo_header_order")
+        h3ph_ptr, h3ph_len = _build_string_array(ffi, h3pho, keep_alive)
+        opts.h3_pseudo_header_order = h3ph_ptr
+        opts.h3_pseudo_header_order_len = h3ph_len
+
+        # Default/connect headers
+        dh = _val("default_headers")
+        dh_ptr, dh_len = _build_headers(ffi, dh, keep_alive)
+        opts.default_headers = dh_ptr
+        opts.default_headers_len = dh_len
+
+        ch = _val("connect_headers")
+        ch_ptr, ch_len = _build_headers(ffi, ch, keep_alive)
+        opts.connect_headers = ch_ptr
+        opts.connect_headers_len = ch_len
+
+        # Certificate pinning
+        cp = _val("certificate_pinning_hosts")
+        cp_ptr, cp_len = _build_pin_entries(ffi, cp, keep_alive)
+        opts.certificate_pinning_hosts = cp_ptr
+        opts.certificate_pinning_hosts_len = cp_len
+        opts.with_default_bad_pin_handler = _val("with_default_bad_pin_handler", True)
+
+        # Request cookies
+        rc = _val("request_cookies")
+        rc_ptr, rc_len = _build_headers(ffi, rc, keep_alive)
+        opts.request_cookies = rc_ptr
+        opts.request_cookies_len = rc_len
+
+        # Client certificates
+        cc = _val("client_certificates")
+        cc_ptr, cc_len = _build_client_certificates(ffi, cc, keep_alive)
+        opts.client_certificates = cc_ptr
+        opts.client_certificates_len = cc_len
+
+        # Custom TLS client
+        ctc = _val("custom_tls_client")
+        ctc_ptr = _build_custom_tls_client(ffi, ctc, keep_alive)
+        opts.custom_tls_client = ctc_ptr
+
+        # ---- streaming fields (injected by stream_to_file) -----------------
+        stream_path = kwargs.pop("_stream_output_path", ffi.NULL)
+        stream_bs = kwargs.pop("_stream_output_block_size", 0)
+        stream_eof = kwargs.pop("_stream_output_eof_symbol", ffi.NULL)
+        stream_keep = kwargs.pop("_stream_keep_alive", None)
+        if stream_keep is not None:
+            keep_alive.extend(stream_keep)
+        opts.stream_output_path = stream_path
+        opts.stream_output_block_size = stream_bs
+        opts.stream_output_eof_symbol = stream_eof
+
+        # Register Future
+        request_id = _next_request_id()
+        future: asyncio.Future = loop.create_future()
+        with _pending_lock:
+            _pending_requests[request_id] = future
+
+        # Step 1-2: Call RequestAsync — Go deep-copies, dispatches goroutine,
+        # returns immediately.  Python can free keep_alive memory after return.
+        ret = lib.RequestAsync(opts, request_id, callback)
+
+        if ret != 0:
+            with _pending_lock:
+                _pending_requests.pop(request_id, None)
+            raise RuntimeError("RequestAsync failed — opts or callback is nil")
+
+        # Await the Future — event loop is free to run other tasks
+        return await future
+
+    async def stream_to_file(
+        self,
+        # HTTP 方法 / HTTP method
+        method: str,
+        # 请求 URL / Request URL
+        url: str,
+        # 输出文件路径 / Output file path
+        output_path: str,
+        *,
+        # 请求头字典 / Request headers dict
+        headers: Optional[Dict[str, str]] = None,
+        # 请求头发送顺序 / Header send order
+        header_order: Optional[List[str]] = None,
+        # 请求体原始字节串 / Request body as raw bytes
+        body: Optional[bytes] = None,
+        # 块大小（字节） / Chunk size per read (bytes)
+        chunk_size: int = 8192,
+        # 可选的 EOF 标记字符串 / Optional EOF marker string
+        eof_marker: Optional[str] = None,
+        **kwargs: Any,
+    ) -> Response:
+        """执行请求并将响应体流式写入磁盘（异步）。
+
+        Execute a request and stream the response body to disk (async).
         """
-        return await self._run_in_executor("typed_request", req)
+        ffi, _ = _get_ffi()
+
+        keep_alive: list = []
+        c_path = _c_string(ffi, output_path)
+        keep_alive.append(c_path)
+
+        c_eof = _c_string(ffi, eof_marker)
+        if c_eof != ffi.NULL:
+            keep_alive.append(c_eof)
+
+        return await self._execute_async(
+            method,
+            url,
+            headers=headers,
+            header_order=header_order,
+            body=body,
+            _stream_output_path=c_path,
+            _stream_output_block_size=chunk_size,
+            _stream_output_eof_symbol=c_eof,
+            _stream_keep_alive=keep_alive,
+            **kwargs,
+        )
 
     async def execute_request(self, method: str, url: str, **kwargs: Any) -> Response:
-        """异步执行 HTTP 请求，参数与 :meth:`Session.execute_request` 一致。
-
-        Execute an HTTP request asynchronously; parameters match
-        :meth:`Session.execute_request`.
-        """
-        return await self._run_in_executor("execute_request", method, url, **kwargs)
+        return await self._execute_async(method, url, **kwargs)
 
     async def get(self, url: str, **kwargs: Any) -> Response:
-        """异步 GET 请求。  /  Async GET request."""
-        return await self._run_in_executor("get", url, **kwargs)
+        return await self._execute_async("GET", url, **kwargs)
 
     async def post(self, url: str, **kwargs: Any) -> Response:
-        """异步 POST 请求。  /  Async POST request."""
-        return await self._run_in_executor("post", url, **kwargs)
+        return await self._execute_async("POST", url, **kwargs)
 
     async def head(self, url: str, **kwargs: Any) -> Response:
-        """异步 HEAD 请求。  /  Async HEAD request."""
-        return await self._run_in_executor("head", url, **kwargs)
+        return await self._execute_async("HEAD", url, **kwargs)
 
     async def put(self, url: str, **kwargs: Any) -> Response:
-        """异步 PUT 请求。  /  Async PUT request."""
-        return await self._run_in_executor("put", url, **kwargs)
+        return await self._execute_async("PUT", url, **kwargs)
 
     async def delete(self, url: str, **kwargs: Any) -> Response:
-        """异步 DELETE 请求。  /  Async DELETE request."""
-        return await self._run_in_executor("delete", url, **kwargs)
+        return await self._execute_async("DELETE", url, **kwargs)
 
     async def patch(self, url: str, **kwargs: Any) -> Response:
-        """异步 PATCH 请求。  /  Async PATCH request."""
-        return await self._run_in_executor("patch", url, **kwargs)
+        return await self._execute_async("PATCH", url, **kwargs)
 
     @staticmethod
     async def clear_client_pool() -> None:
-        """异步关闭全局 Go 客户端连接池中所有空闲连接。
+        """Close all idle connections in the global Go client pool.
 
-        Asynchronously close all idle connections in the global Go client pool.
+        Calls the Go C function directly.  ClearClientPool iterates the
+        internal client map and closes idle connections — it is fast and
+        non-blocking, so no thread pool is needed (Constraint 4).
         """
-        loop = asyncio.get_running_loop()
-        executor = AsyncSession._get_executor()
-        await loop.run_in_executor(executor, Session.clear_client_pool)
+        _, lib = _get_ffi()
+        lib.ClearClientPool()
+        # Yield to the event loop to be cooperative
+        await asyncio.sleep(0)
 
 
 # Convenience top-level function
