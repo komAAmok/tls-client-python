@@ -316,7 +316,7 @@ func (c *httpClient) SetProxy(proxyUrl string) error {
 
 	err := c.applyProxy()
 	if err != nil {
-		c.logger.Error("failed to apply new proxy. rolling back to previous used proxy: %w", err)
+		c.logger.Error("failed to apply new proxy. rolling back to previous used proxy: %v", err)
 		c.config.proxyUrl = currentProxy
 
 		return c.applyProxy()
