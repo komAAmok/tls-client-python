@@ -255,6 +255,15 @@ class Request(TypedDict, total=False):
     Contains JA3 string, cipher suites, ECH, ALPN, HTTP/2/3 settings, etc.
     (26 fields).  When set, ``client_identifier`` is ignored.
     """
+    client_certificates: Optional[List[Dict[str, bytes]]]
+    """客户端证书列表，用于 mTLS 双向认证。
+
+    每个元素为 ``{'cert_pem': bytes, 'key_pem': bytes}``。
+
+    Client certificate list for mTLS mutual authentication.
+
+    Each element is ``{'cert_pem': bytes, 'key_pem': bytes}``.
+    """
 
 
 # ---------------------------------------------------------------------------
@@ -288,6 +297,13 @@ typedef struct {
     const char* kdfId;
     const char* aeadId;
 } CandidateCipherSuite;
+
+typedef struct {
+    const char* cert_pem;
+    int   cert_pem_len;
+    const char* key_pem;
+    int   key_pem_len;
+} ClientCertificate;
 
 typedef struct {
     const char** h2_settings_keys;
@@ -387,6 +403,8 @@ typedef struct {
     int   with_default_bad_pin_handler;
     HttpHeader* request_cookies;
     int   request_cookies_len;
+    ClientCertificate* client_certificates;
+    int   client_certificates_len;
     CustomTlsClient* custom_tls_client;
 } RequestOptions;
 
@@ -470,6 +488,23 @@ def _get_ffi():
 # Helpers
 # ---------------------------------------------------------------------------
 
+def _charset_from_content_type(content_type: str) -> str:
+    """Extract charset from Content-Type header, default to 'utf-8'.
+
+    Mirrors golang.org/x/net/html/charset.NewReader behaviour.
+    """
+    if not content_type:
+        return "utf-8"
+    # Parse 'text/html; charset=gbk' → 'gbk'
+    for part in content_type.lower().split(";"):
+        part = part.strip()
+        if part.startswith("charset=") or part.startswith("charset ="):
+            enc = part.split("=", 1)[1].strip().strip('"').strip("'")
+            if enc:
+                return enc
+    return "utf-8"
+
+
 def _c_string(ffi, value: Optional[str]) -> Any:
     """Allocate a null-terminated C string (or NULL)."""
     if value is None:
@@ -540,6 +575,33 @@ def _build_pin_entries(ffi, pins: Optional[Dict[str, List[str]]], keep_alive: li
         else:
             arr[i].pins = ffi.NULL
             arr[i].pins_len = 0
+
+    return arr, n
+
+
+def _build_client_certificates(ffi, certs: Optional[List[Dict[str, bytes]]], keep_alive: list):
+    """Convert a Python list[dict] → C ClientCertificate[].
+
+    Each dict must have 'cert_pem' and 'key_pem' keys with bytes values.
+    """
+    if not certs:
+        return ffi.NULL, 0
+
+    n = len(certs)
+    arr = ffi.new("ClientCertificate[]", n)
+    keep_alive.append(arr)
+
+    for i, c in enumerate(certs):
+        cert_bytes = c.get("cert_pem", b"")
+        key_bytes = c.get("key_pem", b"")
+
+        cc = ffi.new("char[]", cert_bytes)
+        ck = ffi.new("char[]", key_bytes)
+        keep_alive.extend([cc, ck])
+        arr[i].cert_pem = cc
+        arr[i].cert_pem_len = len(cert_bytes)
+        arr[i].key_pem = ck
+        arr[i].key_pem_len = len(key_bytes)
 
     return arr, n
 
@@ -756,6 +818,8 @@ class Session:
         # ── 自定义 TLS ──  /  Custom TLS ──
         # 完全自定义的 TLS 客户端配置 (26 fields) / Fully custom TLS client configuration
         custom_tls_client: Optional[Dict[str, Any]] = None,
+        # 客户端证书 (mTLS) / Client certificates for mTLS
+        client_certificates: Optional[List[Dict[str, bytes]]] = None,
         # ── 连接池调优 ──  /  Connection Pool Tuning ──
         # 全局最大空闲连接数 / Global max idle connections
         max_idle_connections: int = 0,
@@ -815,7 +879,7 @@ class Session:
                 1 if with_default_bad_pin_handler else 0
             ),
             "request_cookies": request_cookies,
-            "custom_tls_client": custom_tls_client,
+            "client_certificates": client_certificates,
             "max_idle_connections": max_idle_connections,
             "max_idle_connections_per_host": max_idle_connections_per_host,
             "max_connections_per_host": max_connections_per_host,
@@ -941,6 +1005,8 @@ class Session:
         with_default_bad_pin_handler: Optional[bool] = None,
         # 覆盖预置 Cookie 字典 / Override pre-populated cookie dict
         request_cookies: Optional[Dict[str, str]] = None,
+        # 覆盖客户端证书列表 / Override client certificate list
+        client_certificates: Optional[List[Dict[str, bytes]]] = None,
         # 覆盖自定义 TLS 客户端配置 / Override custom TLS client configuration
         custom_tls_client: Optional[Dict[str, Any]] = None,
         # 覆盖全局最大空闲连接数 / Override global max idle connections
@@ -1027,6 +1093,11 @@ class Session:
             ffi, _val("request_cookies", request_cookies), keep_alive
         )
 
+        # ---- build client_certificates array --------------------------------
+        cc_ptr, cc_len = _build_client_certificates(
+            ffi, _val("client_certificates", client_certificates), keep_alive
+        )
+
         # ---- build custom_tls_client --------------------------------------
         ctc_ptr = _build_custom_tls_client(
             ffi, _val("custom_tls_client", custom_tls_client), keep_alive
@@ -1085,6 +1156,8 @@ class Session:
         )
         opts.request_cookies = rc_ptr
         opts.request_cookies_len = rc_len
+        opts.client_certificates = cc_ptr
+        opts.client_certificates_len = cc_len
         opts.custom_tls_client = ctc_ptr
 
         opts.timeout_seconds = _val("timeout_seconds", timeout)
@@ -1170,9 +1243,24 @@ class Session:
                     v = ffi.string(h.value).decode("utf-8", errors="replace")
                     response_headers.setdefault(k, []).append(v)
 
+        # ---- charset detection & text decoding ---------------------------
+        ct = ""
+        for k, v in response_headers.items():
+            if k.lower() == "content-type":
+                ct = v[0] if v else ""
+                break
+        encoding = _charset_from_content_type(ct)
+        try:
+            text = body_bytes.decode(encoding)
+        except (UnicodeDecodeError, LookupError):
+            encoding = "utf-8"
+            text = body_bytes.decode("utf-8", errors="replace")
+
         return {
             "status_code": status,
             "body": body_bytes,
+            "text": text,
+            "encoding": encoding,
             "headers": response_headers,
         }
 

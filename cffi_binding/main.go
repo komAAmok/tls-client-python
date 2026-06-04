@@ -31,6 +31,13 @@ typedef struct {
 } CandidateCipherSuite;
 
 typedef struct {
+    const char* cert_pem;
+    int   cert_pem_len;
+    const char* key_pem;
+    int   key_pem_len;
+} ClientCertificate;
+
+typedef struct {
     const char** h2_settings_keys;
     unsigned int* h2_settings_values;
     int   h2_settings_len;
@@ -128,6 +135,8 @@ typedef struct {
     int   with_default_bad_pin_handler;
     HttpHeader* request_cookies;
     int   request_cookies_len;
+    ClientCertificate* client_certificates;
+    int   client_certificates_len;
     CustomTlsClient* custom_tls_client;
 } RequestOptions;
 
@@ -248,6 +257,21 @@ func buildCacheKey(opts *C.RequestOptions) string {
 				for j := 0; j < pinLen; j++ {
 					fmt.Fprintf(h, "%s,", C.GoString(pinSlice[j]))
 				}
+			}
+		}
+	}
+	// Client certificates – hash the raw PEM bytes
+	ccLen := int(opts.client_certificates_len)
+	if ccLen > 0 && opts.client_certificates != nil {
+		ccSlice := unsafe.Slice(opts.client_certificates, ccLen)
+		for i := 0; i < ccLen; i++ {
+			if cpl := int(ccSlice[i].cert_pem_len); cpl > 0 && ccSlice[i].cert_pem != nil {
+				certBytes := C.GoBytes(unsafe.Pointer(ccSlice[i].cert_pem), C.int(cpl))
+				fmt.Fprintf(h, "|cc:%x", sha256.Sum256(certBytes))
+			}
+			if kpl := int(ccSlice[i].key_pem_len); kpl > 0 && ccSlice[i].key_pem != nil {
+				keyBytes := C.GoBytes(unsafe.Pointer(ccSlice[i].key_pem), C.int(kpl))
+				fmt.Fprintf(h, "|ck:%x", sha256.Sum256(keyBytes))
 			}
 		}
 	}
@@ -516,6 +540,10 @@ func buildClient(opts *C.RequestOptions) (tls_client.HttpClient, error) {
 		DisableKeepAlives:      int(opts.disable_keep_alives) == 1,
 		DisableCompression:     int(opts.disable_compression) == 1,
 	}
+	// Client certificates for mTLS
+	if ccLen := int(opts.client_certificates_len); ccLen > 0 && opts.client_certificates != nil {
+		transportOpts.Certificates = cClientCerts(opts.client_certificates, ccLen)
+	}
 	if idleSec := int(opts.idle_conn_timeout_seconds); idleSec > 0 {
 		d := time.Duration(idleSec) * time.Second
 		transportOpts.IdleConnTimeout = &d
@@ -593,6 +621,26 @@ func cPinsToMap(entries *C.PinEntry, length int) map[string][]string {
 	return m
 }
 
+// cClientCerts converts a C ClientCertificate array to Go []tls.Certificate
+// using tls.X509KeyPair to parse each PEM-encoded cert/key pair.
+func cClientCerts(entries *C.ClientCertificate, length int) []tls.Certificate {
+	if length <= 0 || entries == nil {
+		return nil
+	}
+	certs := make([]tls.Certificate, 0, length)
+	slice := unsafe.Slice(entries, length)
+	for i := 0; i < length; i++ {
+		certPEM := C.GoBytes(unsafe.Pointer(slice[i].cert_pem), C.int(slice[i].cert_pem_len))
+		keyPEM := C.GoBytes(unsafe.Pointer(slice[i].key_pem), C.int(slice[i].key_pem_len))
+		cert, err := tls.X509KeyPair(certPEM, keyPEM)
+		if err != nil {
+			continue // skip malformed certs silently
+		}
+		certs = append(certs, cert)
+	}
+	return certs
+}
+
 // cStrSlice converts a C const char** to Go []string.
 func cStrSlice(arr **C.char, length int) []string {
 	if length <= 0 || arr == nil {
@@ -649,7 +697,8 @@ func buildCustomProfileFromC(ctc *C.CustomTlsClient) (profiles.ClientProfile, er
 		certCompressionAlgos, uint16(ctc.record_size_limit),
 	)
 	if err != nil {
-		return nil, fmt.Errorf("JA3 spec factory: %w", err)
+		var zero profiles.ClientProfile
+		return zero, fmt.Errorf("JA3 spec factory: %w", err)
 	}
 
 	clientHelloId := tls.ClientHelloID{
@@ -667,7 +716,7 @@ func buildCustomProfileFromC(ctc *C.CustomTlsClient) (profiles.ClientProfile, er
 		for i := 0; i < h2l; i++ {
 			k := C.GoString(keySlice[i])
 			if resolvedKey, ok := tls_client.H2SettingsMap[k]; ok {
-				resolvedH2Settings[resolvedKey] = valSlice[i]
+				resolvedH2Settings[resolvedKey] = uint32(valSlice[i])
 			}
 		}
 	}
@@ -691,7 +740,7 @@ func buildCustomProfileFromC(ctc *C.CustomTlsClient) (profiles.ClientProfile, er
 		for i := 0; i < h3l; i++ {
 			k := C.GoString(keySlice[i])
 			if resolvedKey, ok := tls_client.H3SettingsMap[k]; ok {
-				resolvedH3Settings[resolvedKey] = valSlice[i]
+				resolvedH3Settings[resolvedKey] = uint64(valSlice[i])
 			}
 		}
 	}
@@ -714,9 +763,9 @@ func buildCustomProfileFromC(ctc *C.CustomTlsClient) (profiles.ClientProfile, er
 		priorityFrames = make([]http2.Priority, pfl)
 		for i := 0; i < pfl; i++ {
 			priorityFrames[i] = http2.Priority{
-				StreamID: pfSlice[i].streamID,
+				StreamID: uint32(pfSlice[i].streamID),
 				PriorityParam: http2.PriorityParam{
-					StreamDep: pfSlice[i].priorityParam.streamDep,
+					StreamDep: uint32(pfSlice[i].priorityParam.streamDep),
 					Exclusive: pfSlice[i].priorityParam.exclusive != 0,
 					Weight:    uint8(pfSlice[i].priorityParam.weight),
 				},
@@ -728,7 +777,7 @@ func buildCustomProfileFromC(ctc *C.CustomTlsClient) (profiles.ClientProfile, er
 	var headerPriority *http2.PriorityParam
 	if ctc.header_priority != nil {
 		headerPriority = &http2.PriorityParam{
-			StreamDep: ctc.header_priority.streamDep,
+			StreamDep: uint32(ctc.header_priority.streamDep),
 			Exclusive: ctc.header_priority.exclusive != 0,
 			Weight:    uint8(ctc.header_priority.weight),
 		}

@@ -56,6 +56,13 @@ typedef struct {
 } CandidateCipherSuite;
 
 typedef struct {
+    const char* cert_pem;
+    int   cert_pem_len;
+    const char* key_pem;
+    int   key_pem_len;
+} ClientCertificate;
+
+typedef struct {
     const char** h2_settings_keys;
     unsigned int* h2_settings_values;
     int   h2_settings_len;
@@ -153,6 +160,8 @@ typedef struct {
     int   with_default_bad_pin_handler;
     HttpHeader* request_cookies;
     int   request_cookies_len;
+    ClientCertificate* client_certificates;
+    int   client_certificates_len;
     CustomTlsClient* custom_tls_client;
 } RequestOptions;
 
