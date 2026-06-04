@@ -2,6 +2,8 @@ package main
 
 /*
 #include <stdlib.h>
+#include <stdint.h>
+#include <string.h>
 
 typedef struct {
     const char* key;
