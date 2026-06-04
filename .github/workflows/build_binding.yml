@@ -13,6 +13,9 @@ permissions:
   actions: write
 
 jobs:
+  # -----------------------------------------------------------------------
+  # 1. 原生或无痛交叉编译任务 (AMD64 及 macOS 混合矩阵)
+  # -----------------------------------------------------------------------
   build:
     name: Build ${{ matrix.goos }}-${{ matrix.goarch }}
     runs-on: ${{ matrix.runner }}
@@ -20,18 +23,13 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          # ---- Linux ------------------------------------------------------
+          # ---- Linux AMD64 宿主机原生编译 ----
           - runner: ubuntu-latest
             goos: linux
             goarch: amd64
             ext: .so
 
-          - runner: ubuntu-latest
-            goos: linux
-            goarch: arm64
-            ext: .so
-
-          # ---- macOS ------------------------------------------------------
+          # ---- macOS (Clang 天生支持跨架构，无需额外交叉编译器) ----
           - runner: macos-latest
             goos: darwin
             goarch: amd64
@@ -42,7 +40,7 @@ jobs:
             goarch: arm64
             ext: .dylib
 
-          # ---- Windows ----------------------------------------------------
+          # ---- Windows AMD64 ----
           - runner: windows-latest
             goos: windows
             goarch: amd64
@@ -76,7 +74,7 @@ jobs:
           if-no-files-found: error
 
   # -----------------------------------------------------------------------
-  # Cross-compile Linux variants from a single ubuntu runner
+  # 2. Linux 严格交叉编译任务 (收拢至单台 Ubuntu 依赖特定 GCC 编译)
   # -----------------------------------------------------------------------
   build-linux-cross:
     name: Cross ${{ matrix.label }}
@@ -85,10 +83,20 @@ jobs:
       fail-fast: false
       matrix:
         include:
+          # ARMv7 (32位) 交叉编译配置
           - label: linux-armv7
             goarch: arm
             goarm: "7"
+            compiler_pkg: gcc-arm-linux-gnueabihf
             cc: arm-linux-gnueabihf-gcc
+            ext: .so
+
+          # ARM64 (64位) 交叉编译配置 (从上面移到这里修复报错)
+          - label: linux-arm64
+            goarch: arm64
+            goarm: ""
+            compiler_pkg: gcc-aarch64-linux-gnu
+            cc: aarch64-linux-gnu-gcc
             ext: .so
 
     steps:
@@ -103,7 +111,7 @@ jobs:
       - name: Install cross-compiler
         run: |
           sudo apt-get update
-          sudo apt-get install -y gcc-arm-linux-gnueabihf
+          sudo apt-get install -y ${{ matrix.compiler_pkg }}
 
       - name: Build shared library
         working-directory: cffi_binding
@@ -125,7 +133,7 @@ jobs:
           if-no-files-found: error
 
   # -----------------------------------------------------------------------
-  # Create a single release bundle
+  # 3. 统一发布打包
   # -----------------------------------------------------------------------
   release:
     name: Create Release
