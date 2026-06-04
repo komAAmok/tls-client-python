@@ -4,15 +4,16 @@ on:
   push:
     branches: [master, main]
     paths:
-      - 'cffi_binding/**' # 只有当 Go 核心代码或绑定层改变时才触发编译，节约 Actions 额度
-  workflow_dispatch:      # 支持手动一键触发
+      - 'cffi_binding/**'
+      - 'tls_client/**'
+  workflow_dispatch:
 
 permissions:
-  contents: write         # 必须赋予写权限，否则无法自动提交二进制文件回项目路径
+  contents: write
 
 jobs:
   # -----------------------------------------------------------------------
-  # 1. 编译原生及 macOS 架构
+  # 1. Build native and macOS architectures
   # -----------------------------------------------------------------------
   build-native:
     name: Build ${{ matrix.goos }}-${{ matrix.goarch }}
@@ -36,6 +37,10 @@ jobs:
           - runner: windows-latest
             goos: windows
             goarch: amd64
+            ext: .dll
+          - runner: windows-latest
+            goos: windows
+            goarch: "386"
             ext: .dll
 
     steps:
@@ -65,7 +70,7 @@ jobs:
           path: cffi_binding/dist/tls-client-${{ matrix.goos }}-${{ matrix.goarch }}${{ matrix.ext }}
 
   # -----------------------------------------------------------------------
-  # 2. 严格交叉编译 Linux ARM 架构
+  # 2. Cross-compile Linux ARM architectures
   # -----------------------------------------------------------------------
   build-linux-cross:
     name: Cross Linux-${{ matrix.goarch }}
@@ -83,6 +88,11 @@ jobs:
             goarm: ""
             compiler_pkg: gcc-aarch64-linux-gnu
             cc: aarch64-linux-gnu-gcc
+            ext: .so
+          - goarch: "386"
+            goarm: ""
+            compiler_pkg: gcc-multilib
+            cc: gcc
             ext: .so
 
     steps:
@@ -118,20 +128,20 @@ jobs:
           path: cffi_binding/dist/tls-client-linux-${{ matrix.goarch }}${{ matrix.ext }}
 
   # -----------------------------------------------------------------------
-  # 3. 核心收拢：自动下载所有编译产物并提交回项目路径
+  # 3. Sync: download all artifacts and commit to tls_client/bin/
   # -----------------------------------------------------------------------
   sync-to-project-path:
-    name: Sync Binaries into Project Path
+    name: Sync Binaries into tls_client/bin/
     needs: [build-native, build-linux-cross]
     runs-on: ubuntu-latest
     steps:
       - name: Checkout Repository
         uses: actions/checkout@v4
         with:
-          token: ${{ secrets.GITHUB_TOKEN }} # 使用原生 Token 即可
+          token: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Create Target Binary Directory
-        run: mkdir -p cffi_binding/bin
+        run: mkdir -p tls_client/bin
 
       - name: Download All Artifacts
         uses: actions/download-artifact@v4
@@ -140,16 +150,15 @@ jobs:
 
       - name: Organize and Move Binaries
         run: |
-          # 检索临时目录，将所有编译好的 .so, .dll, .dylib 提取到项目源码的 bin 目录下
-          find tmp_artifacts/ -type f \( -name "*.so" -o -name "*.dll" -o -name "*.dylib" \) -exec cp {} cffi_binding/bin/ \;
-          echo "=== 移入项目路径下的核心文件列表 ==="
-          ls -la cffi_binding/bin/
+          find tmp_artifacts/ -type f \( -name "*.so" -o -name "*.dll" -o -name "*.dylib" \) -exec cp {} tls_client/bin/ \;
+          echo "=== Binaries in tls_client/bin/ ==="
+          ls -la tls_client/bin/
 
       - name: Auto Commit and Push back to Repo
         uses: stefanzweifel/git-auto-commit-action@v5
         with:
           commit_message: "chore: automated cross-compiled cores synchronization [skip ci]"
           branch: ${{ github.head_ref || github.ref_name }}
-          file_pattern: 'cffi_binding/bin/*'
+          file_pattern: 'tls_client/bin/*'
           commit_user_name: "github-actions[bot]"
           commit_user_email: "github-actions[bot]@users.noreply.github.com"

@@ -1,0 +1,7 @@
+# tls-client-python MANIFEST.in
+# Include pre-compiled shared libraries for all platforms in the source distribution.
+
+recursive-include tls_client/bin *.so *.dylib *.dll
+include pyproject.toml
+include Readme.md
+include LICENSE

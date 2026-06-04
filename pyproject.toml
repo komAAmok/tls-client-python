@@ -1,0 +1,69 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "tls-client-python"
+version = "1.0.0"
+description = "High-performance Python binding for bogdanfinn/tls-client via CFFI – zero-copy, panic-proof, full TLS fingerprint control"
+readme = { file = "Readme.md", content-type = "text/markdown" }
+license = "MIT"
+authors = [
+    { name = "bogdanfinn", email = "bogdanfinn@users.noreply.github.com" },
+]
+keywords = [
+    "tls",
+    "tls-fingerprint",
+    "http-client",
+    "ja3",
+    "http2",
+    "http3",
+    "quic",
+    "cffi",
+    "akamai",
+    "cloudflare",
+    "anti-bot",
+]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Intended Audience :: Developers",
+    "License :: OSI Approved :: MIT License",
+    "Operating System :: MacOS :: MacOS X",
+    "Operating System :: Microsoft :: Windows",
+    "Operating System :: POSIX :: Linux",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.8",
+    "Programming Language :: Python :: 3.9",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Programming Language :: Python :: Implementation :: CPython",
+    "Topic :: Internet :: WWW/HTTP",
+    "Topic :: Security",
+    "Topic :: Software Development :: Libraries :: Python Modules",
+]
+requires-python = ">=3.8"
+dependencies = [
+    "cffi>=1.16",
+]
+
+[project.urls]
+Homepage = "https://github.com/bogdanfinn/tls-client"
+Documentation = "https://github.com/bogdanfinn/tls-client#readme"
+Repository = "https://github.com/bogdanfinn/tls-client"
+Issues = "https://github.com/bogdanfinn/tls-client/issues"
+Changelog = "https://github.com/bogdanfinn/tls-client/releases"
+
+[tool.setuptools]
+packages = ["tls_client"]
+include-package-data = true
+zip-safe = false
+
+[tool.setuptools.package-data]
+tls_client = [
+    "bin/*.so",
+    "bin/*.dylib",
+    "bin/*.dll",
+    "py.typed",
+]

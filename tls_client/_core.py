@@ -1,7 +1,6 @@
 #!/usr/bin/env python3
 """
-tls_client_wrapper.py  –  High-performance Python binding for
-github.com/bogdanfinn/tls-client via CFFI API mode.
+tls_client._core  –  Low‑level CFFI binding for the Go tls-client engine.
 
 Architecture
 ────────────
@@ -26,6 +25,7 @@ Classes
 from __future__ import annotations
 
 import asyncio
+import ctypes
 import os
 import platform
 import sys
@@ -267,7 +267,7 @@ class Request(TypedDict, total=False):
 
 
 # ---------------------------------------------------------------------------
-# CFFI bootstrap – identical cdef to build_building.py
+# CFFI cdef – must stay byte‑identical with main.go `import "C"` block
 # ---------------------------------------------------------------------------
 
 CDEF = """
@@ -413,8 +413,12 @@ typedef struct {
     char* body;
     int   body_len;
     char* err_msg;
+    char* target_url;
+    char* used_protocol;
     HttpHeader* response_headers;
     int   response_headers_len;
+    HttpHeader* cookies;
+    int   cookies_len;
 } ResponseResult;
 
 ResponseResult* ExecuteRequest(RequestOptions* opts);
@@ -423,43 +427,149 @@ void           ClearClientPool(void);
 """
 
 # ---------------------------------------------------------------------------
-# Library loading
+# Platform detection & shared‑library loading
 # ---------------------------------------------------------------------------
 
-def _find_library() -> str:
-    """Locate the compiled shared library next to this file or in dist/."""
-    candidates: List[Path] = []
+def _detect_libc() -> str:
+    """Detect the C library flavour on Linux.  Returns ``"glibc"``, ``"musl"``, or ``"unknown"``.
 
-    here = Path(__file__).resolve().parent
-    dist = here / "dist"
+    This is important because a shared library compiled against glibc
+    will not load on a musl-based distribution (Alpine, Void musl, etc.)
+    and vice versa.
+    """
+    if sys.platform != "linux":
+        return "glibc"  # non‑Linux → irrelevant
+    try:
+        # musl defines a weak symbol __musl__ that glibc does not.
+        libc = ctypes.CDLL(None)  # the process itself
+        try:
+            libc.__musl__  # pylint: disable=pointless-statement
+            return "musl"
+        except AttributeError:
+            return "glibc"
+    except Exception:
+        # Fallback: check for /lib/ld-musl-*.so*
+        for entry in Path("/lib").glob("ld-musl-*"):
+            if entry.is_file():
+                return "musl"
+        return "unknown"
 
-    goos = {"darwin": "darwin", "linux": "linux", "win32": "windows"}.get(
+
+def _libc_suffix() -> str:
+    """Return an optional libc suffix for the library filename.
+
+    Alpine (musl) binaries carry a ``-musl`` suffix so they don't collide
+    with glibc builds on PyPI.
+    """
+    if sys.platform == "linux" and _detect_libc() == "musl":
+        return "-musl"
+    return ""
+
+
+def _go_os() -> str:
+    return {"darwin": "darwin", "linux": "linux", "win32": "windows"}.get(
         sys.platform, sys.platform
     )
-    goarch = {
+
+
+def _go_arch() -> str:
+    m = platform.machine().lower()
+    return {
         "x86_64": "amd64", "amd64": "amd64",
         "arm64": "arm64", "aarch64": "arm64",
         "armv7l": "arm", "armv6l": "arm",
         "i386": "386", "i686": "386",
-    }.get(platform.machine().lower(), platform.machine().lower())
-    ext = {"darwin": ".dylib", "linux": ".so", "win32": ".dll"}.get(sys.platform, ".so")
+    }.get(m, m)
 
-    name = f"tls-client-{goos}-{goarch}{ext}"
 
-    for base in (here, dist):
-        p = base / name
+def _shared_lib_ext() -> str:
+    if sys.platform == "darwin":
+        return ".dylib"
+    elif sys.platform == "win32":
+        return ".dll"
+    return ".so"
+
+
+def _shared_lib_name() -> str:
+    ext = _shared_lib_ext()
+    goos = _go_os()
+    goarch = _go_arch()
+    lc = _libc_suffix()
+    return f"tls-client-{goos}-{goarch}{lc}{ext}"
+
+
+def _find_library() -> str:
+    """Locate the platform‑appropriate shared library.
+
+    Search order:
+    1. ``TLS_CLIENT_LIB`` environment variable (explicit user override).
+    2. Bundled binary in ``tls_client/bin/`` (the package directory).
+    3. System‑level ``dist/`` directory next to this module (dev convenience).
+
+    Raises :exc:`FileNotFoundError` with a detailed diagnostic message if
+    no binary is found, including hints for Alpine/musl users.
+    """
+    # 1. Explicit override
+    env_lib = os.environ.get("TLS_CLIENT_LIB")
+    if env_lib:
+        p = Path(env_lib)
         if p.exists():
             return str(p)
+        raise FileNotFoundError(
+            f"TLS_CLIENT_LIB is set to '{env_lib}' but the file does not exist."
+        )
 
-    # Fallback: try explicit TLS_CLIENT_LIB env var
-    env_lib = os.environ.get("TLS_CLIENT_LIB")
-    if env_lib and Path(env_lib).exists():
-        return env_lib
+    name = _shared_lib_name()
+    here = Path(__file__).resolve().parent
 
-    raise FileNotFoundError(
-        f"Cannot find shared library '{name}'. "
-        f"Build it with: cd {here} && python build_binding.py"
+    # 2. Bundled binary in the package
+    bundled = here / "bin" / name
+    if bundled.exists():
+        return str(bundled)
+
+    # 3. Development convenience – dist/ directory next to this module
+    dev = here / "dist" / name
+    if dev.exists():
+        return str(dev)
+
+    # ---- diagnostic error message ----
+    parts = [
+        f"Cannot locate shared library '{name}'.",
+        "",
+        f"  Searched:  {bundled}",
+        f"             {dev}",
+    ]
+
+    if sys.platform == "linux":
+        libc = _detect_libc()
+        parts.append(f"  Detected libc: {libc}")
+        if libc == "musl":
+            parts.append(
+                "  This is an Alpine / musl-based system.  The pre-compiled glibc"
+            )
+            parts.append(
+                "  binary cannot be used.  Build a musl-compatible library via:"
+            )
+            parts.append(
+                "    cd cffi_binding && CGO_ENABLED=1 GOOS=linux GOARCH="
+                + _go_arch()
+                + " go build -buildmode=c-shared -o tls-client-linux-"
+                + _go_arch()
+                + "-musl.so ."
+            )
+        else:
+            parts.append(
+                "  Make sure the platform matches.  Expected: "
+                + _go_os()
+                + "/"
+                + _go_arch()
+            )
+
+    parts.append(
+        "  Set the TLS_CLIENT_LIB environment variable to point to the correct binary."
     )
+
+    raise FileNotFoundError("\n".join(parts))
 
 
 def _load_ffi():
@@ -468,7 +578,18 @@ def _load_ffi():
 
     ffi = FFI()
     ffi.cdef(CDEF)
-    lib = ffi.dlopen(_find_library())
+    libpath = _find_library()
+
+    try:
+        lib = ffi.dlopen(libpath)
+    except OSError as exc:
+        raise OSError(
+            f"Shared library at '{libpath}' failed to load. "
+            f"The binary may be corrupt, built for a different architecture, "
+            f"or missing system dependencies.\n"
+            f"Underlying error: {exc}"
+        ) from exc
+
     return ffi, lib
 
 
@@ -489,9 +610,9 @@ def _get_ffi():
 # ---------------------------------------------------------------------------
 
 def _charset_from_content_type(content_type: str) -> str:
-    """Extract charset from Content-Type header, default to 'utf-8'.
+    """Extract charset from Content-Type header, default to ``"utf-8"``.
 
-    Mirrors golang.org/x/net/html/charset.NewReader behaviour.
+    Mirrors ``golang.org/x/net/html/charset.NewReader`` behaviour.
     """
     if not content_type:
         return "utf-8"
@@ -506,14 +627,14 @@ def _charset_from_content_type(content_type: str) -> str:
 
 
 def _c_string(ffi, value: Optional[str]) -> Any:
-    """Allocate a null-terminated C string (or NULL)."""
+    """Allocate a null‑terminated C string (or ``ffi.NULL``)."""
     if value is None:
         return ffi.NULL
     return ffi.new("char[]", value.encode("utf-8"))
 
 
 def _build_headers(ffi, headers: Optional[Dict[str, str]], keep_alive: list):
-    """Convert a Python dict → C HttpHeader[]."""
+    """Convert a Python dict → C HttpHeader[].  Returns ``(ptr, length)``."""
     if not headers:
         return ffi.NULL, 0
 
@@ -532,7 +653,7 @@ def _build_headers(ffi, headers: Optional[Dict[str, str]], keep_alive: list):
 
 
 def _build_string_array(ffi, items: Optional[List[str]], keep_alive: list):
-    """Convert a Python list[str] → C const char**."""
+    """Convert a Python list[str] → C const char**.  Returns ``(ptr, length)``."""
     if not items:
         return ffi.NULL, 0
 
@@ -549,7 +670,7 @@ def _build_string_array(ffi, items: Optional[List[str]], keep_alive: list):
 
 
 def _build_pin_entries(ffi, pins: Optional[Dict[str, List[str]]], keep_alive: list):
-    """Convert a Python dict[str, list[str]] → C PinEntry[]."""
+    """Convert a Python dict[str, list[str]] → C PinEntry[].  Returns ``(ptr, length)``."""
     if not pins:
         return ffi.NULL, 0
 
@@ -580,9 +701,9 @@ def _build_pin_entries(ffi, pins: Optional[Dict[str, List[str]]], keep_alive: li
 
 
 def _build_client_certificates(ffi, certs: Optional[List[Dict[str, bytes]]], keep_alive: list):
-    """Convert a Python list[dict] → C ClientCertificate[].
+    """Convert a Python list[dict] → C ClientCertificate[].  Returns ``(ptr, length)``.
 
-    Each dict must have 'cert_pem' and 'key_pem' keys with bytes values.
+    Each dict must have ``"cert_pem"`` and ``"key_pem"`` keys with bytes values.
     """
     if not certs:
         return ffi.NULL, 0
@@ -607,11 +728,8 @@ def _build_client_certificates(ffi, certs: Optional[List[Dict[str, bytes]]], kee
 
 
 def _build_custom_tls_client(ffi, cfg: Optional[Dict[str, Any]], keep_alive: list):
-    """Convert a Python dict → C CustomTlsClient*.
-
-    All 26 CustomTlsClient fields are optional.  Returns ffi.NULL when
-    cfg is None or empty.
-    """
+    """Convert a Python dict → C CustomTlsClient*.  Returns ``ffi.NULL`` when
+    *cfg* is None or empty."""
     if not cfg:
         return ffi.NULL
 
@@ -751,6 +869,153 @@ def _build_custom_tls_client(ffi, cfg: Optional[Dict[str, Any]], keep_alive: lis
         ctc.header_priority = chp
 
     return ctc
+
+
+# ---------------------------------------------------------------------------
+# Response  –  requests‑style response object
+# ---------------------------------------------------------------------------
+
+class Response:
+    """HTTP 响应对象，兼容 requests 库风格。
+
+    A requests‑compatible HTTP response object.
+
+    Attributes
+    ----------
+    status_code : int
+        HTTP 状态码 / HTTP status code.
+    headers : dict
+        响应头字典 / Response headers.
+    content : bytes
+        原始响应体字节串 / Raw response body as bytes.
+    text : str
+        已解码的响应体文本 / Decoded response body text.
+    encoding : str
+        检测到的字符编码 / Detected charset encoding.
+    url : str or None
+        最终请求 URL（重定向后）/ Final URL after redirects.
+    cookies : dict
+        响应 Cookie 字典 / Response cookies dict.
+    used_protocol : str or None
+        实际使用的 HTTP 协议版本 / HTTP protocol version used.
+    """
+
+    __slots__ = (
+        "_status_code",
+        "_headers",
+        "_content",
+        "_text",
+        "_encoding",
+        "_url",
+        "_cookies",
+        "_used_protocol",
+    )
+
+    def __init__(
+        self,
+        status_code: int,
+        headers: Dict[str, List[str]],
+        content: bytes,
+        text: str,
+        encoding: str,
+        url: Optional[str] = None,
+        cookies: Optional[Dict[str, str]] = None,
+        used_protocol: Optional[str] = None,
+    ) -> None:
+        self._status_code = status_code
+        self._headers = headers
+        self._content = content
+        self._text = text
+        self._encoding = encoding
+        self._url = url
+        self._cookies = cookies or {}
+        self._used_protocol = used_protocol
+
+    # -- read‑only properties ----------------------------------------------
+
+    @property
+    def status_code(self) -> int:
+        """HTTP 状态码 / HTTP status code."""
+        return self._status_code
+
+    @property
+    def headers(self) -> Dict[str, List[str]]:
+        """响应头字典 / Response headers."""
+        return self._headers
+
+    @property
+    def content(self) -> bytes:
+        """原始响应体字节串 / Raw bytes body."""
+        return self._content
+
+    @property
+    def text(self) -> str:
+        """已解码的响应体文本 / Decoded text body."""
+        return self._text
+
+    @property
+    def encoding(self) -> str:
+        """文本编码 / Text encoding."""
+        return self._encoding
+
+    @property
+    def url(self) -> Optional[str]:
+        """最终请求 URL（重定向后）/ Final URL after redirects."""
+        return self._url
+
+    @property
+    def cookies(self) -> Dict[str, str]:
+        """响应 Cookie 字典 / Response cookies dict."""
+        return self._cookies
+
+    @property
+    def used_protocol(self) -> Optional[str]:
+        """使用的 HTTP 协议版本 / HTTP protocol version (e.g. ``"HTTP/2.0"``)."""
+        return self._used_protocol
+
+    @property
+    def ok(self) -> bool:
+        """状态码 < 400 时为 ``True``。  /  ``True`` if status_code < 400."""
+        return self._status_code < 400
+
+    @property
+    def reason(self) -> str:
+        """HTTP 状态文本 / HTTP reason phrase."""
+        from http.client import responses
+        return responses.get(self._status_code, "Unknown")
+
+    # -- public methods ----------------------------------------------------
+
+    def json(self, **kwargs: Any) -> Any:
+        """解析 JSON 响应体。  /  Parse response body as JSON.
+
+        Parameters are forwarded to :func:`json.loads`.
+        """
+        import json
+        return json.loads(self._text, **kwargs)
+
+    def raise_for_status(self) -> None:
+        """若状态码 ≥ 400，抛出 :exc:`RuntimeError`。
+
+        Raise :exc:`RuntimeError` if the status code indicates an error
+        (4xx client error or 5xx server error).
+        """
+        if self._status_code >= 400:
+            raise RuntimeError(
+                f"{self._status_code} {self.reason} for url: {self._url or '(unknown)'}"
+            )
+
+    # -- dunder methods ----------------------------------------------------
+
+    def __bool__(self) -> bool:
+        """``bool(resp)`` → ``resp.ok``。"""
+        return self.ok
+
+    def __repr__(self) -> str:
+        return f"<Response [{self._status_code}]>"
+
+    def __str__(self) -> str:
+        return self.__repr__()
 
 
 # ---------------------------------------------------------------------------
@@ -918,7 +1183,7 @@ class Session:
         # 可选的 EOF 标记字符串 / Optional EOF marker string
         eof_marker: Optional[str] = None,
         **kwargs: Any,
-    ) -> Dict[str, Any]:
+    ) -> Response:
         """执行请求并将响应体流式写入磁盘。
 
         Execute a request and stream the response body to disk.
@@ -1042,7 +1307,7 @@ class Session:
         # 覆盖调试日志 / Override debug logging
         with_debug: Optional[bool] = None,
         **kwargs: Any,
-    ) -> Dict[str, Any]:
+    ) -> Response:
         """通过 Go 引擎执行单次 HTTP 请求。
 
         Execute a single HTTP request through the Go engine.
@@ -1256,15 +1521,38 @@ class Session:
             encoding = "utf-8"
             text = body_bytes.decode("utf-8", errors="replace")
 
-        return {
-            "status_code": status,
-            "body": body_bytes,
-            "text": text,
-            "encoding": encoding,
-            "headers": response_headers,
-        }
+        # ---- cookies ----------------------------------------------------
+        response_cookies: Dict[str, str] = {}
+        ck_len = raw_res.cookies_len
+        if ck_len > 0 and raw_res.cookies != ffi.NULL:
+            for i in range(ck_len):
+                ck_entry = raw_res.cookies[i]
+                if ck_entry.key != ffi.NULL and ck_entry.value != ffi.NULL:
+                    cn = ffi.string(ck_entry.key).decode("utf-8", errors="replace")
+                    cv = ffi.string(ck_entry.value).decode("utf-8", errors="replace")
+                    response_cookies[cn] = cv
 
-    def typed_request(self, req: Request) -> Dict[str, Any]:
+        # ---- target URL & protocol --------------------------------------
+        target_url: Optional[str] = None
+        if raw_res.target_url != ffi.NULL:
+            target_url = ffi.string(raw_res.target_url).decode("utf-8", errors="replace")
+
+        used_protocol: Optional[str] = None
+        if raw_res.used_protocol != ffi.NULL:
+            used_protocol = ffi.string(raw_res.used_protocol).decode("utf-8", errors="replace")
+
+        return Response(
+            status_code=status,
+            headers=response_headers,
+            content=body_bytes,
+            text=text,
+            encoding=encoding,
+            url=target_url,
+            cookies=response_cookies,
+            used_protocol=used_protocol,
+        )
+
+    def typed_request(self, req: Request) -> Response:
         """使用 :class:`Request` 强类型对象执行 HTTP 请求。
 
         Execute an HTTP request using a :class:`Request` strongly-typed object.
@@ -1274,22 +1562,22 @@ class Session:
         kwargs = {k: v for k, v in req.items() if k not in ("method", "url")}
         return self.execute_request(method, url, **kwargs)
 
-    def get(self, url: str, *, headers: Optional[Dict[str, str]] = None, **kwargs: Any) -> Dict[str, Any]:
+    def get(self, url: str, *, headers: Optional[Dict[str, str]] = None, **kwargs: Any) -> Response:
         return self.execute_request("GET", url, headers=headers, **kwargs)
 
-    def post(self, url: str, *, headers: Optional[Dict[str, str]] = None, body: Optional[bytes] = None, **kwargs: Any) -> Dict[str, Any]:
+    def post(self, url: str, *, headers: Optional[Dict[str, str]] = None, body: Optional[bytes] = None, **kwargs: Any) -> Response:
         return self.execute_request("POST", url, headers=headers, body=body, **kwargs)
 
-    def head(self, url: str, *, headers: Optional[Dict[str, str]] = None, **kwargs: Any) -> Dict[str, Any]:
+    def head(self, url: str, *, headers: Optional[Dict[str, str]] = None, **kwargs: Any) -> Response:
         return self.execute_request("HEAD", url, headers=headers, **kwargs)
 
-    def put(self, url: str, *, headers: Optional[Dict[str, str]] = None, body: Optional[bytes] = None, **kwargs: Any) -> Dict[str, Any]:
+    def put(self, url: str, *, headers: Optional[Dict[str, str]] = None, body: Optional[bytes] = None, **kwargs: Any) -> Response:
         return self.execute_request("PUT", url, headers=headers, body=body, **kwargs)
 
-    def delete(self, url: str, *, headers: Optional[Dict[str, str]] = None, **kwargs: Any) -> Dict[str, Any]:
+    def delete(self, url: str, *, headers: Optional[Dict[str, str]] = None, **kwargs: Any) -> Response:
         return self.execute_request("DELETE", url, headers=headers, **kwargs)
 
-    def patch(self, url: str, *, headers: Optional[Dict[str, str]] = None, body: Optional[bytes] = None, **kwargs: Any) -> Dict[str, Any]:
+    def patch(self, url: str, *, headers: Optional[Dict[str, str]] = None, body: Optional[bytes] = None, **kwargs: Any) -> Response:
         return self.execute_request("PATCH", url, headers=headers, body=body, **kwargs)
 
     @staticmethod
@@ -1327,24 +1615,24 @@ class AsyncSession:
     async def __aexit__(self, *args: Any) -> None:
         pass
 
-    async def _run_in_executor(self, method_name: str, *args: Any, **kwargs: Any) -> Dict[str, Any]:
+    async def _run_in_executor(self, method_name: str, *args: Any, **kwargs: Any) -> Response:
         loop = asyncio.get_running_loop()
         executor = self._get_executor()
 
-        def _call() -> Dict[str, Any]:
+        def _call() -> Response:
             fn = getattr(self._session, method_name)
             return fn(*args, **kwargs)
 
         return await loop.run_in_executor(executor, _call)
 
-    async def typed_request(self, req: Request) -> Dict[str, Any]:
+    async def typed_request(self, req: Request) -> Response:
         """异步执行 :class:`Request` 强类型请求。
 
         Execute a :class:`Request` strongly-typed request asynchronously.
         """
         return await self._run_in_executor("typed_request", req)
 
-    async def execute_request(self, method: str, url: str, **kwargs: Any) -> Dict[str, Any]:
+    async def execute_request(self, method: str, url: str, **kwargs: Any) -> Response:
         """异步执行 HTTP 请求，参数与 :meth:`Session.execute_request` 一致。
 
         Execute an HTTP request asynchronously; parameters match
@@ -1352,27 +1640,27 @@ class AsyncSession:
         """
         return await self._run_in_executor("execute_request", method, url, **kwargs)
 
-    async def get(self, url: str, **kwargs: Any) -> Dict[str, Any]:
+    async def get(self, url: str, **kwargs: Any) -> Response:
         """异步 GET 请求。  /  Async GET request."""
         return await self._run_in_executor("get", url, **kwargs)
 
-    async def post(self, url: str, **kwargs: Any) -> Dict[str, Any]:
+    async def post(self, url: str, **kwargs: Any) -> Response:
         """异步 POST 请求。  /  Async POST request."""
         return await self._run_in_executor("post", url, **kwargs)
 
-    async def head(self, url: str, **kwargs: Any) -> Dict[str, Any]:
+    async def head(self, url: str, **kwargs: Any) -> Response:
         """异步 HEAD 请求。  /  Async HEAD request."""
         return await self._run_in_executor("head", url, **kwargs)
 
-    async def put(self, url: str, **kwargs: Any) -> Dict[str, Any]:
+    async def put(self, url: str, **kwargs: Any) -> Response:
         """异步 PUT 请求。  /  Async PUT request."""
         return await self._run_in_executor("put", url, **kwargs)
 
-    async def delete(self, url: str, **kwargs: Any) -> Dict[str, Any]:
+    async def delete(self, url: str, **kwargs: Any) -> Response:
         """异步 DELETE 请求。  /  Async DELETE request."""
         return await self._run_in_executor("delete", url, **kwargs)
 
-    async def patch(self, url: str, **kwargs: Any) -> Dict[str, Any]:
+    async def patch(self, url: str, **kwargs: Any) -> Response:
         """异步 PATCH 请求。  /  Async PATCH request."""
         return await self._run_in_executor("patch", url, **kwargs)
 
@@ -1385,3 +1673,9 @@ class AsyncSession:
         loop = asyncio.get_running_loop()
         executor = AsyncSession._get_executor()
         await loop.run_in_executor(executor, Session.clear_client_pool)
+
+
+# Convenience top-level function
+def clear_client_pool() -> None:
+    """Close all idle connections in the global Go client pool (synchronous)."""
+    Session.clear_client_pool()

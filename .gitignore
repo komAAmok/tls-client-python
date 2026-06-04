@@ -7,3 +7,11 @@ cffi_dist/example_typescript/package-lock.json
 cffi_dist/example_node/package-lock.json
 cffi_dist/example_node/node_modules
 /cffi_dist/dist/
+# Python build artifacts
+/build/
+/dist/
+*.egg-info/
+__pycache__/
+*.pyc
+# NOTE: tls_client/bin/*.so, *.dylib, *.dll are NOT gitignored –
+# they are distributed with the PyPI package.

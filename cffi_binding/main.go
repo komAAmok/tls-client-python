@@ -145,8 +145,12 @@ typedef struct {
     char* body;
     int   body_len;
     char* err_msg;
+    char* target_url;
+    char* used_protocol;
     HttpHeader* response_headers;
     int   response_headers_len;
+    HttpHeader* cookies;
+    int   cookies_len;
 } ResponseResult;
 */
 import "C"
@@ -991,6 +995,14 @@ func ExecuteRequest(opts *C.RequestOptions) *C.ResponseResult {
 	result.status_code = C.int(resp.StatusCode)
 	result.body_len = C.int(len(respBody))
 
+	// Final URL after redirects
+	if resp.Request != nil && resp.Request.URL != nil {
+		result.target_url = C.CString(resp.Request.URL.String())
+	}
+
+	// HTTP protocol version used
+	result.used_protocol = C.CString(resp.Proto)
+
 	if len(respBody) > 0 {
 		cBody := C.malloc(C.size_t(len(respBody)))
 		if cBody == nil {
@@ -1017,8 +1029,12 @@ func ExecuteRequest(opts *C.RequestOptions) *C.ResponseResult {
 				result.err_msg = C.CString("failed to allocate memory for response headers")
 				return result
 			}
-			headerSlice := unsafe.Slice(headerArr, totalEntries)
+			// Register the pointer immediately so FreeResponse can clean it
+			// up if C.CString panics during iteration below.
+			result.response_headers = headerArr
+			result.response_headers_len = C.int(totalEntries)
 
+			headerSlice := unsafe.Slice(headerArr, totalEntries)
 			idx := 0
 			for key, values := range resp.Header {
 				for _, val := range values {
@@ -1029,9 +1045,27 @@ func ExecuteRequest(opts *C.RequestOptions) *C.ResponseResult {
 					idx++
 				}
 			}
+		}
+	}
 
-			result.response_headers = headerArr
-			result.response_headers_len = C.int(totalEntries)
+	// ---- response cookies -------------------------------------------------
+
+	if responseCookies := resp.Cookies(); len(responseCookies) > 0 {
+		n := len(responseCookies)
+		cookieArr := (*C.HttpHeader)(C.malloc(C.size_t(n) * C.size_t(unsafe.Sizeof(C.HttpHeader{}))))
+		if cookieArr == nil {
+			result.err_msg = C.CString("failed to allocate memory for response cookies")
+			return result
+		}
+		// Register the pointer immediately so FreeResponse can clean it
+		// up if C.CString panics during iteration below.
+		result.cookies = cookieArr
+		result.cookies_len = C.int(n)
+
+		cookieSlice := unsafe.Slice(cookieArr, n)
+		for i, c := range responseCookies {
+			cookieSlice[i].key = C.CString(c.Name)
+			cookieSlice[i].value = C.CString(c.Value)
 		}
 	}
 
@@ -1064,6 +1098,28 @@ func FreeResponse(res *C.ResponseResult) {
 	if res.err_msg != nil {
 		C.free(unsafe.Pointer(res.err_msg))
 		res.err_msg = nil
+	}
+	if res.target_url != nil {
+		C.free(unsafe.Pointer(res.target_url))
+		res.target_url = nil
+	}
+	if res.used_protocol != nil {
+		C.free(unsafe.Pointer(res.used_protocol))
+		res.used_protocol = nil
+	}
+	// Free response cookies (individual key/value strings + array)
+	if res.cookies != nil && res.cookies_len > 0 {
+		cookieSlice := unsafe.Slice(res.cookies, res.cookies_len)
+		for i := 0; i < int(res.cookies_len); i++ {
+			if cookieSlice[i].key != nil {
+				C.free(unsafe.Pointer(cookieSlice[i].key))
+			}
+			if cookieSlice[i].value != nil {
+				C.free(unsafe.Pointer(cookieSlice[i].value))
+			}
+		}
+		C.free(unsafe.Pointer(res.cookies))
+		res.cookies = nil
 	}
 	C.free(unsafe.Pointer(res))
 }

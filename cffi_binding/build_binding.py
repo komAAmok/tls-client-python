@@ -170,8 +170,12 @@ typedef struct {
     char* body;
     int   body_len;
     char* err_msg;
+    char* target_url;
+    char* used_protocol;
     HttpHeader* response_headers;
     int   response_headers_len;
+    HttpHeader* cookies;
+    int   cookies_len;
 } ResponseResult;
 
 ResponseResult* ExecuteRequest(RequestOptions* opts);
