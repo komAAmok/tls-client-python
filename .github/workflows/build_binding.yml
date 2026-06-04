@@ -13,7 +13,7 @@ permissions:
 
 jobs:
   # -----------------------------------------------------------------------
-  # 1. Build native and macOS architectures
+  # 1. Build native and macOS architectures (64-bit platforms, glibc based)
   # -----------------------------------------------------------------------
   build-native:
     name: Build ${{ matrix.goos }}-${{ matrix.goarch }}
@@ -37,10 +37,6 @@ jobs:
           - runner: windows-latest
             goos: windows
             goarch: amd64
-            ext: .dll
-          - runner: windows-latest
-            goos: windows
-            goarch: "386"
             ext: .dll
 
     steps:
@@ -70,7 +66,45 @@ jobs:
           path: cffi_binding/dist/tls-client-${{ matrix.goos }}-${{ matrix.goarch }}${{ matrix.ext }}
 
   # -----------------------------------------------------------------------
-  # 2. Cross-compile Linux ARM architectures
+  # 2. Cross-compile Windows 32-bit (386) on Linux
+  # -----------------------------------------------------------------------
+  build-windows-386-cross:
+    name: Cross Windows-386
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: "1.24"
+          cache: true
+
+      - name: Install MinGW 32-bit Cross Compiler
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y gcc-mingw-w64-i686
+
+      - name: Build Core
+        working-directory: cffi_binding
+        env:
+          CGO_ENABLED: 1
+          GOOS: windows
+          GOARCH: "386"
+          CC: i686-w64-mingw32-gcc
+        run: |
+          mkdir -p dist
+          go build -buildmode=c-shared -buildvcs=false -o "dist/tls-client-windows-386.dll" .
+
+      - name: Upload Intermediary Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: core-windows-386
+          path: cffi_binding/dist/tls-client-windows-386.dll
+
+  # -----------------------------------------------------------------------
+  # 3. Cross-compile Linux ARM architectures (glibc based)
   # -----------------------------------------------------------------------
   build-linux-cross:
     name: Cross Linux-${{ matrix.goarch }}
@@ -128,11 +162,42 @@ jobs:
           path: cffi_binding/dist/tls-client-linux-${{ matrix.goarch }}${{ matrix.ext }}
 
   # -----------------------------------------------------------------------
-  # 3. Sync: download all artifacts and commit to tls_client/bin/
+  # 4. Native-compile for Alpine Linux (musl libc based)
+  # -----------------------------------------------------------------------
+  build-alpine:
+    name: Build Alpine-amd64 (musl)
+    runs-on: ubuntu-latest
+    container:
+      image: golang:1.24-alpine
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+
+      - name: Install Build Dependencies
+        run: apk add --no-cache gcc musl-dev git
+
+      - name: Build Core
+        working-directory: cffi_binding
+        env:
+          CGO_ENABLED: 1
+          GOOS: linux
+          GOARCH: amd64
+        run: |
+          mkdir -p dist
+          go build -buildmode=c-shared -buildvcs=false -o "dist/tls-client-alpine-amd64.so" .
+
+      - name: Upload Intermediary Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: core-alpine-amd64
+          path: cffi_binding/dist/tls-client-alpine-amd64.so
+
+  # -----------------------------------------------------------------------
+  # 5. Sync: download all artifacts and commit to tls_client/bin/
   # -----------------------------------------------------------------------
   sync-to-project-path:
     name: Sync Binaries into tls_client/bin/
-    needs: [build-native, build-linux-cross]
+    needs: [build-native, build-windows-386-cross, build-linux-cross, build-alpine]
     runs-on: ubuntu-latest
     steps:
       - name: Checkout Repository
