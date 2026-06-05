@@ -48,8 +48,7 @@ Pre-compiled binaries are included for **9 platforms** — no Go toolchain requi
 
 ### Requirements
 
-- Python 3.8+
-- `cffi >= 1.16`
+- Python 3.6+
 
 ---
 
