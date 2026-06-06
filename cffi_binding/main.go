@@ -417,8 +417,8 @@ type requestConfig struct {
 // goroutine-safe requestConfig.  All C strings and byte arrays are copied
 // into Go-managed memory.  The caller (RequestAsync) may free the original
 // C opts immediately after this function returns.
-func deepCopyRequestOptions(opts *C.RequestOptions) *requestConfig {
-	cfg := &requestConfig{
+func deepCopyRequestOptions(opts *C.RequestOptions) (cfg *requestConfig) {
+	cfg = &requestConfig{
 		method:                 C.GoString(opts.method),
 		url:                    C.GoString(opts.url),
 		proxy:                  C.GoString(opts.proxy),
@@ -452,6 +452,20 @@ func deepCopyRequestOptions(opts *C.RequestOptions) *requestConfig {
 		streamOutputBlockSize:  int(opts.stream_output_block_size),
 		withDefaultBadPinHandler: int(opts.with_default_bad_pin_handler) != 0,
 	}
+
+	// If deepCopyCustomTLSClient succeeds but a subsequent operation
+	// (e.g. C.GoString on cache_key_hash) panics, the allocated C memory
+	// would be unreachable.  This deferred recover frees it before
+	// re-panicking.  The caller (RequestAsync) has a nil-guard on cfg
+	// to handle the case where the struct literal itself panics.
+	defer func() {
+		if r := recover(); r != nil {
+			if cfg.customTLSClient != nil {
+				freeCustomTLSClient(cfg.customTLSClient)
+			}
+			panic(r)
+		}
+	}()
 
 	// Body — zero-copy: unsafe.Slice gives a []byte backed by the C memory
 	// that Python keeps alive via keep_alive (sync) or _pending_requests (async).
@@ -953,6 +967,15 @@ func hashStringArray(h hash.Hash, arr **C.char, length int, prefix string) {
 	}
 }
 
+// b2i converts a bool to 0/1 int for %%d format specifiers.
+// Keeps buildCacheKeyFromConfig byte-identical with buildCacheKey.
+func b2i(b bool) int {
+	if b {
+		return 1
+	}
+	return 0
+}
+
 func getOrCreateClient(opts *C.RequestOptions) (tls_client.HttpClient, error) {
 	startEviction()
 
@@ -1424,14 +1447,16 @@ func buildCustomProfileFromC(ctc *C.CustomTlsClient) (profiles.ClientProfile, er
 
 func buildCacheKeyFromConfig(cfg *requestConfig) string {
 	h := sha256.New()
-	fmt.Fprintf(h, "%s|%s|%s|%s|%t|%t|%t|%t|%d|%d|%d|%d|%d|%d|%d|%t|%t|%t|%t|%t|%t|%t|%t|%t|%d|%d",
+	// Match buildCacheKey format — use %%d with int(bool) so sync and async
+	// paths produce identical cache keys when cache_key_hash is not provided.
+	fmt.Fprintf(h, "%s|%s|%s|%s|%d|%d|%d|%d|%d|%d|%d|%d|%d|%d|%d|%d|%d|%d|%d|%d|%d|%d|%d|%d|%d|%d",
 		cfg.clientIdentifier, cfg.proxy, cfg.serverNameOverwrite, cfg.localAddress,
-		cfg.insecureSkipVerify, cfg.forceHttp1, cfg.withRandomTLSExtOrder, cfg.withProtocolRacing,
+		b2i(cfg.insecureSkipVerify), b2i(cfg.forceHttp1), b2i(cfg.withRandomTLSExtOrder), b2i(cfg.withProtocolRacing),
 		cfg.maxIdleConns, cfg.maxIdleConnsPerHost, cfg.maxConnsPerHost,
 		cfg.maxResponseHeaderBytes, cfg.writeBufferSize, cfg.readBufferSize,
-		cfg.idleConnTimeoutSeconds, cfg.disableKeepAlives, cfg.disableCompression,
-		cfg.disableHTTP3, cfg.disableIPv4, cfg.disableIPv6, cfg.followRedirects,
-		cfg.withoutCookieJar, cfg.allowEmptyCookies, cfg.withDefaultBadPinHandler,
+		cfg.idleConnTimeoutSeconds, b2i(cfg.disableKeepAlives), b2i(cfg.disableCompression),
+		b2i(cfg.disableHTTP3), b2i(cfg.disableIPv4), b2i(cfg.disableIPv6), b2i(cfg.followRedirects),
+		b2i(cfg.withoutCookieJar), b2i(cfg.allowEmptyCookies), b2i(cfg.withDefaultBadPinHandler),
 		cfg.timeoutSeconds, cfg.timeoutMilliseconds,
 	)
 	if len(cfg.pseudoHeaderOrder) > 0 {
@@ -1993,15 +2018,21 @@ func packResponseArena(result *C.ResponseResult, respHeaders http.Header, respCo
 		result.err_msg = C.CString("failed to allocate response header array")
 		return
 	}
+	// Assign IMMEDIATELY so FreeResponse can release the memory if Phase 3 panics.
+	result.response_headers = entryArr
+
 	totalStrBytes := headerBytes + cookieBytes
 	var arena *C.char
 	if totalStrBytes > 0 {
 		arena = (*C.char)(C.malloc(C.size_t(totalStrBytes)))
 		if arena == nil {
 			C.free(unsafe.Pointer(entryArr))
+			result.response_headers = nil
 			result.err_msg = C.CString("failed to allocate response string arena")
 			return
 		}
+		// Assign IMMEDIATELY so FreeResponse can release the memory if Phase 3 panics.
+		result._resp_strings = arena
 	}
 
 	// Phase 3: fill headers and strings.
@@ -2049,13 +2080,11 @@ func packResponseArena(result *C.ResponseResult, respHeaders http.Header, respCo
 		}
 	}
 
-	result.response_headers = entryArr
 	result.response_headers_len = C.int(headerEntries)
 	if cookieCount > 0 {
-		result.cookies = &entryArr[headerEntries]
+		result.cookies = &entrySlice[headerEntries]
 		result.cookies_len = C.int(cookieCount)
 	}
-	result._resp_strings = arena
 }
 
 //export ExecuteRequest
@@ -2408,8 +2437,9 @@ func RequestAsync(opts *C.RequestOptions, requestID C.uintptr_t, cb unsafe.Point
 				C.invoke_async_callback(cb, requestID, res)
 			}
 
-			// Clean up custom TLS client memory regardless of panic
-			if cfg.customTLSClient != nil {
+		// Clean up custom TLS client memory regardless of panic.
+		// cfg may be nil if deepCopyRequestOptions panicked — guard against that.
+		if cfg != nil && cfg.customTLSClient != nil {
 				freeCustomTLSClient(cfg.customTLSClient)
 			}
 		}()
