@@ -61,7 +61,7 @@ requestPayload = {
         "accept-encoding",
         "accept-language"
     ],
-    "requestUrl": "https://eo1wmj45078deme.m.pipedream.net",
+    "requestUrl": "https://tls.browserleaks.com/json",
     "requestMethod": "POST",
     "requestBody": encoded_string.decode('utf-8'),
     "requestCookies": []

@@ -23,7 +23,7 @@ func TestHTTP3(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	req, err := http.NewRequest(http.MethodGet, "https://http3.is/", nil)
+	req, err := http.NewRequest(http.MethodGet, "https://tls.browserleaks.com/json", nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -58,7 +58,7 @@ func TestDisableHTTP3(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	req, err := http.NewRequest(http.MethodGet, "https://http3.is/", nil)
+	req, err := http.NewRequest(http.MethodGet, "https://tls.browserleaks.com/json", nil)
 	if err != nil {
 		t.Fatal(err)
 	}

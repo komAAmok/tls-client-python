@@ -28,7 +28,7 @@ const payload: TLSClientRequestPayload = {
         'accept-encoding',
         'accept-language'
     ],
-    requestUrl: 'https://www.google.com',
+    requestUrl: 'https://tls.browserleaks.com/json',
     requestMethod: 'GET',
     requestBody: '',
     requestCookies: []
@@ -39,7 +39,7 @@ tlsClient.requestAsync(payload).then((response) => console.log(response))
 
 const fetchCookiesPayload: TLSClientFetchCookiesForSessionRequestPayload = {
     sessionId: 'my-session-id',
-    url: 'https://www.google.com',
+    url: 'https://tls.browserleaks.com/json',
 };
 
 tlsClient.getCookiesFromSessionAsync(fetchCookiesPayload).then((response) => console.log(response));

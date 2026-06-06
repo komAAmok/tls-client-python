@@ -21,7 +21,7 @@ func TestHTTP3WithChromeOnCloudflare(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	req, err := http.NewRequest(http.MethodGet, "https://www.cloudflare.com/cdn-cgi/trace", nil)
+	req, err := http.NewRequest(http.MethodGet, "https://tls.browserleaks.com/json", nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -54,7 +54,7 @@ func TestHTTP2WithChromeOnCloudflare(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	req, err := http.NewRequest(http.MethodGet, "https://www.cloudflare.com/cdn-cgi/trace", nil)
+	req, err := http.NewRequest(http.MethodGet, "https://tls.browserleaks.com/json", nil)
 	if err != nil {
 		t.Fatal(err)
 	}

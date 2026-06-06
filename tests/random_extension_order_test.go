@@ -24,7 +24,7 @@ func TestClient_RandomExtensionOrderChrome(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	req, err := http.NewRequest(http.MethodGet, peetApiEndpoint, nil)
+	req, err := http.NewRequest(http.MethodGet, browserleaksEndpoint, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -49,7 +49,7 @@ func TestClient_RandomExtensionOrderChrome(t *testing.T) {
 	// All Extensions have to occur in random order. Grease and Padding are staying in place
 	extensions := strings.Split("5-0-35-16-18-10-23-65281-43-51-27-17513-45-13-11-21", "-")
 
-	ja3String := tlsApiResponse.TLS.Ja3
+	ja3String := tlsApiResponse.Ja3Text
 	ja3StringParts := strings.Split(ja3String, ",")
 
 	returnedExtensions := ja3StringParts[2]
@@ -74,7 +74,7 @@ func TestClient_RandomExtensionOrderCustom(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	req, err := http.NewRequest(http.MethodGet, peetApiEndpoint, nil)
+	req, err := http.NewRequest(http.MethodGet, browserleaksEndpoint, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -99,7 +99,7 @@ func TestClient_RandomExtensionOrderCustom(t *testing.T) {
 	// All Extensions have to occur in random order. Grease and Padding are staying in place
 	extensions := strings.Split("0-11-10-35-16-22-23-13", "-")
 
-	ja3String := tlsApiResponse.TLS.Ja3
+	ja3String := tlsApiResponse.Ja3Text
 	ja3StringParts := strings.Split(ja3String, ",")
 
 	returnedExtensions := ja3StringParts[2]

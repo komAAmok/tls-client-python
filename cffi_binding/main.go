@@ -140,6 +140,7 @@ typedef struct {
     ClientCertificate* client_certificates;
     int   client_certificates_len;
     CustomTlsClient* custom_tls_client;
+    const char* cache_key_hash;
 } RequestOptions;
 
 typedef struct {
@@ -153,7 +154,17 @@ typedef struct {
     int   response_headers_len;
     HttpHeader* cookies;
     int   cookies_len;
+    char* _resp_strings;
 } ResponseResult;
+
+typedef struct {
+    long long total_evictions;       // cumulative entries evicted since process start
+    long long last_eviction_count;   // entries evicted in the most recent scan
+    long long last_eviction_time;    // UnixNano timestamp of the last eviction scan
+    long long pool_entry_count;      // current number of entries in the client pool
+    long long pool_ttl_seconds;      // current TTL (seconds)
+    long long pool_scan_interval_seconds; // current scan interval (seconds)
+} PoolStats;
 
 typedef void (*async_callback_fn)(uintptr_t request_id, ResponseResult* response);
 
@@ -178,6 +189,7 @@ import (
 	"os"
 	"sort"
 	"sync"
+	"sync/atomic"
 	"time"
 	"unsafe"
 
@@ -191,12 +203,160 @@ import (
 // ---------------------------------------------------------------------------
 // Client pool – caches HttpClients keyed by the configuration parameters that
 // affect the TLS handshake and connection pool behaviour.
+//
+// Each HttpClient is wrapped in a poolEntry that tracks the last access time.
+// A background goroutine scans the pool at regular intervals and evicts
+// entries whose lastAccess is older than poolTTL.  This prevents unbounded
+// RSS growth under high-throughput workloads that use many distinct
+// configurations (e.g. rotating proxies).
 // ---------------------------------------------------------------------------
 
+type poolEntry struct {
+	client     tls_client.HttpClient
+	lastAccess atomic.Int64 // UnixNano timestamp of last retrieval
+}
+
 var (
-	clientPool   sync.Map
-	clientPoolMu sync.Mutex
+	clientPool        sync.Map
+	clientPoolMu      sync.Mutex
+	poolTTLNs         atomic.Int64 // pool entry idle timeout (nanoseconds); default 5 min
+	poolScanIntervalNs atomic.Int64 // eviction scan interval (nanoseconds); default 60 s
+	evictionStopCh    chan struct{}
+	evictionOnce      sync.Once
+
+	// Eviction metrics — updated atomically by the eviction goroutine.
+	totalEvictions    atomic.Int64 // cumulative entries evicted since process start
+	lastEvictionCount atomic.Int64 // entries evicted in the most recent scan
+	lastEvictionTime  atomic.Int64 // UnixNano timestamp of the most recent scan
 )
+
+func init() {
+	poolTTLNs.Store(int64(5 * time.Minute))
+	poolScanIntervalNs.Store(int64(60 * time.Second))
+}
+
+// startEviction launches the background TTL eviction goroutine (idempotent).
+// Uses time.Sleep in a loop (not a ticker) so SetPoolScanInterval changes
+// take effect on the next sleep cycle without restarting the goroutine.
+func startEviction() {
+	evictionOnce.Do(func() {
+		evictionStopCh = make(chan struct{})
+		go func() {
+			interval := time.Duration(poolScanIntervalNs.Load())
+			if interval <= 0 {
+				interval = 60 * time.Second
+			}
+			timer := time.NewTimer(interval)
+			defer timer.Stop()
+			for {
+				select {
+				case <-timer.C:
+					evictStaleEntries()
+					interval = time.Duration(poolScanIntervalNs.Load())
+					if interval <= 0 {
+						interval = 60 * time.Second
+					}
+					timer.Reset(interval)
+				case <-evictionStopCh:
+					return
+				}
+			}
+		}()
+	})
+}
+
+// evictStaleEntries scans the pool and removes entries whose lastAccess
+// is older than poolTTL, calling CloseIdleConnections on each removed client.
+func evictStaleEntries() {
+	ttl := time.Duration(poolTTLNs.Load())
+	if ttl <= 0 {
+		ttl = 5 * time.Minute
+	}
+	cutoff := time.Now().Add(-ttl).UnixNano()
+
+	var toDelete []any
+	clientPool.Range(func(key, value any) bool {
+		entry, ok := value.(*poolEntry)
+		if !ok {
+			// Orphaned/bad entry — clean up
+			toDelete = append(toDelete, key)
+			return true
+		}
+		if entry.lastAccess.Load() < cutoff {
+			toDelete = append(toDelete, key)
+		}
+		return true
+	})
+
+	var evicted int64
+	for _, key := range toDelete {
+		if entry, ok := clientPool.Load(key); ok {
+			if pe, ok := entry.(*poolEntry); ok && pe.client != nil {
+				pe.client.CloseIdleConnections()
+			}
+		}
+		clientPool.Delete(key)
+		evicted++
+	}
+
+	// Update metrics atomically so GetPoolStats can read them lock-free.
+	if evicted > 0 {
+		totalEvictions.Add(evicted)
+	}
+	lastEvictionCount.Store(evicted)
+	lastEvictionTime.Store(time.Now().UnixNano())
+}
+
+// respBodyPool reuses *bytes.Buffer for response body reads, avoiding
+// the repeated internal buffer expansions of io.ReadAll that generate
+// GC pressure under high-throughput synchronous workloads.
+var respBodyPool = sync.Pool{
+	New: func() any {
+		return bytes.NewBuffer(make([]byte, 0, 65536))
+	},
+}
+
+// readAllPooled is a sync.Pool-backed replacement for io.ReadAll.
+// The returned slice is a copy — the caller owns it and the pool buffer
+// is immediately returned for reuse.
+func readAllPooled(r io.Reader) ([]byte, error) {
+	buf := respBodyPool.Get().(*bytes.Buffer)
+	defer func() {
+		buf.Reset()
+		respBodyPool.Put(buf)
+	}()
+	if _, err := buf.ReadFrom(r); err != nil {
+		return nil, err
+	}
+	// Copy out of the pooled buffer so the pool can safely reuse the
+	// backing array on the next Get.
+	out := make([]byte, buf.Len())
+	copy(out, buf.Bytes())
+	return out, nil
+}
+
+// readBodyToCHeap reads the response body directly into C heap memory
+// when Content-Length is positive and within a reasonable bound.
+// Returns (body, length, nil) on success, (nil, 0, nil) to signal
+// that the caller should fall back to readAllPooled, or (nil, 0, err)
+// on read error (C memory already freed).
+func readBodyToCHeap(body io.Reader, contentLength int64) (*C.char, int, error) {
+	// 128 MB sanity cap — larger than any reasonable TLS-fingerprinting
+	// response and well within address-space limits.
+	if contentLength <= 0 || contentLength > 128*1024*1024 {
+		return nil, 0, nil
+	}
+	cBody := C.malloc(C.size_t(contentLength))
+	if cBody == nil {
+		return nil, 0, nil
+	}
+	cSlice := unsafe.Slice((*byte)(cBody), contentLength)
+	if _, err := io.ReadFull(body, cSlice); err != nil {
+		C.free(cBody)
+		return nil, 0, err
+	}
+	return (*C.char)(cBody), int(contentLength), nil
+}
 
 // ---------------------------------------------------------------------------
 // Go-native request config — goroutine-safe copy of all C RequestOptions data.
@@ -250,6 +410,7 @@ type requestConfig struct {
 	requestCookies           []*http.Cookie
 	clientCertificates       []tls.Certificate
 	customTLSClient          *C.CustomTlsClient // deep-copied to C heap; freed after use
+	cacheKeyHash             string            // pre-computed by Python to skip CGO in buildCacheKey
 }
 
 // deepCopyRequestOptions converts a C RequestOptions pointer into a
@@ -292,9 +453,10 @@ func deepCopyRequestOptions(opts *C.RequestOptions) *requestConfig {
 		withDefaultBadPinHandler: int(opts.with_default_bad_pin_handler) != 0,
 	}
 
-	// Body
+	// Body — zero-copy: unsafe.Slice gives a []byte backed by the C memory
+	// that Python keeps alive via keep_alive (sync) or _pending_requests (async).
 	if bl := int(opts.body_len); bl > 0 && opts.body != nil {
-		cfg.body = C.GoBytes(unsafe.Pointer(opts.body), C.int(bl))
+		cfg.body = unsafe.Slice((*byte)(unsafe.Pointer(opts.body)), bl)
 	}
 
 	// Stream I/O strings (guard against NULL from Python ffi.NULL)
@@ -353,6 +515,11 @@ func deepCopyRequestOptions(opts *C.RequestOptions) *requestConfig {
 	// The goroutine frees this copy when done.
 	if opts.custom_tls_client != nil {
 		cfg.customTLSClient = deepCopyCustomTLSClient(opts.custom_tls_client)
+	}
+
+	// Copy the pre-computed cache key hash from Python (avoids CGO calls on cache hit).
+	if opts.cache_key_hash != nil {
+		cfg.cacheKeyHash = C.GoString(opts.cache_key_hash)
 	}
 
 	return cfg
@@ -543,7 +710,7 @@ func buildCacheKey(opts *C.RequestOptions) string {
 	la := C.GoString(opts.local_address)
 
 	h := sha256.New()
-	fmt.Fprintf(h, "%s|%s|%s|%s|%d|%d|%d|%d|%d|%d|%d|%d|%d|%d|%d|%d|%d|%d|%d|%d|%d|%d|%d|%d",
+	fmt.Fprintf(h, "%s|%s|%s|%s|%d|%d|%d|%d|%d|%d|%d|%d|%d|%d|%d|%d|%d|%d|%d|%d|%d|%d|%d|%d|%d|%d",
 		ci, px, sn, la,
 		int(opts.insecure_skip_verify),
 		int(opts.force_http1),
@@ -565,6 +732,8 @@ func buildCacheKey(opts *C.RequestOptions) string {
 		int(opts.without_cookie_jar),
 		int(opts.allow_empty_cookies),
 		int(opts.with_default_bad_pin_handler),
+		int(opts.timeout_seconds),
+		int(opts.timeout_milliseconds),
 	)
 	// Include pseudo-header orders in the cache key so different orders
 	// produce distinct transports.
@@ -586,33 +755,67 @@ func buildCacheKey(opts *C.RequestOptions) string {
 	} else {
 		fmt.Fprint(h, "#<default>")
 	}
-	// Default/connect headers affect client behaviour
+	// Default/connect headers affect client behaviour.
+	// Collect entries into a flat slice, sort by key, hash — avoids
+	// building an intermediate http.Header map that would be discarded
+	// on every cache-key computation (including cache hits).
 	dhLen := int(opts.default_headers_len)
 	if dhLen > 0 && opts.default_headers != nil {
 		dhSlice := unsafe.Slice(opts.default_headers, dhLen)
+		type dhEntry struct {
+			key, val string
+		}
+		entries := make([]dhEntry, dhLen)
 		for i := 0; i < dhLen; i++ {
-			fmt.Fprintf(h, "~dh:%s=%s", C.GoString(dhSlice[i].key), C.GoString(dhSlice[i].value))
+			entries[i] = dhEntry{C.GoString(dhSlice[i].key), C.GoString(dhSlice[i].value)}
+		}
+		sort.SliceStable(entries, func(i, j int) bool { return entries[i].key < entries[j].key })
+		for _, e := range entries {
+			fmt.Fprintf(h, "~dh:%s=%s", e.key, e.val)
 		}
 	}
 	chLen := int(opts.connect_headers_len)
 	if chLen > 0 && opts.connect_headers != nil {
 		chSlice := unsafe.Slice(opts.connect_headers, chLen)
+		type chEntry struct {
+			key, val string
+		}
+		entries := make([]chEntry, chLen)
 		for i := 0; i < chLen; i++ {
-			fmt.Fprintf(h, "~ch:%s=%s", C.GoString(chSlice[i].key), C.GoString(chSlice[i].value))
+			entries[i] = chEntry{C.GoString(chSlice[i].key), C.GoString(chSlice[i].value)}
+		}
+		sort.SliceStable(entries, func(i, j int) bool { return entries[i].key < entries[j].key })
+		for _, e := range entries {
+			fmt.Fprintf(h, "~ch:%s=%s", e.key, e.val)
 		}
 	}
-	// Certificate pinning – host:pin1,pin2 per entry
+	// Certificate pinning — collect into a flat slice, sort by host,
+	// hash.  Avoids building an intermediate map that would be discarded
+	// on every cache-key computation.
 	cpLen := int(opts.certificate_pinning_hosts_len)
 	if cpLen > 0 && opts.certificate_pinning_hosts != nil {
 		cpSlice := unsafe.Slice(opts.certificate_pinning_hosts, cpLen)
+		type cpEntry struct {
+			host string
+			pins []string
+		}
+		entries := make([]cpEntry, cpLen)
 		for i := 0; i < cpLen; i++ {
-			fmt.Fprintf(h, "^cp:%s=", C.GoString(cpSlice[i].host))
-			pinLen := int(cpSlice[i].pins_len)
-			if pinLen > 0 && cpSlice[i].pins != nil {
-				pinSlice := unsafe.Slice(cpSlice[i].pins, pinLen)
-				for j := 0; j < pinLen; j++ {
-					fmt.Fprintf(h, "%s,", C.GoString(pinSlice[j]))
+			entries[i].host = C.GoString(cpSlice[i].host)
+			pl := int(cpSlice[i].pins_len)
+			if pl > 0 && cpSlice[i].pins != nil {
+				pinSlice := unsafe.Slice(cpSlice[i].pins, pl)
+				entries[i].pins = make([]string, pl)
+				for j := 0; j < pl; j++ {
+					entries[i].pins[j] = C.GoString(pinSlice[j])
 				}
+			}
+		}
+		sort.SliceStable(entries, func(i, j int) bool { return entries[i].host < entries[j].host })
+		for _, e := range entries {
+			fmt.Fprintf(h, "^cp:%s=", e.host)
+			for _, p := range e.pins {
+				fmt.Fprintf(h, "%s,", p)
 			}
 		}
 	}
@@ -655,23 +858,41 @@ func buildCacheKey(opts *C.RequestOptions) string {
 		hashStringArray(h, ctc.supported_delegated_credentials_algorithms, int(ctc.supported_delegated_credentials_algorithms_len), "|sdca=")
 		hashStringArray(h, ctc.supported_signature_algorithms, int(ctc.supported_signature_algorithms_len), "|ssa=")
 		hashStringArray(h, ctc.supported_versions, int(ctc.supported_versions_len), "|sv=")
-		// H2 settings key-value
+		// H2 settings key-value — sort by key for deterministic cache keys
 		if h2l := int(ctc.h2_settings_len); h2l > 0 {
-			for i := 0; i < h2l; i++ {
-				if ctc.h2_settings_keys != nil && ctc.h2_settings_values != nil {
-					sl := unsafe.Slice(ctc.h2_settings_keys, h2l)
-					vl := unsafe.Slice(ctc.h2_settings_values, h2l)
-					fmt.Fprintf(h, "|h2s:%s=%d", C.GoString(sl[i]), vl[i])
+			if ctc.h2_settings_keys != nil && ctc.h2_settings_values != nil {
+				sl := unsafe.Slice(ctc.h2_settings_keys, h2l)
+				vl := unsafe.Slice(ctc.h2_settings_values, h2l)
+				type h2kv struct {
+					k string
+					v C.uint
+				}
+				pairs := make([]h2kv, h2l)
+				for i := 0; i < h2l; i++ {
+					pairs[i] = h2kv{C.GoString(sl[i]), vl[i]}
+				}
+				sort.Slice(pairs, func(i, j int) bool { return pairs[i].k < pairs[j].k })
+				for _, p := range pairs {
+					fmt.Fprintf(h, "|h2s:%s=%d", p.k, p.v)
 				}
 			}
 		}
-		// H3 settings key-value
+		// H3 settings key-value — sort by key for deterministic cache keys
 		if h3l := int(ctc.h3_settings_len); h3l > 0 {
-			for i := 0; i < h3l; i++ {
-				if ctc.h3_settings_keys != nil && ctc.h3_settings_values != nil {
-					sl := unsafe.Slice(ctc.h3_settings_keys, h3l)
-					vl := unsafe.Slice(ctc.h3_settings_values, h3l)
-					fmt.Fprintf(h, "|h3s:%s=%d", C.GoString(sl[i]), vl[i])
+			if ctc.h3_settings_keys != nil && ctc.h3_settings_values != nil {
+				sl := unsafe.Slice(ctc.h3_settings_keys, h3l)
+				vl := unsafe.Slice(ctc.h3_settings_values, h3l)
+				type h3kv struct {
+					k string
+					v C.ulonglong
+				}
+				pairs := make([]h3kv, h3l)
+				for i := 0; i < h3l; i++ {
+					pairs[i] = h3kv{C.GoString(sl[i]), vl[i]}
+				}
+				sort.Slice(pairs, func(i, j int) bool { return pairs[i].k < pairs[j].k })
+				for _, p := range pairs {
+					fmt.Fprintf(h, "|h3s:%s=%d", p.k, p.v)
 				}
 			}
 		}
@@ -682,11 +903,25 @@ func buildCacheKey(opts *C.RequestOptions) string {
 				fmt.Fprintf(h, "|echp:%d", epSlice[i])
 			}
 		}
-		// ECH cipher suites
+		// ECH cipher suites — sort by kdfId+aeadId for deterministic cache keys
 		if ecl := int(ctc.ech_candidate_cipher_suites_len); ecl > 0 && ctc.ech_candidate_cipher_suites != nil {
 			ecSlice := unsafe.Slice(ctc.ech_candidate_cipher_suites, ecl)
+			type ecEntry struct {
+				kdfId  string
+				aeadId string
+			}
+			entries := make([]ecEntry, ecl)
 			for i := 0; i < ecl; i++ {
-				fmt.Fprintf(h, "|echcs:%s,%s", C.GoString(ecSlice[i].kdfId), C.GoString(ecSlice[i].aeadId))
+				entries[i] = ecEntry{C.GoString(ecSlice[i].kdfId), C.GoString(ecSlice[i].aeadId)}
+			}
+			sort.Slice(entries, func(i, j int) bool {
+				if entries[i].kdfId != entries[j].kdfId {
+					return entries[i].kdfId < entries[j].kdfId
+				}
+				return entries[i].aeadId < entries[j].aeadId
+			})
+			for _, e := range entries {
+				fmt.Fprintf(h, "|echcs:%s,%s", e.kdfId, e.aeadId)
 			}
 		}
 		// Priority frames
@@ -719,10 +954,22 @@ func hashStringArray(h hash.Hash, arr **C.char, length int, prefix string) {
 }
 
 func getOrCreateClient(opts *C.RequestOptions) (tls_client.HttpClient, error) {
-	key := buildCacheKey(opts)
+	startEviction()
 
-	if client, ok := clientPool.Load(key); ok {
-		return client.(tls_client.HttpClient), nil
+	// Fast path: use Python's pre-computed hash to skip all CGO calls.
+	key := ""
+	if opts.cache_key_hash != nil {
+		key = C.GoString(opts.cache_key_hash)
+	}
+	if key == "" {
+		key = buildCacheKey(opts)
+	}
+
+	if entry, ok := clientPool.Load(key); ok {
+		if pe, ok := entry.(*poolEntry); ok {
+			pe.lastAccess.Store(time.Now().UnixNano())
+			return pe.client, nil
+		}
 	}
 
 	// Serialise construction so we never build two identical clients.
@@ -730,8 +977,11 @@ func getOrCreateClient(opts *C.RequestOptions) (tls_client.HttpClient, error) {
 	defer clientPoolMu.Unlock()
 
 	// Double-check after acquiring the lock.
-	if client, ok := clientPool.Load(key); ok {
-		return client.(tls_client.HttpClient), nil
+	if entry, ok := clientPool.Load(key); ok {
+		if pe, ok := entry.(*poolEntry); ok {
+			pe.lastAccess.Store(time.Now().UnixNano())
+			return pe.client, nil
+		}
 	}
 
 	client, err := buildClient(opts)
@@ -739,7 +989,9 @@ func getOrCreateClient(opts *C.RequestOptions) (tls_client.HttpClient, error) {
 		return nil, err
 	}
 
-	clientPool.Store(key, client)
+	pe := &poolEntry{client: client}
+	pe.lastAccess.Store(time.Now().UnixNano())
+	clientPool.Store(key, pe)
 	return client, nil
 }
 
@@ -900,8 +1152,13 @@ func buildClient(opts *C.RequestOptions) (tls_client.HttpClient, error) {
 	if ccLen := int(opts.client_certificates_len); ccLen > 0 && opts.client_certificates != nil {
 		transportOpts.Certificates = cClientCerts(opts.client_certificates, ccLen)
 	}
+	// Default idle connection timeout of 30s — prevents unbounded
+	// connection-pool growth when the caller does not set it explicitly.
 	if idleSec := int(opts.idle_conn_timeout_seconds); idleSec > 0 {
 		d := time.Duration(idleSec) * time.Second
+		transportOpts.IdleConnTimeout = &d
+	} else {
+		d := 30 * time.Second
 		transportOpts.IdleConnTimeout = &d
 	}
 	options = append(options, tls_client.WithTransportOptions(transportOpts))
@@ -1167,7 +1424,7 @@ func buildCustomProfileFromC(ctc *C.CustomTlsClient) (profiles.ClientProfile, er
 
 func buildCacheKeyFromConfig(cfg *requestConfig) string {
 	h := sha256.New()
-	fmt.Fprintf(h, "%s|%s|%s|%s|%t|%t|%t|%t|%d|%d|%d|%d|%d|%d|%d|%t|%t|%t|%t|%t|%t|%t|%t|%t",
+	fmt.Fprintf(h, "%s|%s|%s|%s|%t|%t|%t|%t|%d|%d|%d|%d|%d|%d|%d|%t|%t|%t|%t|%t|%t|%t|%t|%t|%d|%d",
 		cfg.clientIdentifier, cfg.proxy, cfg.serverNameOverwrite, cfg.localAddress,
 		cfg.insecureSkipVerify, cfg.forceHttp1, cfg.withRandomTLSExtOrder, cfg.withProtocolRacing,
 		cfg.maxIdleConns, cfg.maxIdleConnsPerHost, cfg.maxConnsPerHost,
@@ -1175,6 +1432,7 @@ func buildCacheKeyFromConfig(cfg *requestConfig) string {
 		cfg.idleConnTimeoutSeconds, cfg.disableKeepAlives, cfg.disableCompression,
 		cfg.disableHTTP3, cfg.disableIPv4, cfg.disableIPv6, cfg.followRedirects,
 		cfg.withoutCookieJar, cfg.allowEmptyCookies, cfg.withDefaultBadPinHandler,
+		cfg.timeoutSeconds, cfg.timeoutMilliseconds,
 	)
 	if len(cfg.pseudoHeaderOrder) > 0 {
 		for _, s := range cfg.pseudoHeaderOrder {
@@ -1249,20 +1507,38 @@ func buildCacheKeyFromConfig(cfg *requestConfig) string {
 		hashStringArray(h, ctc.supported_signature_algorithms, int(ctc.supported_signature_algorithms_len), "|ssa=")
 		hashStringArray(h, ctc.supported_versions, int(ctc.supported_versions_len), "|sv=")
 		if h2l := int(ctc.h2_settings_len); h2l > 0 {
-			for i := 0; i < h2l; i++ {
-				if ctc.h2_settings_keys != nil && ctc.h2_settings_values != nil {
-					sl := unsafe.Slice(ctc.h2_settings_keys, h2l)
-					vl := unsafe.Slice(ctc.h2_settings_values, h2l)
-					fmt.Fprintf(h, "|h2s:%s=%d", C.GoString(sl[i]), vl[i])
+			if ctc.h2_settings_keys != nil && ctc.h2_settings_values != nil {
+				sl := unsafe.Slice(ctc.h2_settings_keys, h2l)
+				vl := unsafe.Slice(ctc.h2_settings_values, h2l)
+				type h2kv struct {
+					k string
+					v C.uint
+				}
+				pairs := make([]h2kv, h2l)
+				for i := 0; i < h2l; i++ {
+					pairs[i] = h2kv{C.GoString(sl[i]), vl[i]}
+				}
+				sort.Slice(pairs, func(i, j int) bool { return pairs[i].k < pairs[j].k })
+				for _, p := range pairs {
+					fmt.Fprintf(h, "|h2s:%s=%d", p.k, p.v)
 				}
 			}
 		}
 		if h3l := int(ctc.h3_settings_len); h3l > 0 {
-			for i := 0; i < h3l; i++ {
-				if ctc.h3_settings_keys != nil && ctc.h3_settings_values != nil {
-					sl := unsafe.Slice(ctc.h3_settings_keys, h3l)
-					vl := unsafe.Slice(ctc.h3_settings_values, h3l)
-					fmt.Fprintf(h, "|h3s:%s=%d", C.GoString(sl[i]), vl[i])
+			if ctc.h3_settings_keys != nil && ctc.h3_settings_values != nil {
+				sl := unsafe.Slice(ctc.h3_settings_keys, h3l)
+				vl := unsafe.Slice(ctc.h3_settings_values, h3l)
+				type h3kv struct {
+					k string
+					v C.ulonglong
+				}
+				pairs := make([]h3kv, h3l)
+				for i := 0; i < h3l; i++ {
+					pairs[i] = h3kv{C.GoString(sl[i]), vl[i]}
+				}
+				sort.Slice(pairs, func(i, j int) bool { return pairs[i].k < pairs[j].k })
+				for _, p := range pairs {
+					fmt.Fprintf(h, "|h3s:%s=%d", p.k, p.v)
 				}
 			}
 		}
@@ -1274,8 +1550,22 @@ func buildCacheKeyFromConfig(cfg *requestConfig) string {
 		}
 		if ecl := int(ctc.ech_candidate_cipher_suites_len); ecl > 0 && ctc.ech_candidate_cipher_suites != nil {
 			ecSlice := unsafe.Slice(ctc.ech_candidate_cipher_suites, ecl)
+			type ecEntry struct {
+				kdfId  string
+				aeadId string
+			}
+			entries := make([]ecEntry, ecl)
 			for i := 0; i < ecl; i++ {
-				fmt.Fprintf(h, "|echcs:%s,%s", C.GoString(ecSlice[i].kdfId), C.GoString(ecSlice[i].aeadId))
+				entries[i] = ecEntry{C.GoString(ecSlice[i].kdfId), C.GoString(ecSlice[i].aeadId)}
+			}
+			sort.Slice(entries, func(i, j int) bool {
+				if entries[i].kdfId != entries[j].kdfId {
+					return entries[i].kdfId < entries[j].kdfId
+				}
+				return entries[i].aeadId < entries[j].aeadId
+			})
+			for _, e := range entries {
+				fmt.Fprintf(h, "|echcs:%s,%s", e.kdfId, e.aeadId)
 			}
 		}
 		if pfl := int(ctc.priority_frames_len); pfl > 0 && ctc.priority_frames != nil {
@@ -1296,20 +1586,32 @@ func buildCacheKeyFromConfig(cfg *requestConfig) string {
 }
 
 func getOrCreateClientFromConfig(cfg *requestConfig) (tls_client.HttpClient, error) {
-	key := buildCacheKeyFromConfig(cfg)
-	if client, ok := clientPool.Load(key); ok {
-		return client.(tls_client.HttpClient), nil
+	startEviction()
+	key := cfg.cacheKeyHash
+	if key == "" {
+		key = buildCacheKeyFromConfig(cfg)
+	}
+	if entry, ok := clientPool.Load(key); ok {
+		if pe, ok := entry.(*poolEntry); ok {
+			pe.lastAccess.Store(time.Now().UnixNano())
+			return pe.client, nil
+		}
 	}
 	clientPoolMu.Lock()
 	defer clientPoolMu.Unlock()
-	if client, ok := clientPool.Load(key); ok {
-		return client.(tls_client.HttpClient), nil
+	if entry, ok := clientPool.Load(key); ok {
+		if pe, ok := entry.(*poolEntry); ok {
+			pe.lastAccess.Store(time.Now().UnixNano())
+			return pe.client, nil
+		}
 	}
 	client, err := buildClientFromConfig(cfg)
 	if err != nil {
 		return nil, err
 	}
-	clientPool.Store(key, client)
+	pe := &poolEntry{client: client}
+	pe.lastAccess.Store(time.Now().UnixNano())
+	clientPool.Store(key, pe)
 	return client, nil
 }
 
@@ -1418,8 +1720,13 @@ func buildClientFromConfig(cfg *requestConfig) (tls_client.HttpClient, error) {
 	if len(cfg.clientCertificates) > 0 {
 		transportOpts.Certificates = cfg.clientCertificates
 	}
+	// Default idle connection timeout of 30s — prevents unbounded
+	// connection-pool growth when the caller does not set it explicitly.
 	if cfg.idleConnTimeoutSeconds > 0 {
 		d := time.Duration(cfg.idleConnTimeoutSeconds) * time.Second
+		transportOpts.IdleConnTimeout = &d
+	} else {
+		d := 30 * time.Second
 		transportOpts.IdleConnTimeout = &d
 	}
 	options = append(options, tls_client.WithTransportOptions(transportOpts))
@@ -1501,8 +1808,13 @@ func executeRequestFromConfig(cfg *requestConfig) *C.ResponseResult {
 		req.Header = cfg.headers
 	}
 
+	// Attach per-request cookies directly to the request rather than
+	// injecting them into the shared client CookieJar (which would cause
+	// jar bloat and data races across concurrent requests).
 	if len(cfg.requestCookies) > 0 {
-		client.SetCookies(req.URL, cfg.requestCookies)
+		for _, c := range cfg.requestCookies {
+			req.AddCookie(c)
+		}
 	}
 
 	resp, reqErr := client.Do(req)
@@ -1519,76 +1831,48 @@ func executeRequestFromConfig(cfg *requestConfig) *C.ResponseResult {
 
 	var respBody []byte
 	var readErr error
+	var bodyDirectToC bool
 	if cfg.streamOutputPath != "" {
 		respBody, readErr = readBodyStreamToFileFromConfig(resp.Body, cfg)
-	} else {
-		respBody, readErr = io.ReadAll(resp.Body)
-	}
-	if readErr != nil {
-		result.err_msg = C.CString(fmt.Sprintf("failed to read response body: %v", readErr))
+	} else if cBody, cLen, cErr := readBodyToCHeap(resp.Body, resp.ContentLength); cBody != nil {
+		// Fast path: body read directly into C heap — no Go intermediate.
+		result.body = cBody
+		result.body_len = C.int(cLen)
+		bodyDirectToC = true
+	} else if cErr != nil {
+		result.err_msg = C.CString(fmt.Sprintf("failed to read response body: %v", cErr))
 		return result
+	} else {
+		respBody, readErr = readAllPooled(resp.Body)
+	}
+	if !bodyDirectToC {
+		if readErr != nil {
+			result.err_msg = C.CString(fmt.Sprintf("failed to read response body: %v", readErr))
+			return result
+		}
+		result.body_len = C.int(len(respBody))
+		if len(respBody) > 0 {
+			cBody := C.malloc(C.size_t(len(respBody)))
+			if cBody == nil {
+				result.err_msg = C.CString("failed to allocate memory for response body")
+				return result
+			}
+			cSlice := unsafe.Slice((*byte)(cBody), len(respBody))
+			copy(cSlice, respBody)
+			result.body = (*C.char)(cBody)
+		}
 	}
 
 	result.status_code = C.int(resp.StatusCode)
-	result.body_len = C.int(len(respBody))
 
 	if resp.Request != nil && resp.Request.URL != nil {
 		result.target_url = C.CString(resp.Request.URL.String())
 	}
 	result.used_protocol = C.CString(resp.Proto)
 
-	if len(respBody) > 0 {
-		cBody := C.malloc(C.size_t(len(respBody)))
-		if cBody == nil {
-			result.err_msg = C.CString("failed to allocate memory for response body")
-			return result
-		}
-		cSlice := unsafe.Slice((*byte)(cBody), len(respBody))
-		copy(cSlice, respBody)
-		result.body = (*C.char)(cBody)
-	}
-
-	if len(resp.Header) > 0 {
-		totalEntries := 0
-		for _, values := range resp.Header {
-			totalEntries += len(values)
-		}
-		if totalEntries > 0 {
-			headerArr := (*C.HttpHeader)(C.malloc(C.size_t(totalEntries) * C.size_t(unsafe.Sizeof(C.HttpHeader{}))))
-			if headerArr == nil {
-				result.err_msg = C.CString("failed to allocate memory for response headers")
-				return result
-			}
-			result.response_headers = headerArr
-			result.response_headers_len = C.int(totalEntries)
-			headerSlice := unsafe.Slice(headerArr, totalEntries)
-			idx := 0
-			for key, values := range resp.Header {
-				for _, val := range values {
-					ck := C.CString(key)
-					cv := C.CString(val)
-					headerSlice[idx].key = ck
-					headerSlice[idx].value = cv
-					idx++
-				}
-			}
-		}
-	}
-
-	if responseCookies := resp.Cookies(); len(responseCookies) > 0 {
-		n := len(responseCookies)
-		cookieArr := (*C.HttpHeader)(C.malloc(C.size_t(n) * C.size_t(unsafe.Sizeof(C.HttpHeader{}))))
-		if cookieArr == nil {
-			result.err_msg = C.CString("failed to allocate memory for response cookies")
-			return result
-		}
-		result.cookies = cookieArr
-		result.cookies_len = C.int(n)
-		cookieSlice := unsafe.Slice(cookieArr, n)
-		for i, c := range responseCookies {
-			cookieSlice[i].key = C.CString(c.Name)
-			cookieSlice[i].value = C.CString(c.Value)
-		}
+	packResponseArena(result, resp.Header, resp.Cookies())
+	if result.err_msg != nil {
+		return result
 	}
 
 	return result
@@ -1675,6 +1959,105 @@ func readBodyStreamToFile(body io.Reader, opts *C.RequestOptions) ([]byte, error
 	return nil, nil
 }
 
+// packResponseArena allocates a single combined HttpHeader array and a single
+// C string arena containing all header key+value and cookie name+value strings.
+// Every key/value pointer in the HttpHeader array points into the arena.
+// Headers occupy indices [0, headerCount) and cookies occupy
+// [headerCount, headerCount+cookieCount) within the same allocation.
+// On success, sets result.response_headers, .cookies, .response_headers_len,
+// .cookies_len, and ._resp_strings.  Returns false on allocation failure
+// (result.err_msg is set).
+func packResponseArena(result *C.ResponseResult, respHeaders http.Header, respCookies []*http.Cookie) {
+	// Phase 1: count entries and total string bytes (including \0 terminators).
+	headerEntries := 0
+	headerBytes := 0
+	for key, values := range respHeaders {
+		for _, val := range values {
+			headerEntries++
+			headerBytes += len(key) + 1 + len(val) + 1
+		}
+	}
+	cookieCount := len(respCookies)
+	cookieBytes := 0
+	for _, c := range respCookies {
+		cookieBytes += len(c.Name) + 1 + len(c.Value) + 1
+	}
+	totalEntries := headerEntries + cookieCount
+	if totalEntries == 0 {
+		return // nothing to do
+	}
+
+	// Phase 2: allocate combined HttpHeader array + string arena.
+	entryArr := (*C.HttpHeader)(C.calloc(C.size_t(totalEntries), C.size_t(unsafe.Sizeof(C.HttpHeader{}))))
+	if entryArr == nil {
+		result.err_msg = C.CString("failed to allocate response header array")
+		return
+	}
+	totalStrBytes := headerBytes + cookieBytes
+	var arena *C.char
+	if totalStrBytes > 0 {
+		arena = (*C.char)(C.malloc(C.size_t(totalStrBytes)))
+		if arena == nil {
+			C.free(unsafe.Pointer(entryArr))
+			result.err_msg = C.CString("failed to allocate response string arena")
+			return
+		}
+	}
+
+	// Phase 3: fill headers and strings.
+	entrySlice := unsafe.Slice(entryArr, totalEntries)
+	entryIdx := 0
+	if arena != nil {
+		arenaBase := uintptr(unsafe.Pointer(arena))
+		offset := 0
+		for key, values := range respHeaders {
+			for _, val := range values {
+				// Copy key
+				dst := (*byte)(unsafe.Pointer(arenaBase + uintptr(offset)))
+				keySlice := unsafe.Slice(dst, len(key)+1)
+				copy(keySlice, key)
+				keySlice[len(key)] = 0
+				entrySlice[entryIdx].key = (*C.char)(unsafe.Pointer(dst))
+				offset += len(key) + 1
+				// Copy value
+				dst = (*byte)(unsafe.Pointer(arenaBase + uintptr(offset)))
+				valSlice := unsafe.Slice(dst, len(val)+1)
+				copy(valSlice, val)
+				valSlice[len(val)] = 0
+				entrySlice[entryIdx].value = (*C.char)(unsafe.Pointer(dst))
+				offset += len(val) + 1
+				entryIdx++
+			}
+		}
+		// Fill cookies
+		if cookieCount > 0 {
+			cookieSlice := entrySlice[headerEntries:]
+			for i, c := range respCookies {
+				dst := (*byte)(unsafe.Pointer(arenaBase + uintptr(offset)))
+				nameSlice := unsafe.Slice(dst, len(c.Name)+1)
+				copy(nameSlice, c.Name)
+				nameSlice[len(c.Name)] = 0
+				cookieSlice[i].key = (*C.char)(unsafe.Pointer(dst))
+				offset += len(c.Name) + 1
+				dst = (*byte)(unsafe.Pointer(arenaBase + uintptr(offset)))
+				valSlice := unsafe.Slice(dst, len(c.Value)+1)
+				copy(valSlice, c.Value)
+				valSlice[len(c.Value)] = 0
+				cookieSlice[i].value = (*C.char)(unsafe.Pointer(dst))
+				offset += len(c.Value) + 1
+			}
+		}
+	}
+
+	result.response_headers = entryArr
+	result.response_headers_len = C.int(headerEntries)
+	if cookieCount > 0 {
+		result.cookies = &entryArr[headerEntries]
+		result.cookies_len = C.int(cookieCount)
+	}
+	result._resp_strings = arena
+}
+
 //export ExecuteRequest
 func ExecuteRequest(opts *C.RequestOptions) *C.ResponseResult {
 	// Heap-allocate the result so the pointer remains valid after return.
@@ -1718,7 +2101,8 @@ func ExecuteRequest(opts *C.RequestOptions) *C.ResponseResult {
 	var bodyReader io.Reader
 	bodyLen := int(opts.body_len)
 	if bodyLen > 0 && opts.body != nil {
-		bodyData := C.GoBytes(unsafe.Pointer(opts.body), C.int(bodyLen))
+		// Zero-copy: the []byte points directly into Python-kept-alive C memory.
+		bodyData := unsafe.Slice((*byte)(unsafe.Pointer(opts.body)), bodyLen)
 		bodyReader = bytes.NewReader(bodyData)
 	}
 
@@ -1765,18 +2149,17 @@ func ExecuteRequest(opts *C.RequestOptions) *C.ResponseResult {
 
 	// ---- request cookies ---------------------------------------------------
 
-	// Pre-populate the cookie jar with user-provided cookies before sending.
-	// This is per-request data – not part of the client cache key.
+	// Attach per-request cookies directly to the request rather than
+	// injecting them into the shared client CookieJar (which would cause
+	// jar bloat and data races across concurrent requests).
 	if cookiesLen := int(opts.request_cookies_len); cookiesLen > 0 && opts.request_cookies != nil {
 		cookieSlice := unsafe.Slice(opts.request_cookies, cookiesLen)
-		httpCookies := make([]*http.Cookie, cookiesLen)
 		for i := 0; i < cookiesLen; i++ {
-			httpCookies[i] = &http.Cookie{
+			req.AddCookie(&http.Cookie{
 				Name:  C.GoString(cookieSlice[i].key),
 				Value: C.GoString(cookieSlice[i].value),
-			}
+			})
 		}
-		client.SetCookies(req.URL, httpCookies)
 	}
 
 	// ---- execute -----------------------------------------------------------
@@ -1806,24 +2189,44 @@ func ExecuteRequest(opts *C.RequestOptions) *C.ResponseResult {
 	}
 	var respBody []byte
 	var readErr error
+	var bodyDirectToC bool
 
 	if streamPath != "" {
 		// ---- streaming mode: write chunks to disk ------------------------
 		respBody, readErr = readBodyStreamToFile(resp.Body, opts)
 		// Body is empty when streaming — data went to the file.
-	} else {
-		respBody, readErr = io.ReadAll(resp.Body)
-	}
-
-	if readErr != nil {
-		result.err_msg = C.CString(fmt.Sprintf("failed to read response body: %v", readErr))
+	} else if cBody, cLen, cErr := readBodyToCHeap(resp.Body, resp.ContentLength); cBody != nil {
+		// Fast path: body read directly into C heap — no Go intermediate.
+		result.body = cBody
+		result.body_len = C.int(cLen)
+		bodyDirectToC = true
+	} else if cErr != nil {
+		result.err_msg = C.CString(fmt.Sprintf("failed to read response body: %v", cErr))
 		return result
+	} else {
+		respBody, readErr = readAllPooled(resp.Body)
+	}
+	if !bodyDirectToC {
+		if readErr != nil {
+			result.err_msg = C.CString(fmt.Sprintf("failed to read response body: %v", readErr))
+			return result
+		}
+		result.body_len = C.int(len(respBody))
+		if len(respBody) > 0 {
+			cBody := C.malloc(C.size_t(len(respBody)))
+			if cBody == nil {
+				result.err_msg = C.CString("failed to allocate memory for response body")
+				return result
+			}
+			cSlice := unsafe.Slice((*byte)(cBody), len(respBody))
+			copy(cSlice, respBody)
+			result.body = (*C.char)(cBody)
+		}
 	}
 
 	// ---- populate C result ------------------------------------------------
 
 	result.status_code = C.int(resp.StatusCode)
-	result.body_len = C.int(len(respBody))
 
 	// Final URL after redirects
 	if resp.Request != nil && resp.Request.URL != nil {
@@ -1833,70 +2236,10 @@ func ExecuteRequest(opts *C.RequestOptions) *C.ResponseResult {
 	// HTTP protocol version used
 	result.used_protocol = C.CString(resp.Proto)
 
-	if len(respBody) > 0 {
-		cBody := C.malloc(C.size_t(len(respBody)))
-		if cBody == nil {
-			result.err_msg = C.CString("failed to allocate memory for response body")
-			return result
-		}
-		cSlice := unsafe.Slice((*byte)(cBody), len(respBody))
-		copy(cSlice, respBody)
-		result.body = (*C.char)(cBody)
-	}
-
-	// ---- response headers ------------------------------------------------
-
-	if len(resp.Header) > 0 {
-		// First pass: count total header entries
-		totalEntries := 0
-		for _, values := range resp.Header {
-			totalEntries += len(values)
-		}
-
-		if totalEntries > 0 {
-			headerArr := (*C.HttpHeader)(C.malloc(C.size_t(totalEntries) * C.size_t(unsafe.Sizeof(C.HttpHeader{}))))
-			if headerArr == nil {
-				result.err_msg = C.CString("failed to allocate memory for response headers")
-				return result
-			}
-			// Register the pointer immediately so FreeResponse can clean it
-			// up if C.CString panics during iteration below.
-			result.response_headers = headerArr
-			result.response_headers_len = C.int(totalEntries)
-
-			headerSlice := unsafe.Slice(headerArr, totalEntries)
-			idx := 0
-			for key, values := range resp.Header {
-				for _, val := range values {
-					ck := C.CString(key)
-					cv := C.CString(val)
-					headerSlice[idx].key = ck
-					headerSlice[idx].value = cv
-					idx++
-				}
-			}
-		}
-	}
-
-	// ---- response cookies -------------------------------------------------
-
-	if responseCookies := resp.Cookies(); len(responseCookies) > 0 {
-		n := len(responseCookies)
-		cookieArr := (*C.HttpHeader)(C.malloc(C.size_t(n) * C.size_t(unsafe.Sizeof(C.HttpHeader{}))))
-		if cookieArr == nil {
-			result.err_msg = C.CString("failed to allocate memory for response cookies")
-			return result
-		}
-		// Register the pointer immediately so FreeResponse can clean it
-		// up if C.CString panics during iteration below.
-		result.cookies = cookieArr
-		result.cookies_len = C.int(n)
-
-		cookieSlice := unsafe.Slice(cookieArr, n)
-		for i, c := range responseCookies {
-			cookieSlice[i].key = C.CString(c.Name)
-			cookieSlice[i].value = C.CString(c.Value)
-		}
+	// ---- response headers + cookies (arena-based, single C allocation) -----
+	packResponseArena(result, resp.Header, resp.Cookies())
+	if result.err_msg != nil {
+		return result
 	}
 
 	return result
@@ -1907,19 +2250,45 @@ func FreeResponse(res *C.ResponseResult) {
 	if res == nil {
 		return
 	}
-	// Free response headers (individual key/value strings + array)
-	if res.response_headers != nil && res.response_headers_len > 0 {
-		headerSlice := unsafe.Slice(res.response_headers, res.response_headers_len)
-		for i := 0; i < int(res.response_headers_len); i++ {
-			if headerSlice[i].key != nil {
-				C.free(unsafe.Pointer(headerSlice[i].key))
-			}
-			if headerSlice[i].value != nil {
-				C.free(unsafe.Pointer(headerSlice[i].value))
-			}
+	// Free response headers + cookies (arena-based if _resp_strings is set).
+	if res._resp_strings != nil {
+		// All key/value strings were allocated in a single arena.
+		C.free(unsafe.Pointer(res._resp_strings))
+		res._resp_strings = nil
+		// Headers and cookies share a single combined HttpHeader array.
+		if res.response_headers != nil {
+			C.free(unsafe.Pointer(res.response_headers))
+			res.response_headers = nil
+			res.cookies = nil // same allocation, already freed
 		}
-		C.free(unsafe.Pointer(res.response_headers))
-		res.response_headers = nil
+	} else {
+		// Legacy path: individually allocated C.CString strings.
+		if res.response_headers != nil && res.response_headers_len > 0 {
+			headerSlice := unsafe.Slice(res.response_headers, res.response_headers_len)
+			for i := 0; i < int(res.response_headers_len); i++ {
+				if headerSlice[i].key != nil {
+					C.free(unsafe.Pointer(headerSlice[i].key))
+				}
+				if headerSlice[i].value != nil {
+					C.free(unsafe.Pointer(headerSlice[i].value))
+				}
+			}
+			C.free(unsafe.Pointer(res.response_headers))
+			res.response_headers = nil
+		}
+		if res.cookies != nil && res.cookies_len > 0 {
+			cookieSlice := unsafe.Slice(res.cookies, res.cookies_len)
+			for i := 0; i < int(res.cookies_len); i++ {
+				if cookieSlice[i].key != nil {
+					C.free(unsafe.Pointer(cookieSlice[i].key))
+				}
+				if cookieSlice[i].value != nil {
+					C.free(unsafe.Pointer(cookieSlice[i].value))
+				}
+			}
+			C.free(unsafe.Pointer(res.cookies))
+			res.cookies = nil
+		}
 	}
 	if res.body != nil {
 		C.free(unsafe.Pointer(res.body))
@@ -1937,20 +2306,6 @@ func FreeResponse(res *C.ResponseResult) {
 		C.free(unsafe.Pointer(res.used_protocol))
 		res.used_protocol = nil
 	}
-	// Free response cookies (individual key/value strings + array)
-	if res.cookies != nil && res.cookies_len > 0 {
-		cookieSlice := unsafe.Slice(res.cookies, res.cookies_len)
-		for i := 0; i < int(res.cookies_len); i++ {
-			if cookieSlice[i].key != nil {
-				C.free(unsafe.Pointer(cookieSlice[i].key))
-			}
-			if cookieSlice[i].value != nil {
-				C.free(unsafe.Pointer(cookieSlice[i].value))
-			}
-		}
-		C.free(unsafe.Pointer(res.cookies))
-		res.cookies = nil
-	}
 	C.free(unsafe.Pointer(res))
 }
 
@@ -1960,12 +2315,54 @@ func ClearClientPool() {
 	defer clientPoolMu.Unlock()
 
 	clientPool.Range(func(key, value any) bool {
-		if client, ok := value.(tls_client.HttpClient); ok {
+		if entry, ok := value.(*poolEntry); ok {
+			entry.client.CloseIdleConnections()
+		} else if client, ok := value.(tls_client.HttpClient); ok {
+			// Legacy cleanup: entries stored before poolEntry wrapper was introduced
 			client.CloseIdleConnections()
 		}
 		clientPool.Delete(key)
 		return true
 	})
+	// Note: the eviction goroutine is intentionally NOT stopped here.
+	// It continues to run (harmlessly iterating an empty pool until it
+	// repopulates) so that TTL eviction remains active across clear cycles.
+}
+
+//export GetPoolStats
+func GetPoolStats(stats *C.PoolStats) {
+	if stats == nil {
+		return
+	}
+	stats.total_evictions = C.longlong(totalEvictions.Load())
+	stats.last_eviction_count = C.longlong(lastEvictionCount.Load())
+	stats.last_eviction_time = C.longlong(lastEvictionTime.Load())
+
+	// Count current pool entries (approximate — no lock).
+	var count int64
+	clientPool.Range(func(_, _ any) bool {
+		count++
+		return true
+	})
+	stats.pool_entry_count = C.longlong(count)
+	stats.pool_ttl_seconds = C.longlong(time.Duration(poolTTLNs.Load()) / time.Second)
+	stats.pool_scan_interval_seconds = C.longlong(time.Duration(poolScanIntervalNs.Load()) / time.Second)
+}
+
+//export SetPoolTTL
+func SetPoolTTL(seconds C.int) {
+	if seconds <= 0 {
+		seconds = 300 // default 5 minutes
+	}
+	poolTTLNs.Store(int64(time.Duration(seconds) * time.Second))
+}
+
+//export SetPoolScanInterval
+func SetPoolScanInterval(seconds C.int) {
+	if seconds <= 0 {
+		seconds = 60 // default 1 minute
+	}
+	poolScanIntervalNs.Store(int64(time.Duration(seconds) * time.Second))
 }
 
 //export RequestAsync

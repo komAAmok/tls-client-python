@@ -90,7 +90,7 @@ func TestClient_SkipExistingCookiesOnSetCookiesResponse(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	urlString := "https://eu.kith.com/"
+	urlString := "https://tls.browserleaks.com/json"
 	req, err := http.NewRequest(http.MethodGet, urlString, nil)
 	if err != nil {
 		t.Fatal(err)
@@ -137,7 +137,7 @@ func TestClient_SkipExistingCookiesOnSetCookiesResponse(t *testing.T) {
 
 	assert.Equal(t, 6, len(client.GetCookies(u)))
 
-	req, err = http.NewRequest(http.MethodGet, "https://eu.kith.com/", nil)
+	req, err = http.NewRequest(http.MethodGet, "https://tls.browserleaks.com/json", nil)
 	if err != nil {
 		t.Fatal(err)
 	}

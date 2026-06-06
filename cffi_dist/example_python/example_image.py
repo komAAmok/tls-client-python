@@ -58,7 +58,7 @@ requestPayload = {
         "accept-encoding",
         "accept-language"
     ],
-    "requestUrl": "https://avatars.githubusercontent.com/u/17678241?v=4",
+    "requestUrl": "https://tls.browserleaks.com/",
     "requestMethod": "GET",
     "requestBody": "",
     "requestCookies": []

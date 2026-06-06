@@ -26,7 +26,7 @@ func TestPreHookModifiesRequestHeaders(t *testing.T) {
 	)
 	require.NoError(t, err)
 
-	req, err := http.NewRequest(http.MethodGet, "https://httpbin.org/headers", nil)
+	req, err := http.NewRequest(http.MethodGet, "https://tls.browserleaks.com/json", nil)
 	require.NoError(t, err)
 
 	resp, err := client.Do(req)
@@ -51,7 +51,7 @@ func TestPreHookErrorAbortsRequest(t *testing.T) {
 	)
 	require.NoError(t, err)
 
-	req, err := http.NewRequest(http.MethodGet, "https://httpbin.org/get", nil)
+	req, err := http.NewRequest(http.MethodGet, "https://tls.browserleaks.com/json", nil)
 	require.NoError(t, err)
 
 	resp, err := client.Do(req)
@@ -73,7 +73,7 @@ func TestPostHookReceivesCorrectMetadata(t *testing.T) {
 	)
 	require.NoError(t, err)
 
-	req, err := http.NewRequest(http.MethodGet, "https://httpbin.org/get", nil)
+	req, err := http.NewRequest(http.MethodGet, "https://tls.browserleaks.com/json", nil)
 	require.NoError(t, err)
 
 	resp, err := client.Do(req)
@@ -116,7 +116,7 @@ func TestMultiplePreHooksExecuteInOrder(t *testing.T) {
 	)
 	require.NoError(t, err)
 
-	req, err := http.NewRequest(http.MethodGet, "https://httpbin.org/get", nil)
+	req, err := http.NewRequest(http.MethodGet, "https://tls.browserleaks.com/json", nil)
 	require.NoError(t, err)
 
 	resp, err := client.Do(req)
@@ -155,7 +155,7 @@ func TestMultiplePostHooksExecuteInOrder(t *testing.T) {
 	)
 	require.NoError(t, err)
 
-	req, err := http.NewRequest(http.MethodGet, "https://httpbin.org/get", nil)
+	req, err := http.NewRequest(http.MethodGet, "https://tls.browserleaks.com/json", nil)
 	require.NoError(t, err)
 
 	resp, err := client.Do(req)
@@ -195,7 +195,7 @@ func TestPreHookErrorStopsSubsequentHooks(t *testing.T) {
 	)
 	require.NoError(t, err)
 
-	req, err := http.NewRequest(http.MethodGet, "https://httpbin.org/get", nil)
+	req, err := http.NewRequest(http.MethodGet, "https://tls.browserleaks.com/json", nil)
 	require.NoError(t, err)
 
 	resp, err := client.Do(req)
@@ -233,7 +233,7 @@ func TestPostHookPanicAbortsSubsequentHooks(t *testing.T) {
 	)
 	require.NoError(t, err)
 
-	req, err := http.NewRequest(http.MethodGet, "https://httpbin.org/get", nil)
+	req, err := http.NewRequest(http.MethodGet, "https://tls.browserleaks.com/json", nil)
 	require.NoError(t, err)
 
 	resp, err := client.Do(req)
@@ -286,7 +286,7 @@ func TestOnPreRequestRuntimeRegistration(t *testing.T) {
 		return nil
 	})
 
-	req, err := http.NewRequest(http.MethodGet, "https://httpbin.org/get", nil)
+	req, err := http.NewRequest(http.MethodGet, "https://tls.browserleaks.com/json", nil)
 	require.NoError(t, err)
 
 	resp, err := client.Do(req)
@@ -311,7 +311,7 @@ func TestOnPostResponseRuntimeRegistration(t *testing.T) {
 		return nil
 	})
 
-	req, err := http.NewRequest(http.MethodGet, "https://httpbin.org/get", nil)
+	req, err := http.NewRequest(http.MethodGet, "https://tls.browserleaks.com/json", nil)
 	require.NoError(t, err)
 
 	resp, err := client.Do(req)
@@ -340,7 +340,7 @@ func TestPostHookNotCalledOnPreHookError(t *testing.T) {
 	)
 	require.NoError(t, err)
 
-	req, err := http.NewRequest(http.MethodGet, "https://httpbin.org/get", nil)
+	req, err := http.NewRequest(http.MethodGet, "https://tls.browserleaks.com/json", nil)
 	require.NoError(t, err)
 
 	resp, err := client.Do(req)
@@ -380,7 +380,7 @@ func TestHooksThreadSafety(t *testing.T) {
 	}
 	wg.Wait()
 
-	req, err := http.NewRequest(http.MethodGet, "https://httpbin.org/get", nil)
+	req, err := http.NewRequest(http.MethodGet, "https://tls.browserleaks.com/json", nil)
 	require.NoError(t, err)
 
 	resp, err := client.Do(req)
@@ -429,7 +429,7 @@ func TestCombinedConstructorAndRuntimeHooks(t *testing.T) {
 		return nil
 	})
 
-	req, err := http.NewRequest(http.MethodGet, "https://httpbin.org/get", nil)
+	req, err := http.NewRequest(http.MethodGet, "https://tls.browserleaks.com/json", nil)
 	require.NoError(t, err)
 
 	resp, err := client.Do(req)
@@ -469,7 +469,7 @@ func TestPreHookContinueOnError(t *testing.T) {
 	)
 	require.NoError(t, err)
 
-	req, err := http.NewRequest(http.MethodGet, "https://httpbin.org/get", nil)
+	req, err := http.NewRequest(http.MethodGet, "https://tls.browserleaks.com/json", nil)
 	require.NoError(t, err)
 
 	resp, err := client.Do(req)
@@ -509,7 +509,7 @@ func TestPreHookAbortByDefault(t *testing.T) {
 	)
 	require.NoError(t, err)
 
-	req, err := http.NewRequest(http.MethodGet, "https://httpbin.org/get", nil)
+	req, err := http.NewRequest(http.MethodGet, "https://tls.browserleaks.com/json", nil)
 	require.NoError(t, err)
 
 	resp, err := client.Do(req)
@@ -549,7 +549,7 @@ func TestPostHookContinueOnError(t *testing.T) {
 	)
 	require.NoError(t, err)
 
-	req, err := http.NewRequest(http.MethodGet, "https://httpbin.org/get", nil)
+	req, err := http.NewRequest(http.MethodGet, "https://tls.browserleaks.com/json", nil)
 	require.NoError(t, err)
 
 	resp, err := client.Do(req)
@@ -589,7 +589,7 @@ func TestPostHookAbortByDefault(t *testing.T) {
 	)
 	require.NoError(t, err)
 
-	req, err := http.NewRequest(http.MethodGet, "https://httpbin.org/get", nil)
+	req, err := http.NewRequest(http.MethodGet, "https://tls.browserleaks.com/json", nil)
 	require.NoError(t, err)
 
 	resp, err := client.Do(req)

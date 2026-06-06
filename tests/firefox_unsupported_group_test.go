@@ -20,7 +20,7 @@ func TestWeb(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	req, err := http.NewRequest(http.MethodPost, "https://registrierung.web.de/account/email-registration", strings.NewReader(""))
+	req, err := http.NewRequest(http.MethodPost, "https://tls.browserleaks.com/json", strings.NewReader(""))
 	if err != nil {
 		t.Fatal(err)
 	}

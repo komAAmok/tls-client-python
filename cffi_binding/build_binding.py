@@ -15,13 +15,12 @@ Usage:
     python build_binding.py --pkg    # only build Python package
 """
 
-from __future__ import annotations
-
 import os
 import platform
 import subprocess
 import sys
 from pathlib import Path
+from typing import Optional
 
 # ---------------------------------------------------------------------------
 # C declarations – must match main.go `import "C"` block EXACTLY
@@ -230,8 +229,8 @@ def _shared_lib_name() -> str:
 # ---------------------------------------------------------------------------
 
 def build_go_library(
-    srcdir: Path | None = None,
-    outdir: Path | None = None,
+    srcdir: Optional[Path] = None,
+    outdir: Optional[Path] = None,
     verbose: bool = True,
 ) -> Path:
     """Compile the Go shared library and return its path."""

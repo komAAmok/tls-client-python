@@ -56,7 +56,7 @@ requestPayload = {
         "accept-encoding",
         "accept-language"
     ],
-    "requestUrl": "https://microsoft.com",
+    "requestUrl": "https://tls.browserleaks.com/json",
     "requestMethod": "GET",
     "requestBody": "",
     "requestCookies": []
@@ -79,7 +79,7 @@ print(response_object)
 
 cookiePayload = {
     "sessionId": "my-session-id",
-    "url": "https://microsoft.com",
+    "url": "https://tls.browserleaks.com/json",
 }
 
 cookieResponse = getCookiesFromSession(json.dumps(cookiePayload).encode('utf-8'))

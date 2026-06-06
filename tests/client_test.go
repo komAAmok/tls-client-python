@@ -155,7 +155,7 @@ func chrome116WithPsk(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	req, err := http.NewRequest(http.MethodGet, peetApiEndpoint, nil)
+	req, err := http.NewRequest(http.MethodGet, browserleaksEndpoint, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -169,7 +169,7 @@ func chrome116WithPsk(t *testing.T) {
 
 	compareResponse(t, "chrome", clientFingerprints[chrome][tls.HelloChrome_112.Str()], resp)
 
-	req, err = http.NewRequest(http.MethodGet, peetApiEndpoint, nil)
+	req, err = http.NewRequest(http.MethodGet, browserleaksEndpoint, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -194,7 +194,7 @@ func chrome112(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	req, err := http.NewRequest(http.MethodGet, peetApiEndpoint, nil)
+	req, err := http.NewRequest(http.MethodGet, browserleaksEndpoint, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -219,7 +219,7 @@ func chrome111(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	req, err := http.NewRequest(http.MethodGet, peetApiEndpoint, nil)
+	req, err := http.NewRequest(http.MethodGet, browserleaksEndpoint, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -244,7 +244,7 @@ func chrome110(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	req, err := http.NewRequest(http.MethodGet, peetApiEndpoint, nil)
+	req, err := http.NewRequest(http.MethodGet, browserleaksEndpoint, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -269,7 +269,7 @@ func chrome109(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	req, err := http.NewRequest(http.MethodGet, peetApiEndpoint, nil)
+	req, err := http.NewRequest(http.MethodGet, browserleaksEndpoint, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -294,7 +294,7 @@ func chrome108(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	req, err := http.NewRequest(http.MethodGet, peetApiEndpoint, nil)
+	req, err := http.NewRequest(http.MethodGet, browserleaksEndpoint, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -319,7 +319,7 @@ func chrome107(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	req, err := http.NewRequest(http.MethodGet, peetApiEndpoint, nil)
+	req, err := http.NewRequest(http.MethodGet, browserleaksEndpoint, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -344,7 +344,7 @@ func chrome105(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	req, err := http.NewRequest(http.MethodGet, peetApiEndpoint, nil)
+	req, err := http.NewRequest(http.MethodGet, browserleaksEndpoint, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -369,7 +369,7 @@ func chrome104(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	req, err := http.NewRequest(http.MethodGet, peetApiEndpoint, nil)
+	req, err := http.NewRequest(http.MethodGet, browserleaksEndpoint, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -394,7 +394,7 @@ func chrome103(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	req, err := http.NewRequest(http.MethodGet, peetApiEndpoint, nil)
+	req, err := http.NewRequest(http.MethodGet, browserleaksEndpoint, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -419,7 +419,7 @@ func safari_16_0(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	req, err := http.NewRequest(http.MethodGet, peetApiEndpoint, nil)
+	req, err := http.NewRequest(http.MethodGet, browserleaksEndpoint, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -444,7 +444,7 @@ func safari_iOS_16_0(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	req, err := http.NewRequest(http.MethodGet, peetApiEndpoint, nil)
+	req, err := http.NewRequest(http.MethodGet, browserleaksEndpoint, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -469,7 +469,7 @@ func safari_iOS_18_0(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	req, err := http.NewRequest(http.MethodGet, peetApiEndpoint, nil)
+	req, err := http.NewRequest(http.MethodGet, browserleaksEndpoint, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -494,7 +494,7 @@ func firefox_105(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	req, err := http.NewRequest(http.MethodGet, peetApiEndpoint, nil)
+	req, err := http.NewRequest(http.MethodGet, browserleaksEndpoint, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -519,7 +519,7 @@ func firefox_106(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	req, err := http.NewRequest(http.MethodGet, peetApiEndpoint, nil)
+	req, err := http.NewRequest(http.MethodGet, browserleaksEndpoint, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -544,7 +544,7 @@ func firefox_108(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	req, err := http.NewRequest(http.MethodGet, peetApiEndpoint, nil)
+	req, err := http.NewRequest(http.MethodGet, browserleaksEndpoint, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -569,7 +569,7 @@ func chrome_124(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	req, err := http.NewRequest(http.MethodGet, peetApiEndpoint, nil)
+	req, err := http.NewRequest(http.MethodGet, browserleaksEndpoint, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -595,7 +595,7 @@ func chrome_146_PSK(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	req, err := http.NewRequest(http.MethodGet, peetApiEndpoint, nil)
+	req, err := http.NewRequest(http.MethodGet, browserleaksEndpoint, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -609,7 +609,7 @@ func chrome_146_PSK(t *testing.T) {
 
 	compareResponse(t, "chrome", clientFingerprints[chrome][profiles.Chrome_146.GetClientHelloStr()], resp)
 
-	req, err = http.NewRequest(http.MethodGet, peetApiEndpoint, nil)
+	req, err = http.NewRequest(http.MethodGet, browserleaksEndpoint, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -634,7 +634,7 @@ func safari_iOS_26_0(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	req, err := http.NewRequest(http.MethodGet, peetApiEndpoint, nil)
+	req, err := http.NewRequest(http.MethodGet, browserleaksEndpoint, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -659,7 +659,7 @@ func safari_iOS_18_5(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	req, err := http.NewRequest(http.MethodGet, peetApiEndpoint, nil)
+	req, err := http.NewRequest(http.MethodGet, browserleaksEndpoint, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -684,7 +684,7 @@ func chrome_144(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	req, err := http.NewRequest(http.MethodGet, peetApiEndpoint, nil)
+	req, err := http.NewRequest(http.MethodGet, browserleaksEndpoint, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -709,7 +709,7 @@ func chrome_133(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	req, err := http.NewRequest(http.MethodGet, peetApiEndpoint, nil)
+	req, err := http.NewRequest(http.MethodGet, browserleaksEndpoint, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -734,7 +734,7 @@ func chrome_131(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	req, err := http.NewRequest(http.MethodGet, peetApiEndpoint, nil)
+	req, err := http.NewRequest(http.MethodGet, browserleaksEndpoint, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -759,7 +759,7 @@ func chrome_120(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	req, err := http.NewRequest(http.MethodGet, peetApiEndpoint, nil)
+	req, err := http.NewRequest(http.MethodGet, browserleaksEndpoint, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -784,7 +784,7 @@ func chrome_117(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	req, err := http.NewRequest(http.MethodGet, peetApiEndpoint, nil)
+	req, err := http.NewRequest(http.MethodGet, browserleaksEndpoint, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -809,7 +809,7 @@ func firefox_147(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	req, err := http.NewRequest(http.MethodGet, peetApiEndpoint, nil)
+	req, err := http.NewRequest(http.MethodGet, browserleaksEndpoint, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -834,7 +834,7 @@ func firefox_117(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	req, err := http.NewRequest(http.MethodGet, peetApiEndpoint, nil)
+	req, err := http.NewRequest(http.MethodGet, browserleaksEndpoint, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -859,7 +859,7 @@ func firefox_110(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	req, err := http.NewRequest(http.MethodGet, peetApiEndpoint, nil)
+	req, err := http.NewRequest(http.MethodGet, browserleaksEndpoint, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -884,7 +884,7 @@ func firefox_132(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	req, err := http.NewRequest(http.MethodGet, peetApiEndpoint, nil)
+	req, err := http.NewRequest(http.MethodGet, browserleaksEndpoint, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -909,7 +909,7 @@ func opera_91(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	req, err := http.NewRequest(http.MethodGet, peetApiEndpoint, nil)
+	req, err := http.NewRequest(http.MethodGet, browserleaksEndpoint, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -934,7 +934,7 @@ func safariIos17(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	req, err := http.NewRequest(http.MethodGet, peetApiEndpoint, nil)
+	req, err := http.NewRequest(http.MethodGet, browserleaksEndpoint, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -965,20 +965,20 @@ func compareResponse(t *testing.T, clientName string, expectedValues map[string]
 	for key, expectedValue := range expectedValues {
 		switch key {
 		case ja3String:
-			if tlsApiResponse.TLS.Ja3 != expectedValue {
-				t.Errorf("TLS Ja3 mismatch.\nexpected: %s\nactual  : %s\nclient: %s", expectedValue, tlsApiResponse.TLS.Ja3, clientName)
+			if tlsApiResponse.Ja3Text != expectedValue {
+				t.Errorf("TLS Ja3 mismatch.\nexpected: %s\nactual  : %s\nclient: %s", expectedValue, tlsApiResponse.Ja3Text, clientName)
 			}
 		case ja3Hash:
-			if tlsApiResponse.TLS.Ja3Hash != expectedValue {
-				t.Errorf("TLS Ja3 hash mismatch.\nexpected: %s\nactual  : %s\nclient: %s", expectedValue, tlsApiResponse.TLS.Ja3Hash, clientName)
+			if tlsApiResponse.Ja3Hash != expectedValue {
+				t.Errorf("TLS Ja3 hash mismatch.\nexpected: %s\nactual  : %s\nclient: %s", expectedValue, tlsApiResponse.Ja3Hash, clientName)
 			}
 		case akamaiFingerprint:
-			if tlsApiResponse.HTTP2.AkamaiFingerprint != expectedValue {
-				t.Errorf("akamai fingerprint mismatch.\nexpected: %s\nactual  : %s\nclient: %s", expectedValue, tlsApiResponse.HTTP2.AkamaiFingerprint, clientName)
+			if tlsApiResponse.AkamaiText != expectedValue {
+				t.Errorf("akamai fingerprint mismatch.\nexpected: %s\nactual  : %s\nclient: %s", expectedValue, tlsApiResponse.AkamaiText, clientName)
 			}
 		case akamaiFingerprintHash:
-			if tlsApiResponse.HTTP2.AkamaiFingerprintHash != expectedValue {
-				t.Errorf("akamai fingerprint hash mismatch.\nexpected: %s\nactual  : %s\nclient: %s", expectedValue, tlsApiResponse.HTTP2.AkamaiFingerprintHash, clientName)
+			if tlsApiResponse.AkamaiHash != expectedValue {
+				t.Errorf("akamai fingerprint hash mismatch.\nexpected: %s\nactual  : %s\nclient: %s", expectedValue, tlsApiResponse.AkamaiHash, clientName)
 			}
 		}
 	}
@@ -994,7 +994,7 @@ func okhttp4Android13(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	req, err := http.NewRequest(http.MethodGet, peetApiEndpoint, nil)
+	req, err := http.NewRequest(http.MethodGet, browserleaksEndpoint, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1019,7 +1019,7 @@ func okhttp4Android12(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	req, err := http.NewRequest(http.MethodGet, peetApiEndpoint, nil)
+	req, err := http.NewRequest(http.MethodGet, browserleaksEndpoint, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1044,7 +1044,7 @@ func okhttp4Android11(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	req, err := http.NewRequest(http.MethodGet, peetApiEndpoint, nil)
+	req, err := http.NewRequest(http.MethodGet, browserleaksEndpoint, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1069,7 +1069,7 @@ func okhttp4Android10(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	req, err := http.NewRequest(http.MethodGet, peetApiEndpoint, nil)
+	req, err := http.NewRequest(http.MethodGet, browserleaksEndpoint, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1094,7 +1094,7 @@ func okhttp4Android9(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	req, err := http.NewRequest(http.MethodGet, peetApiEndpoint, nil)
+	req, err := http.NewRequest(http.MethodGet, browserleaksEndpoint, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1119,7 +1119,7 @@ func okhttp4Android8(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	req, err := http.NewRequest(http.MethodGet, peetApiEndpoint, nil)
+	req, err := http.NewRequest(http.MethodGet, browserleaksEndpoint, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1144,7 +1144,7 @@ func okhttp4Android7(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	req, err := http.NewRequest(http.MethodGet, peetApiEndpoint, nil)
+	req, err := http.NewRequest(http.MethodGet, browserleaksEndpoint, nil)
 	if err != nil {
 		t.Fatal(err)
 	}

@@ -61,14 +61,14 @@ from tls_client import Session
 session = Session(client_identifier="chrome_146")
 
 # GET request
-resp = session.get("https://httpbin.org/get")
+resp = session.get("https://tls.browserleaks.com/json")
 print(resp.status_code)   # 200
 print(resp.text)           # JSON body
 print(resp.used_protocol)  # "HTTP/2.0"
 
 # POST with JSON
 resp = session.post(
-    "https://httpbin.org/post",
+    "https://tls.browserleaks.com/json",
     body=b'{"hello":"world"}',
     headers={"Content-Type": "application/json"}
 )
@@ -80,7 +80,7 @@ print(data["json"])  # {"hello": "world"}
 
 ```python
 with Session(client_identifier="safari_ios_18_5") as s:
-    resp = s.get("https://www.example.com")
+    resp = s.get("https://tls.browserleaks.com/json")
     print(resp.status_code)
 ```
 
@@ -92,7 +92,7 @@ from tls_client import AsyncSession
 
 async def main():
     async with AsyncSession(client_identifier="firefox_148") as s:
-        resp = await s.get("https://httpbin.org/get")
+        resp = await s.get("https://tls.browserleaks.com/json")
         print(resp.json())
 
 asyncio.run(main())
@@ -254,7 +254,7 @@ session = Session(
 
 ```python
 resp = session.stream_to_file(
-    "GET", "https://httpbin.org/image/png",
+    "GET", "https://tls.browserleaks.com/",
     output_path="/tmp/image.png"
 )
 print(resp.status_code)  # response metadata still available
@@ -267,7 +267,7 @@ All `Session` constructor parameters can be overridden per request:
 ```python
 s = Session(client_identifier="chrome_146")
 # Override fingerprint for a single request
-resp = s.get("https://tls.peet.ws/api/all", client_identifier="firefox_148")
+resp = s.get("https://tls.browserleaks.com/json", client_identifier="firefox_148")
 ```
 
 ---

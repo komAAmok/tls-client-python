@@ -26,9 +26,9 @@ from tls_client._core import (
     Session,
     Request,
     Response,
+    ClientIdentifiers,
+    ClientIdentifiers,
     clear_client_pool,
-    SUPPORTED_CLIENT_IDENTIFIERS,
-    list_client_identifiers,
 )
 
 __all__ = [
@@ -36,8 +36,8 @@ __all__ = [
     "AsyncSession",
     "Request",
     "Response",
+    "ClientIdentifiers",
+    "ClientIdentifiers",
     "clear_client_pool",
-    "SUPPORTED_CLIENT_IDENTIFIERS",
-    "list_client_identifiers",
 ]
 __version__ = "1.14.0"

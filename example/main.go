@@ -33,18 +33,8 @@ func main() {
 }
 
 type TlsBrowserleaksResponse struct {
-	UserAgent  string `json:"user_agent"`
-	Ja3Hash    string `json:"ja3_hash"`
-	Ja3Text    string `json:"ja3_text"`
-	Ja3NHash   string `json:"ja3n_hash"`
-	Ja3NText   string `json:"ja3n_text"`
-	Ja4        string `json:"ja4"`
-	Ja4R       string `json:"ja4_r"`
-	Ja4O       string `json:"ja4_o"`
-	Ja4Ro      string `json:"ja4_ro"`
-	AkamaiHash string `json:"akamai_hash"`
-	AkamaiText string `json:"akamai_text"`
-	TLS        struct {
+	TlsApiResponse
+	TLS struct {
 		CipherSuite []struct {
 			Name  string `json:"name"`
 			Value int    `json:"value"`
@@ -93,61 +83,17 @@ type TlsBrowserleaksResponse struct {
 }
 
 type TlsApiResponse struct {
-	IP          string `json:"ip"`
-	HTTPVersion string `json:"http_version"`
-	Method      string `json:"method"`
-	TLS         struct {
-		TLSVersionRecord     string   `json:"tls_version_record"`
-		TLSVersionNegotiated string   `json:"tls_version_negotiated"`
-		Ja3                  string   `json:"ja3"`
-		Ja3Hash              string   `json:"ja3_hash"`
-		ClientRandom         string   `json:"client_random"`
-		SessionID            string   `json:"session_id"`
-		Ciphers              []string `json:"ciphers"`
-		Extensions           []struct {
-			EllipticCurvesPointFormats interface{} `json:"elliptic_curves_point_formats,omitempty"`
-			Name                       string      `json:"name"`
-			ServerName                 string      `json:"server_name,omitempty"`
-			Data                       string      `json:"data,omitempty"`
-			PskKeyExchangeMode         string      `json:"PSK_Key_Exchange_Mode,omitempty"`
-			SupportedGroups            []string    `json:"supported_groups,omitempty"`
-			Protocols                  []string    `json:"protocols,omitempty"`
-			SignatureAlgorithms        []string    `json:"signature_algorithms,omitempty"`
-			SharedKeys                 []struct {
-				TLSGrease0X7A7A string `json:"TLS_GREASE (0x7a7a),omitempty"`
-				X2551929        string `json:"X25519 (29),omitempty"`
-			} `json:"shared_keys,omitempty"`
-			Versions      []string `json:"versions,omitempty"`
-			Algorithms    []string `json:"algorithms,omitempty"`
-			StatusRequest struct {
-				CertificateStatusType   string `json:"certificate_status_type"`
-				ResponderIDListLength   int    `json:"responder_id_list_length"`
-				RequestExtensionsLength int    `json:"request_extensions_length"`
-			} `json:"status_request,omitempty"`
-			PaddingDataLength int `json:"padding_data_length,omitempty"`
-		} `json:"extensions"`
-	} `json:"tls"`
-	HTTP2 struct {
-		AkamaiFingerprint     string `json:"akamai_fingerprint"`
-		AkamaiFingerprintHash string `json:"akamai_fingerprint_hash"`
-		SentFrames            []struct {
-			FrameType string   `json:"frame_type"`
-			Settings  []string `json:"settings,omitempty"`
-			Headers   []string `json:"headers,omitempty"`
-			Flags     []string `json:"flags,omitempty"`
-			Priority  struct {
-				Weight    int `json:"weight"`
-				DependsOn int `json:"depends_on"`
-				Exclusive int `json:"exclusive"`
-			} `json:"priority,omitempty"`
-			Length    int `json:"length"`
-			Increment int `json:"increment,omitempty"`
-			StreamID  int `json:"stream_id,omitempty"`
-		} `json:"sent_frames"`
-	} `json:"http2"`
-	HTTP1 struct {
-		Headers []string `json:"headers"`
-	} `json:"http1"`
+	UserAgent  string `json:"user_agent"`
+	Ja3Hash    string `json:"ja3_hash"`
+	Ja3Text    string `json:"ja3_text"`
+	Ja3NHash   string `json:"ja3n_hash"`
+	Ja3NText   string `json:"ja3n_text"`
+	Ja4        string `json:"ja4"`
+	Ja4R       string `json:"ja4_r"`
+	Ja4O       string `json:"ja4_o"`
+	Ja4Ro      string `json:"ja4_ro"`
+	AkamaiHash string `json:"akamai_hash"`
+	AkamaiText string `json:"akamai_text"`
 }
 
 func sslPinning() {
@@ -242,7 +188,7 @@ func requestToppsAsChrome107Client() {
 		return
 	}
 
-	req, err := http.NewRequest(http.MethodGet, "https://www.topps.com/", nil)
+	req, err := http.NewRequest(http.MethodGet, "https://tls.browserleaks.com/json", nil)
 	if err != nil {
 		log.Println(err)
 		return
@@ -292,7 +238,7 @@ func requestToppsAsChrome107Client() {
 	// this will fail as topps does now enforce solving cloudflare. only tls is not enough anymore
 	log.Printf("requesting topps as chrome107 => status code: %d\n", resp.StatusCode)
 
-	u, err := url.Parse("https://www.topps.com/")
+	u, err := url.Parse("https://tls.browserleaks.com/json")
 	if err != nil {
 		log.Println(err)
 		return
@@ -317,7 +263,7 @@ func postAsTlsClient() {
 	postData.Add("foo", "bar")
 	postData.Add("baz", "foo")
 
-	req, err := http.NewRequest(http.MethodPost, "https://eonk4gg5hquk0g6.m.pipedream.net", strings.NewReader(postData.Encode()))
+	req, err := http.NewRequest(http.MethodPost, "https://tls.browserleaks.com/json", strings.NewReader(postData.Encode()))
 	if err != nil {
 		log.Println(err)
 		return
@@ -362,7 +308,7 @@ func requestWithFollowRedirectSwitch() {
 		return
 	}
 
-	req, err := http.NewRequest(http.MethodGet, "https://currys.co.uk/products/sony-playstation-5-digital-edition-825-gb-10205198.html", nil)
+	req, err := http.NewRequest(http.MethodGet, "https://tls.browserleaks.com/json", nil)
 	if err != nil {
 		log.Println(err)
 		return
@@ -438,7 +384,7 @@ func downloadImageWithTlsClient() {
 		return
 	}
 
-	req, err := http.NewRequest(http.MethodGet, "https://avatars.githubusercontent.com/u/17678241?v=4", nil)
+	req, err := http.NewRequest(http.MethodGet, "https://tls.browserleaks.com/", nil)
 	if err != nil {
 		log.Println(err)
 		return
@@ -495,7 +441,7 @@ func rotateProxiesOnClient() {
 		return
 	}
 
-	req, err := http.NewRequest(http.MethodGet, "https://tls.peet.ws/api/all", nil)
+	req, err := http.NewRequest(http.MethodGet, "https://tls.browserleaks.com/json", nil)
 	if err != nil {
 		log.Println(err)
 		return
@@ -555,7 +501,7 @@ func rotateProxiesOnClient() {
 		return
 	}
 
-	log.Println(fmt.Sprintf("requesting tls.peet.ws with proxy 1 => ip: %s", tlsApiResponse.IP))
+	log.Println(fmt.Sprintf("requesting browserleaks with proxy 1 => ja4: %s", tlsApiResponse.Ja4))
 
 	// you need to put in here a valid proxy to make the example work
 	err = client.SetProxy("http://user:pass@host:port")
@@ -584,7 +530,7 @@ func rotateProxiesOnClient() {
 		return
 	}
 
-	log.Println(fmt.Sprintf("requesting tls.peet.ws with proxy 2 => ip: %s", tlsApiResponse.IP))
+	log.Println(fmt.Sprintf("requesting browserleaks with proxy 2 => ja4: %s", tlsApiResponse.Ja4))
 }
 
 func requestWithCustomClient() {
@@ -704,7 +650,7 @@ func requestWithCustomClient() {
 		return
 	}
 
-	req, err := http.NewRequest(http.MethodGet, "https://www.topps.com/", nil)
+	req, err := http.NewRequest(http.MethodGet, "https://tls.browserleaks.com/json", nil)
 	if err != nil {
 		log.Println(err)
 		return
@@ -970,7 +916,7 @@ func testPskExtension() {
 		return
 	}
 
-	req, err := http.NewRequest(http.MethodGet, "https://tls.peet.ws/api/all", nil)
+	req, err := http.NewRequest(http.MethodGet, "https://tls.browserleaks.com/json", nil)
 	if err != nil {
 		log.Println(err)
 		return
@@ -1005,14 +951,14 @@ func testPskExtension() {
 		return
 	}
 
-	if strings.Contains(tlsApiResponse.TLS.Ja3, "-41,") {
+	if strings.Contains(tlsApiResponse.Ja3Text, "-41,") {
 		log.Println("profile includes PSK extension (41)")
 	} else {
 		log.Println("profile does not include PSK extension (41)")
 	}
 
 	// Now we are doing the second request that the session resumption kicks in
-	req, err = http.NewRequest(http.MethodGet, "https://tls.peet.ws/api/all", nil)
+	req, err = http.NewRequest(http.MethodGet, "https://tls.browserleaks.com/json", nil)
 	if err != nil {
 		log.Println(err)
 		return
@@ -1047,7 +993,7 @@ func testPskExtension() {
 		return
 	}
 
-	if strings.Contains(secondTlsApiResponse.TLS.Ja3, "-41,") {
+	if strings.Contains(secondTlsApiResponse.Ja3Text, "-41,") {
 		log.Println("profile includes PSK extension (41)")
 	} else {
 		log.Println("profile does not include PSK extension (41)")
