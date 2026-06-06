@@ -289,11 +289,31 @@ func evictStaleEntries() {
 	})
 
 	var evicted int64
+	// Serialise with ClearClientPool and getOrCreateClient construction.
+	// Cache-hit lastAccess updates happen without this lock (atomic.Int64),
+	// but the re-check below catches concurrent refreshes regardless.
+	clientPoolMu.Lock()
+	defer clientPoolMu.Unlock()
+
 	for _, key := range toDelete {
-		if entry, ok := clientPool.Load(key); ok {
-			if pe, ok := entry.(*poolEntry); ok && pe.client != nil {
-				pe.client.CloseIdleConnections()
-			}
+		entry, ok := clientPool.Load(key)
+		if !ok {
+			continue // already removed by another goroutine
+		}
+		pe, ok := entry.(*poolEntry)
+		if !ok {
+			// Orphaned / type-mismatched entry — remove unconditionally.
+			clientPool.Delete(key)
+			evicted++
+			continue
+		}
+		// Re-check lastAccess under the lock: a concurrent request may have
+		// refreshed the entry since the Range scan completed.
+		if pe.lastAccess.Load() >= cutoff {
+			continue
+		}
+		if pe.client != nil {
+			pe.client.CloseIdleConnections()
 		}
 		clientPool.Delete(key)
 		evicted++
@@ -409,6 +429,8 @@ type requestConfig struct {
 	withDefaultBadPinHandler bool
 	requestCookies           []*http.Cookie
 	clientCertificates       []tls.Certificate
+	clientCertPEMs           [][]byte // raw cert PEM for cache-key parity with buildCacheKey
+	clientKeyPEMs            [][]byte // raw key PEM for cache-key parity with buildCacheKey
 	customTLSClient          *C.CustomTlsClient // deep-copied to C heap; freed after use
 	cacheKeyHash             string            // pre-computed by Python to skip CGO in buildCacheKey
 }
@@ -453,24 +475,28 @@ func deepCopyRequestOptions(opts *C.RequestOptions) (cfg *requestConfig) {
 		withDefaultBadPinHandler: int(opts.with_default_bad_pin_handler) != 0,
 	}
 
-	// If deepCopyCustomTLSClient succeeds but a subsequent operation
-	// (e.g. C.GoString on cache_key_hash) panics, the allocated C memory
-	// would be unreachable.  This deferred recover frees it before
-	// re-panicking.  The caller (RequestAsync) has a nil-guard on cfg
-	// to handle the case where the struct literal itself panics.
+	// NOTE: the deferred recover MUST be registered AFTER the struct literal.
+	// If the struct literal itself panics, cfg is nil (named return) and the
+	// caller's nil-guard handles it.  The defer covers panics during the deep
+	// copy of customTLSClient and the fields below — only customTLSClient
+	// involves C.malloc that would leak, all other fields are Go-managed.
 	defer func() {
 		if r := recover(); r != nil {
 			if cfg.customTLSClient != nil {
 				freeCustomTLSClient(cfg.customTLSClient)
 			}
+			cfg = nil // invalidate so callers see nil regardless of re-panic
 			panic(r)
 		}
 	}()
 
-	// Body — zero-copy: unsafe.Slice gives a []byte backed by the C memory
-	// that Python keeps alive via keep_alive (sync) or _pending_requests (async).
+	// Body — copy to Go heap so the goroutine owns the memory.
+	// Python owns the original C buffer and may free it immediately after
+	// RequestAsync returns (the goroutine runs asynchronously).  Using
+	// unsafe.Slice would alias Python memory, risking use-after-free if
+	// Python's async timeout fires before the goroutine reads the body.
 	if bl := int(opts.body_len); bl > 0 && opts.body != nil {
-		cfg.body = unsafe.Slice((*byte)(unsafe.Pointer(opts.body)), bl)
+		cfg.body = C.GoBytes(unsafe.Pointer(opts.body), C.int(bl))
 	}
 
 	// Stream I/O strings (guard against NULL from Python ffi.NULL)
@@ -523,6 +549,20 @@ func deepCopyRequestOptions(opts *C.RequestOptions) (cfg *requestConfig) {
 	// Client certificates (mTLS)
 	if ccl := int(opts.client_certificates_len); ccl > 0 && opts.client_certificates != nil {
 		cfg.clientCertificates = cClientCerts(opts.client_certificates, ccl)
+		// Also store raw PEM bytes for cache-key parity with buildCacheKey.
+		// tls.Certificate retains only the parsed DER — the original PEM is
+		// lost after X509KeyPair, so we save it here for the hash.
+		ccSlice := unsafe.Slice(opts.client_certificates, ccl)
+		cfg.clientCertPEMs = make([][]byte, ccl)
+		cfg.clientKeyPEMs = make([][]byte, ccl)
+		for i := 0; i < ccl; i++ {
+			if cpl := int(ccSlice[i].cert_pem_len); cpl > 0 && ccSlice[i].cert_pem != nil {
+				cfg.clientCertPEMs[i] = C.GoBytes(unsafe.Pointer(ccSlice[i].cert_pem), C.int(cpl))
+			}
+			if kpl := int(ccSlice[i].key_pem_len); kpl > 0 && ccSlice[i].key_pem != nil {
+				cfg.clientKeyPEMs[i] = C.GoBytes(unsafe.Pointer(ccSlice[i].key_pem), C.int(kpl))
+			}
+		}
 	}
 
 	// CustomTlsClient — deep-copy to C heap so buildCustomProfileFromC can use it.
@@ -1505,8 +1545,13 @@ func buildCacheKeyFromConfig(cfg *requestConfig) string {
 			fmt.Fprintf(h, "%s,", p)
 		}
 	}
-	for _, cert := range cfg.clientCertificates {
-		fmt.Fprintf(h, "|cc:%x", sha256.Sum256(cert.Certificate[0]))
+	for i := range cfg.clientCertPEMs {
+		if len(cfg.clientCertPEMs[i]) > 0 {
+			fmt.Fprintf(h, "|cc:%x", sha256.Sum256(cfg.clientCertPEMs[i]))
+		}
+		if len(cfg.clientKeyPEMs[i]) > 0 {
+			fmt.Fprintf(h, "|ck:%x", sha256.Sum256(cfg.clientKeyPEMs[i]))
+		}
 	}
 	// Hash custom TLS client configuration (mirrors buildCacheKey)
 	if cfg.customTLSClient != nil {

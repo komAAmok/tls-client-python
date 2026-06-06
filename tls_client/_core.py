@@ -35,6 +35,7 @@ import sys
 import threading
 from pathlib import Path
 from typing import Any, Dict, List, Literal, Optional
+import hashlib
 
 from tls_client._default_headers import DEFAULT_HEADERS
 
@@ -45,7 +46,6 @@ except ImportError:
 
 from typing_extensions import TypeAlias  # Python <3.10
 
-from typing_extensions import TypeAlias  # Python <3.10
 
 # ---------------------------------------------------------------------------
 # Supported TLS client identifiers — literal type for IDE autocompletion
@@ -1117,6 +1117,12 @@ def _compute_cache_key_hash(r: dict) -> str:
 
     The format matches Go's buildCacheKey exactly — same field order,
     same separators, same sort order for maps, same hex encoding.
+
+    FORMAT VERSION: 1
+    If you change the hash format below, increment the version AND update
+    Go's buildCacheKey / buildCacheKeyFromConfig in cffi_binding/main.go
+    and the corresponding test in test_cache_key_parity.py.  Format drift
+    causes silent cache poisoning (different keys → duplicate clients).
     """
     h = hashlib.sha256()
 
@@ -1264,7 +1270,7 @@ def _populate_request_options(
     def _val(name: str, as_bool: bool = False) -> Any:
         v = overrides.get(name)
         if v is None:
-            v = defaults[name]
+            v = defaults.get(name)  # defensive: missing key → None instead of KeyError
         if as_bool:
             return 1 if v else 0
         return v
@@ -2109,7 +2115,7 @@ class Session:
         ffi, lib = _get_ffi()
 
         def _val(name: str, override, as_bool: bool = False):
-            v = override if override is not None else self.defaults[name]
+            v = override if override is not None else self.defaults.get(name)
             if as_bool:
                 return 1 if v else 0
             return v
@@ -2490,12 +2496,18 @@ _async_callback_lock = threading.Lock()
 
 
 def _get_async_callback(ffi, lib):
+    """Return the singleton CFFI callback, creating it once under lock.
+
+    Always acquires _async_callback_lock — double‑checked locking is unsafe
+    under free‑threaded Python (PEP 703) because _async_callback may be
+    partially visible without a synchronisation edge.  Contention is
+    negligible: the callback is created once and cached thereafter.
+    """
     global _async_callback
-    if _async_callback is None:
-        with _async_callback_lock:
-            if _async_callback is None:
-                _async_callback = _make_async_callback(ffi, lib)
-    return _async_callback
+    with _async_callback_lock:
+        if _async_callback is None:
+            _async_callback = _make_async_callback(ffi, lib)
+        return _async_callback
 
 
 class AsyncSession:
@@ -2704,7 +2716,7 @@ class AsyncSession:
         def _val(name: str, as_bool: bool = False):
             v = kwargs.pop(name, None)
             if v is None:
-                v = self._session.defaults[name]
+                v = self._session.defaults.get(name)
             if as_bool:
                 return 1 if v else 0
             return v
@@ -2794,8 +2806,8 @@ class AsyncSession:
 
         # Pre-compute cache key hash and attach to opts (avoids ~50 CGO calls on hit).
         # Use kwargs.get() (non-destructive) so later _val() calls still find overrides.
-        def _ck(name):  return kwargs.get(name, self._session.defaults[name])
-        def _ckb(name): v = kwargs.get(name, self._session.defaults[name]); return 1 if v else 0
+        def _ck(name):  return kwargs.get(name, self._session.defaults.get(name))
+        def _ckb(name): v = kwargs.get(name, self._session.defaults.get(name)); return 1 if v else 0
         ck_hash = _compute_cache_key_hash({
             "client_identifier": _ck("client_identifier") or "",
             "proxy": _ck("proxy") or "",
@@ -2860,6 +2872,11 @@ class AsyncSession:
         safe_timeout = max(60.0, min(go_timeout * 2.0 + 10.0, 600.0))
 
         def _on_zombie_timeout(rid: int) -> None:
+            # Safe: by this point the Go goroutine has either completed
+            # (callback fired) or is hung.  If completed, _pending_requests
+            # already popped and we return early.  If hung, the goroutine
+            # owns its own body copy (deepCopyRequestOptions copies via
+            # C.GoBytes — Bug #5 fix), so releasing keep_alive is safe.
             with _pending_lock:
                 entry = _pending_requests.pop(rid, None)
             if entry is None:
@@ -2893,6 +2910,10 @@ class AsyncSession:
         ret = lib.RequestAsync(opts, request_id, callback)
 
         if ret != 0:
+            # RequestAsync returned an error — clean up the pending entry
+            # and cancel the defensive zombie timeout.  keep_alive is
+            # already safe to release because RequestAsync deep-copies
+            # before returning.
             with _pending_lock:
                 entry = _pending_requests.pop(request_id, None)
                 if entry is not None:

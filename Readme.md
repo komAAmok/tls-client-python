@@ -32,7 +32,7 @@ For a deep dive, see [this excellent article on TLS fingerprinting](https://http
 | 🚇 **Proxy Support** | HTTP and SOCKS5 proxies with CONNECT auth |
 | 🔀 **Redirect Control** | Choose whether to follow redirects per request |
 | 📊 **Bandwidth Tracking** | Monitor upload/download bytes in real time |
-| 🧵 **Async Support** | `AsyncSession` for asyncio integration |
+| 🔄 **sync/Async** | `Session`  +  `AsyncSession` |
 | 🛡️ **Panic-proof** | All Go panics caught and surfaced as Python exceptions |
 | ⚙️ **Custom TLS** | Full 26-field custom TLS client configuration |
 
@@ -46,9 +46,7 @@ pip install tls-client-python
 
 Pre-compiled binaries are included for **9 platforms** — no Go toolchain required.
 
-### Requirements
-
-- Python 3.6+
+> **Requirements:** Python 3.6+
 
 ---
 
@@ -58,41 +56,35 @@ Pre-compiled binaries are included for **9 platforms** — no Go toolchain requi
 from tls_client import Session
 
 # Create a session with Chrome 146 fingerprint
-session = Session(client_identifier="chrome_146")
+session = Session(client_identifier="chrome_146", verify=False)
 
 # GET request
 resp = session.get("https://tls.browserleaks.com/json")
-print(resp.status_code)   # 200
-print(resp.text)           # JSON body
-print(resp.used_protocol)  # "HTTP/2.0"
+print(resp.status_code)
+print(resp.text)
 
-# POST with JSON
-resp = session.post(
-    "https://tls.browserleaks.com/json",
-    body=b'{"hello":"world"}',
-    headers={"Content-Type": "application/json"}
-)
+# POST request
+resp = session.post("https://tools.scrapfly.io/api/fp/ja3")
 data = resp.json()
-print(data["json"])  # {"hello": "world"}
-```
+print(resp.status_code)
+print(data)
 
-### Context Manager
 
-```python
-with Session(client_identifier="safari_ios_18_5") as s:
-    resp = s.get("https://tls.browserleaks.com/json")
+# Context Manager
+with Session(client_identifier="firefox_148") as session:
+    resp = session.get("https://tls.browserleaks.com/json")
     print(resp.status_code)
-```
+    print(resp.text)
 
-### Async Usage
 
-```python
+# Async Usage
 import asyncio
 from tls_client import AsyncSession
 
 async def main():
     async with AsyncSession(client_identifier="firefox_148") as s:
         resp = await s.get("https://tls.browserleaks.com/json")
+        print(resp.status_code)
         print(resp.json())
 
 asyncio.run(main())
@@ -121,16 +113,6 @@ The correct binary is automatically selected at runtime. Override via `TLS_CLIEN
 ---
 
 ## 🎭 Supported Browser Profiles — 79 Identifiers
-
-Set `client_identifier` in `Session()` to impersonate any of these browsers. Inspect the full list at runtime:
-
-```python
-from tls_client import list_client_identifiers, SUPPORTED_CLIENT_IDENTIFIERS
-
-print(len(list_client_identifiers()))        # 79
-for browser, ids in SUPPORTED_CLIENT_IDENTIFIERS.items():
-    print(f"{browser}: {len(ids)} profiles")
-```
 
 ### 🌐 Chrome — 24 Profiles
 
