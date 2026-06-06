@@ -40,4 +40,4 @@ __all__ = [
     "ClientIdentifiers",
     "clear_client_pool",
 ]
-__version__ = "1.14.0"
+__version__ = "1.14.1"
