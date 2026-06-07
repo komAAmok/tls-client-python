@@ -6,8 +6,6 @@
 
 **High-performance Python binding for [bogdanfinn/tls-client](https://github.com/bogdanfinn/tls-client) via CFFI.**
 
-Zero-copy FFI boundary, panic-proof, full TLS fingerprint control — with a familiar `requests`-style API.
-
 ---
 
 ## What is TLS Fingerprinting?
