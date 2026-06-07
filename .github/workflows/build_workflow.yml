@@ -420,6 +420,13 @@ jobs:
           echo "=== Collected Wheels in dist/ ==="
           ls -lh dist/
 
+      # 🌟 核心修复步骤：在提交前拉取最新远程代码并进行变基（Rebase），防止由于编译耗时（~10分钟）导致的 push 冲突
+      - name: Pull latest remote changes
+        if: github.ref == 'refs/heads/main' || github.ref == 'refs/heads/master'
+        run: |
+          git config --global user.name "github-actions[bot]"
+          git config --global user.email "github-actions[bot]@users.noreply.github.com"
+          git pull --rebase origin ${{ github.ref_name }} || true          
       # 将编译好的动态库同步并提交推送回你的 GitHub 仓库（仅在常规分支推送时执行，规避 Tag 冲突）
       - name: Auto Commit and Push back to GitHub
         if: github.ref == 'refs/heads/main' || github.ref == 'refs/heads/master'
