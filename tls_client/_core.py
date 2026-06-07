@@ -2839,8 +2839,13 @@ class AsyncSession:
         opts.disable_http3 = _val("disable_http3", True)
         opts.disable_ipv4 = _val("disable_ipv4", True)
         opts.disable_ipv6 = _val("disable_ipv6", True)
+        opts.tcp_ttl = _val("tcp_ttl")
+        opts.tcp_window_size = _val("tcp_window_size")
+        opts.tcp_window_scale = _val("tcp_window_scale")
+        opts.tcp_mss = _val("tcp_mss")
         opts.catch_panics = _val("catch_panics", True)
         opts.with_debug = _val("with_debug", True)
+      
 
         # String fields
         for name, field in [
@@ -3161,6 +3166,10 @@ class AsyncSession:
         catch_panics: Optional[bool] = None,
         # 覆盖调试日志 / Override debug logging
         with_debug: Optional[bool] = None,
+        tcp_ttl: Optional[int] = None,
+        tcp_window_size: Optional[int] = None,
+        tcp_window_scale: Optional[int] = None,
+        tcp_mss: Optional[int] = None,
         **kwargs: Any,
     ) -> Response:
         """通过 Go 引擎执行单次 HTTP 请求（异步）。
