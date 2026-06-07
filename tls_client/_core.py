@@ -654,86 +654,17 @@ int            RequestAsync(RequestOptions* opts, uintptr_t request_id, async_ca
 # Platform detection & shared‑library loading
 # ---------------------------------------------------------------------------
 
-def _detect_libc() -> str:
-    """Detect the C library flavour on Linux.  Returns ``"glibc"``, ``"musl"``, or ``"unknown"``.
-
-    This is important because a shared library compiled against glibc
-    will not load on a musl-based distribution (Alpine, Void musl, etc.)
-    and vice versa.
-    """
-    if sys.platform != "linux":
-        return "glibc"  # non‑Linux → irrelevant
-    try:
-        # musl defines a weak symbol __musl__ that glibc does not.
-        libc = ctypes.CDLL(None)  # the process itself
-        try:
-            libc.__musl__  # pylint: disable=pointless-statement
-            return "musl"
-        except AttributeError:
-            return "glibc"
-    except Exception:
-        # Fallback: check for /lib/ld-musl-*.so*
-        for entry in Path("/lib").glob("ld-musl-*"):
-            if entry.is_file():
-                return "musl"
-        return "unknown"
-
-
-def _libc_suffix() -> str:
-    """Return an optional libc suffix for the library filename.
-
-    Alpine (musl) binaries carry a ``-musl`` suffix so they don't collide
-    with glibc builds on PyPI.
-    """
-    if sys.platform == "linux" and _detect_libc() == "musl":
-        return "-musl"
-    return ""
-
-
-def _go_os() -> str:
-    return {"darwin": "darwin", "linux": "linux", "win32": "windows"}.get(
-        sys.platform, sys.platform
-    )
-
-
-def _go_arch() -> str:
-    m = platform.machine().lower()
-    return {
-        "x86_64": "amd64", "amd64": "amd64",
-        "arm64": "arm64", "aarch64": "arm64",
-        "armv7l": "arm", "armv6l": "arm",
-        "i386": "386", "i686": "386",
-    }.get(m, m)
-
-
-def _shared_lib_ext() -> str:
-    if sys.platform == "darwin":
-        return ".dylib"
-    elif sys.platform == "win32":
-        return ".dll"
-    return ".so"
-
-
-def _shared_lib_name() -> str:
-    ext = _shared_lib_ext()
-    goos = _go_os()
-    goarch = _go_arch()
-    lc = _libc_suffix()
-    return f"tls-client-{goos}-{goarch}{lc}{ext}"
-
-
 def _find_library() -> str:
-    """Locate the platform‑appropriate shared library.
+    """定位平台对应的动态链接库。
 
-    Search order:
-    1. ``TLS_CLIENT_LIB`` environment variable (explicit user override).
-    2. Bundled binary in ``tls_client/bin/`` (the package directory).
-    3. System‑level ``dist/`` directory next to this module (dev convenience).
+    搜索顺序：
+    1. 读取 ``TLS_CLIENT_LIB`` 环境变量（显式用户覆盖）。
+    2. 寻找包目录内 ``tls_client/bin/`` 下的平台专属统一命名文件。
+    3. 寻找同级开发目录 ``dist/`` 下的文件。
 
-    Raises :exc:`FileNotFoundError` with a detailed diagnostic message if
-    no binary is found, including hints for Alpine/musl users.
+    若未找到任何匹配文件，抛出 :exc:`FileNotFoundError`。
     """
-    # 1. Explicit override
+    # 1. 环境变量显式覆盖
     env_lib = os.environ.get("TLS_CLIENT_LIB")
     if env_lib:
         p = Path(env_lib)
@@ -743,56 +674,37 @@ def _find_library() -> str:
             f"TLS_CLIENT_LIB is set to '{env_lib}' but the file does not exist."
         )
 
-    name = _shared_lib_name()
+    # 2. 根据系统平台直接映射标准统一文件名
+    if sys.platform == "win32":
+        name = "tls-client.dll"
+    elif sys.platform == "darwin":
+        name = "tls-client.dylib"
+    else:
+        name = "tls-client.so"
+
     here = Path(__file__).resolve().parent
 
-    # 2. Bundled binary in the package
+    # 3. 寻找分平台 Wheel 安装后的专属内置路径
     bundled = here / "bin" / name
     if bundled.exists():
         return str(bundled)
 
-    # 3. Development convenience – dist/ directory next to this module
+    # 4. 本地开发调试路径
     dev = here / "dist" / name
     if dev.exists():
         return str(dev)
 
-    # ---- diagnostic error message ----
+    # 详细的异常诊断提示
     parts = [
-        f"Cannot locate shared library '{name}'.",
+        f"Cannot locate shared library '{name}' inside the package.",
         "",
         f"  Searched:  {bundled}",
         f"             {dev}",
+        "",
+        "  If you are developing locally, ensure the shared library is compiled and placed",
+        "  in either 'tls_client/bin/' or 'tls_client/dist/'.",
+        "  Alternatively, set the 'TLS_CLIENT_LIB' environment variable to point directly to your binary."
     ]
-
-    if sys.platform == "linux":
-        libc = _detect_libc()
-        parts.append(f"  Detected libc: {libc}")
-        if libc == "musl":
-            parts.append(
-                "  This is an Alpine / musl-based system.  The pre-compiled glibc"
-            )
-            parts.append(
-                "  binary cannot be used.  Build a musl-compatible library via:"
-            )
-            parts.append(
-                "    cd cffi_binding && CGO_ENABLED=1 GOOS=linux GOARCH="
-                + _go_arch()
-                + " go build -buildmode=c-shared -o tls-client-linux-"
-                + _go_arch()
-                + "-musl.so ."
-            )
-        else:
-            parts.append(
-                "  Make sure the platform matches.  Expected: "
-                + _go_os()
-                + "/"
-                + _go_arch()
-            )
-
-    parts.append(
-        "  Set the TLS_CLIENT_LIB environment variable to point to the correct binary."
-    )
-
     raise FileNotFoundError("\n".join(parts))
 
 
