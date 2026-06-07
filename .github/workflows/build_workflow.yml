@@ -60,12 +60,15 @@ jobs:
           go-version: "1.24"
           cache: true
 
+      # 🌟 优化：在 Ubuntu 宿主机上下载并部署最新的官方 UPX 4.2.4 稳定版
       - name: Install UPX (Linux/Windows)
         if: matrix.goos != 'darwin'
         shell: bash
         run: |
           if [ "${{ matrix.goos }}" = "linux" ]; then
-            sudo apt-get update && sudo apt-get install -y upx-ucl
+            wget https://github.com/upx/upx/releases/download/v4.2.4/upx-4.2.4-amd64_linux.tar.xz
+            tar -xf upx-4.2.4-amd64_linux.tar.xz
+            sudo mv upx-4.2.4-amd64_linux/upx /usr/local/bin/upx
           elif [ "${{ matrix.goos }}" = "windows" ]; then
             choco install upx --no-progress
           fi
@@ -86,12 +89,12 @@ jobs:
           GOARCH: ${{ matrix.goarch }}
         run: |
           mkdir -p ../tls_client/bin
-          # 🌟 采用带系统/架构后缀的命名规则，确保放回 Git 时不冲突
+          # 🌟 采用带系统/架构后缀的命名规则，且追加 -extldflags "-Wl,-s" 进行预剥离
           go build -buildmode=c-shared \
                    -buildvcs=false \
                    -trimpath \
                    -tags="netgo osusergo" \
-                   -ldflags="-s -w" \
+                   -ldflags="-s -w -extldflags '-Wl,-s'" \
                    -o "../tls_client/bin/tls-client-${{ matrix.goos }}-${{ matrix.goarch }}${{ matrix.ext }}" .
 
       - name: Strip Binary Safely
@@ -104,11 +107,17 @@ jobs:
             strip -R .comment -R .note.GNU-stack --strip-unneeded "$TARGET" || true
           fi
 
+      # 🌟 优化：对 Linux 平台的 .so 文件追加 --shlib 共享库强制压缩标记
       - name: Compress with UPX (Non-Mac)
         if: matrix.goos != 'darwin'
         shell: bash
         run: |
-          upx --best --lzma "tls_client/bin/tls-client-${{ matrix.goos }}-${{ matrix.goarch }}${{ matrix.ext }}" || true
+          TARGET="tls_client/bin/tls-client-${{ matrix.goos }}-${{ matrix.goarch }}${{ matrix.ext }}"
+          if [ "${{ matrix.goos }}" = "linux" ]; then
+            upx --best --lzma --shlib "$TARGET" || true
+          else
+            upx --best --lzma "$TARGET" || true
+          fi
 
       - name: Build Wheel
         shell: bash
@@ -122,7 +131,6 @@ jobs:
           name: wheel-${{ matrix.goos }}-${{ matrix.goarch }}
           path: dist/*.whl
 
-      # 🌟 新增：独立上传编译后的裸二进制，以便最后合并同步回 GitHub
       - name: Upload Raw Binary Artifact
         uses: actions/upload-artifact@v4
         with:
@@ -150,10 +158,14 @@ jobs:
         with:
           python-version: "3.11"
 
-      - name: Install MinGW 32-bit Cross Compiler & UPX
+      # 🌟 优化：下载并安装 Linux 宿主机下的原生 UPX 4.2.4，用以压缩生成的 win32.dll
+      - name: Install MinGW 32-bit Cross Compiler & UPX 4.2.4
         run: |
           sudo apt-get update
-          sudo apt-get install -y gcc-mingw-w64-i686 upx-ucl
+          sudo apt-get install -y gcc-mingw-w64-i686
+          wget https://github.com/upx/upx/releases/download/v4.2.4/upx-4.2.4-amd64_linux.tar.xz
+          tar -xf upx-4.2.4-amd64_linux.tar.xz
+          sudo mv upx-4.2.4-amd64_linux/upx /usr/local/bin/upx
 
       - name: Build Core
         working-directory: cffi_binding
@@ -170,7 +182,7 @@ jobs:
                    -buildvcs=false \
                    -trimpath \
                    -tags="netgo osusergo" \
-                   -ldflags="-s -w" \
+                   -ldflags="-s -w -extldflags '-Wl,-s'" \
                    -o "../tls_client/bin/tls-client-windows-386.dll" .
 
       - name: Strip & Compress
@@ -239,10 +251,14 @@ jobs:
         with:
           python-version: "3.11"
 
+      # 🌟 优化：部署最新的 UPX 4.2.4
       - name: Install Cross-Compiler & UPX
         run: |
           sudo apt-get update
-          sudo apt-get install -y ${{ matrix.compiler_pkg }} upx-ucl
+          sudo apt-get install -y ${{ matrix.compiler_pkg }}
+          wget https://github.com/upx/upx/releases/download/v4.2.4/upx-4.2.4-amd64_linux.tar.xz
+          tar -xf upx-4.2.4-amd64_linux.tar.xz
+          sudo mv upx-4.2.4-amd64_linux/upx /usr/local/bin/upx
 
       - name: Build Core
         working-directory: cffi_binding
@@ -260,13 +276,14 @@ jobs:
                    -buildvcs=false \
                    -trimpath \
                    -tags="netgo osusergo" \
-                   -ldflags="-s -w" \
+                   -ldflags="-s -w -extldflags '-Wl,-s'" \
                    -o "../tls_client/bin/tls-client-linux-${{ matrix.goarch }}${{ matrix.ext }}" .
 
+      # 🌟 优化：对 Linux 跨平台 ELF 动态库追加 --shlib 参数
       - name: Strip & Compress
         run: |
           ${{ matrix.strip_cmd }} -R .comment -R .note.GNU-stack --strip-unneeded tls_client/bin/tls-client-linux-${{ matrix.goarch }}${{ matrix.ext }} || true
-          upx --best --lzma tls_client/bin/tls-client-linux-${{ matrix.goarch }}${{ matrix.ext }} || true
+          upx --best --lzma --shlib tls_client/bin/tls-client-linux-${{ matrix.goarch }}${{ matrix.ext }} || true
 
       - name: Build Wheel
         run: |
@@ -304,7 +321,7 @@ jobs:
         working-directory: cffi_binding
         env:
           CGO_ENABLED: 1
-          CGO_CFLAGS: "-Os -g0 -fdata-sections -ffunction-sections -fno-ident"
+          CGO_CFLAGS: "-Os -g0 -fdata-sections -ffunction-sections -fno-asynchronous-unwind-tables -fno-ident"
           CGO_LDFLAGS: "-Wl,--gc-sections"
           GOOS: linux
           GOARCH: amd64
@@ -314,13 +331,14 @@ jobs:
                    -buildvcs=false \
                    -trimpath \
                    -tags="netgo osusergo musl" \
-                   -ldflags="-s -w" \
+                   -ldflags="-s -w -extldflags '-Wl,-s'" \
                    -o "../tls_client/bin/tls-client-linux-amd64-musl.so" .
 
+      # 🌟 优化：对 Alpine 本地 ELF 动态库追加 --shlib 参数
       - name: Strip & Compress
         run: |
           strip -R .comment -R .note.GNU-stack --strip-unneeded tls_client/bin/tls-client-linux-amd64-musl.so || true
-          upx --best --lzma tls_client/bin/tls-client-linux-amd64-musl.so || true
+          upx --best --lzma --shlib tls_client/bin/tls-client-linux-amd64-musl.so || true
 
       - name: Build Wheel
         run: |
@@ -349,7 +367,7 @@ jobs:
       - name: Checkout Repository
         uses: actions/checkout@v4
         with:
-          token: ${{ secrets.GITHUB_TOKEN }} # 确保拥有写权限以 push 核心库
+          token: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Set up Python
         uses: actions/setup-python@v5
@@ -367,7 +385,7 @@ jobs:
         with:
           path: tmp_artifacts
 
-      # 🌟 将多系统的编译二进制和轮子分别归类整理
+      # 将多系统的编译二进制和轮子分别归类整理
       - name: Organize Wheels & Binaries
         run: |
           # 归类所有平台专属 Wheels 包
@@ -380,7 +398,7 @@ jobs:
           echo "=== Collected Wheels in dist/ ==="
           ls -lh dist/
 
-      # 🌟 新增：自动将编译好的动态库同步并提交推送回你的 GitHub 仓库（仅在常规分支推送时执行，规避 Tag 冲突）
+      # 将编译好的动态库同步并提交推送回你的 GitHub 仓库（仅在常规分支推送时执行，规避 Tag 冲突）
       - name: Auto Commit and Push back to GitHub
         if: github.ref == 'refs/heads/main' || github.ref == 'refs/heads/master'
         uses: stefanzweifel/git-auto-commit-action@v5
