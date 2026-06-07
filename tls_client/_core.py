@@ -675,18 +675,73 @@ int            RequestAsync(RequestOptions* opts, uintptr_t request_id, async_ca
 """
 
 # ---------------------------------------------------------------------------
-# Platform detection & shared‑library loading
+# Platform-native shared library dynamic discovery (Git-Sync & Wheel Optimized)
 # ---------------------------------------------------------------------------
+
+def _detect_libc() -> str:
+    """在 Linux 系统上检测 C 运行库类型（glibc 或 musl）。"""
+    if sys.platform != "linux":
+        return "glibc"
+    try:
+        libc = ctypes.CDLL(None)
+        try:
+            libc.__musl__  # pylint: disable=pointless-statement
+            return "musl"
+        except AttributeError:
+            return "glibc"
+    except Exception:
+        for entry in Path("/lib").glob("ld-musl-*"):
+            if entry.is_file():
+                return "musl"
+        return "unknown"
+
+
+def _libc_suffix() -> str:
+    """如果是 Alpine (musl) 系统，返回 -musl 后缀。"""
+    if sys.platform == "linux" and _detect_libc() == "musl":
+        return "-musl"
+    return ""
+
+
+def _go_os() -> str:
+    return {"darwin": "darwin", "linux": "linux", "win32": "windows"}.get(
+        sys.platform, sys.platform
+    )
+
+
+def _go_arch() -> str:
+    m = platform.machine().lower()
+    return {
+        "x86_64": "amd64", "amd64": "amd64",
+        "arm64": "arm64", "aarch64": "arm64",
+        "armv7l": "arm", "armv6l": "arm",
+        "i386": "386", "i686": "386",
+    }.get(m, m)
+
+
+def _shared_lib_ext() -> str:
+    if sys.platform == "darwin":
+        return ".dylib"
+    elif sys.platform == "win32":
+        return ".dll"
+    return ".so"
+
+
+def _shared_lib_name() -> str:
+    ext = _shared_lib_ext()
+    goos = _go_os()
+    goarch = _go_arch()
+    lc = _libc_suffix()
+    return f"tls-client-{goos}-{goarch}{lc}{ext}"
+
 
 def _find_library() -> str:
     """定位平台对应的动态链接库。
 
     搜索顺序：
     1. 读取 ``TLS_CLIENT_LIB`` 环境变量（显式用户覆盖）。
-    2. 寻找包目录内 ``tls_client/bin/`` 下的平台专属统一命名文件。
+    2. 寻找包目录内 ``tls_client/bin/`` 下的带架构后缀文件（如 tls-client-windows-amd64.dll）。
     3. 寻找同级开发目录 ``dist/`` 下的文件。
-
-    若未找到任何匹配文件，抛出 :exc:`FileNotFoundError`。
     """
     # 1. 环境变量显式覆盖
     env_lib = os.environ.get("TLS_CLIENT_LIB")
@@ -698,36 +753,26 @@ def _find_library() -> str:
             f"TLS_CLIENT_LIB is set to '{env_lib}' but the file does not exist."
         )
 
-    # 2. 根据系统平台直接映射标准统一文件名
-    if sys.platform == "win32":
-        name = "tls-client.dll"
-    elif sys.platform == "darwin":
-        name = "tls-client.dylib"
-    else:
-        name = "tls-client.so"
-
+    name = _shared_lib_name()
     here = Path(__file__).resolve().parent
 
-    # 3. 寻找分平台 Wheel 安装后的专属内置路径
+    # 2. 寻找包目录 bin/ 下的多系统共享动态库
     bundled = here / "bin" / name
     if bundled.exists():
         return str(bundled)
 
-    # 4. 本地开发调试路径
+    # 3. 本地开发调试路径
     dev = here / "dist" / name
     if dev.exists():
         return str(dev)
 
-    # 详细的异常诊断提示
     parts = [
         f"Cannot locate shared library '{name}' inside the package.",
         "",
         f"  Searched:  {bundled}",
         f"             {dev}",
         "",
-        "  If you are developing locally, ensure the shared library is compiled and placed",
-        "  in either 'tls_client/bin/' or 'tls_client/dist/'.",
-        "  Alternatively, set the 'TLS_CLIENT_LIB' environment variable to point directly to your binary."
+        "  Set the 'TLS_CLIENT_LIB' environment variable to point directly to your binary."
     ]
     raise FileNotFoundError("\n".join(parts))
 
