@@ -170,7 +170,7 @@ jobs:
       - name: Build Wheel
         run: |
           python -m pip install --upgrade pip build
-          python -m build --wheel -C--global-option=--plat-name=win32
+          python -m build --wheel -C--build-option=--plat-name=win32
 
       - name: Upload Artifact
         uses: actions/upload-artifact@v4
@@ -255,7 +255,7 @@ jobs:
       - name: Build Wheel
         run: |
           python -m pip install --upgrade pip build
-          python -m build --wheel -C--global-option=--plat-name=${{ matrix.plat }}
+          python -m build --wheel -C--build-option=--plat-name=${{ matrix.plat }}
 
       - name: Upload Artifact
         uses: actions/upload-artifact@v4
@@ -303,7 +303,7 @@ jobs:
       # 🌟 关键：生成支持 Alpine 的 musllinux 标签 Wheel
       - name: Build Wheel
         run: |
-          python3 -m build --wheel -C--global-option=--plat-name=musllinux_1_1_x86_64
+          python3 -m build --wheel -C--build-option=--plat-name=musllinux_1_1_x86_64
 
       - name: Upload Artifact
         uses: actions/upload-artifact@v4
