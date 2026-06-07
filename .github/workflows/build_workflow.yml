@@ -30,25 +30,25 @@ jobs:
             goarch: amd64
             ext: .so
             cgo_ldflags: "-Wl,--gc-sections -Wl,-z,relro -Wl,-z,now"
-            plat: "manylinux2014_x86_64" # 🌟 显式指定：Linux 标签
+            plat: "manylinux2014_x86_64"
           - runner: macos-latest
             goos: darwin
             goarch: amd64
             ext: .dylib
             cgo_ldflags: "-Wl,-dead_strip"
-            plat: "macosx_10_9_x86_64"  # 🌟 显式指定：Mac Intel 标签
+            plat: "macosx_10_9_x86_64"
           - runner: macos-latest
             goos: darwin
             goarch: arm64
             ext: .dylib
             cgo_ldflags: "-Wl,-dead_strip"
-            plat: "macosx_11_0_arm64"   # 🌟 显式指定：Mac M系列芯片标签
+            plat: "macosx_11_0_arm64"
           - runner: windows-latest
             goos: windows
             goarch: amd64
             ext: .dll
             cgo_ldflags: "-Wl,--gc-sections"
-            plat: "win_amd64"           # 🌟 显式指定：Windows 64位标签
+            plat: "win_amd64"
 
     steps:
       - name: Checkout Code
@@ -86,18 +86,18 @@ jobs:
           GOARCH: ${{ matrix.goarch }}
         run: |
           mkdir -p ../tls_client/bin
-          # 统一命名
+          # 🌟 采用带系统/架构后缀的命名规则，确保放回 Git 时不冲突
           go build -buildmode=c-shared \
                    -buildvcs=false \
                    -trimpath \
                    -tags="netgo osusergo" \
                    -ldflags="-s -w" \
-                   -o "../tls_client/bin/tls-client${{ matrix.ext }}" .
+                   -o "../tls_client/bin/tls-client-${{ matrix.goos }}-${{ matrix.goarch }}${{ matrix.ext }}" .
 
       - name: Strip Binary Safely
         shell: bash
         run: |
-          TARGET="tls_client/bin/tls-client${{ matrix.ext }}"
+          TARGET="tls_client/bin/tls-client-${{ matrix.goos }}-${{ matrix.goarch }}${{ matrix.ext }}"
           if [ "${{ matrix.goos }}" = "darwin" ]; then
             strip -x "$TARGET" || true
           else
@@ -108,9 +108,8 @@ jobs:
         if: matrix.goos != 'darwin'
         shell: bash
         run: |
-          upx --best --lzma "tls_client/bin/tls-client${{ matrix.ext }}" || true
+          upx --best --lzma "tls_client/bin/tls-client-${{ matrix.goos }}-${{ matrix.goarch }}${{ matrix.ext }}" || true
 
-      # 🌟 核心修复：无视任何默认机制，对所有构建平台强制应用对应的 --plat-name
       - name: Build Wheel
         shell: bash
         run: |
@@ -122,6 +121,14 @@ jobs:
         with:
           name: wheel-${{ matrix.goos }}-${{ matrix.goarch }}
           path: dist/*.whl
+
+      # 🌟 新增：独立上传编译后的裸二进制，以便最后合并同步回 GitHub
+      - name: Upload Raw Binary Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: bin-${{ matrix.goos }}-${{ matrix.goarch }}
+          path: tls_client/bin/tls-client-${{ matrix.goos }}-${{ matrix.goarch }}${{ matrix.ext }}
+
   # -----------------------------------------------------------------------
   # 2. Cross-compile and Pack Windows 32-bit (386) on Linux
   # -----------------------------------------------------------------------
@@ -164,14 +171,13 @@ jobs:
                    -trimpath \
                    -tags="netgo osusergo" \
                    -ldflags="-s -w" \
-                   -o "../tls_client/bin/tls-client.dll" .
+                   -o "../tls_client/bin/tls-client-windows-386.dll" .
 
       - name: Strip & Compress
         run: |
-          i686-w64-mingw32-strip --strip-unneeded tls_client/bin/tls-client.dll || true
-          upx --best --lzma tls_client/bin/tls-client.dll || true
+          i686-w64-mingw32-strip --strip-unneeded tls_client/bin/tls-client-windows-386.dll || true
+          upx --best --lzma tls_client/bin/tls-client-windows-386.dll || true
 
-      # 🌟 关键：通过 --plat-name=win32 显式生成 32位 Windows 标签的 Wheel
       - name: Build Wheel
         run: |
           python -m pip install --upgrade pip build
@@ -182,6 +188,12 @@ jobs:
         with:
           name: wheel-windows-386
           path: dist/*.whl
+
+      - name: Upload Raw Binary Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: bin-windows-386
+          path: tls_client/bin/tls-client-windows-386.dll
 
   # -----------------------------------------------------------------------
   # 3. Cross-compile and Pack Linux ARM & 386 (glibc based)
@@ -249,14 +261,13 @@ jobs:
                    -trimpath \
                    -tags="netgo osusergo" \
                    -ldflags="-s -w" \
-                   -o "../tls_client/bin/tls-client.so" .
+                   -o "../tls_client/bin/tls-client-linux-${{ matrix.goarch }}${{ matrix.ext }}" .
 
       - name: Strip & Compress
         run: |
-          ${{ matrix.strip_cmd }} -R .comment -R .note.GNU-stack --strip-unneeded tls_client/bin/tls-client.so || true
-          upx --best --lzma tls_client/bin/tls-client.so || true
+          ${{ matrix.strip_cmd }} -R .comment -R .note.GNU-stack --strip-unneeded tls_client/bin/tls-client-linux-${{ matrix.goarch }}${{ matrix.ext }} || true
+          upx --best --lzma tls_client/bin/tls-client-linux-${{ matrix.goarch }}${{ matrix.ext }} || true
 
-      # 🌟 关键：通过指定 --plat-name 生成对应的 manylinux 标签 Wheel
       - name: Build Wheel
         run: |
           python -m pip install --upgrade pip build
@@ -267,6 +278,12 @@ jobs:
         with:
           name: wheel-linux-${{ matrix.goarch }}
           path: dist/*.whl
+
+      - name: Upload Raw Binary Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: bin-linux-${{ matrix.goarch }}
+          path: tls_client/bin/tls-client-linux-${{ matrix.goarch }}${{ matrix.ext }}
 
   # -----------------------------------------------------------------------
   # 4. Native-compile and Pack for Alpine Linux (musl libc based)
@@ -287,7 +304,7 @@ jobs:
         working-directory: cffi_binding
         env:
           CGO_ENABLED: 1
-          CGO_CFLAGS: "-Os -g0 -fdata-sections -ffunction-sections -fno-asynchronous-unwind-tables -fno-ident"
+          CGO_CFLAGS: "-Os -g0 -fdata-sections -ffunction-sections -fno-ident"
           CGO_LDFLAGS: "-Wl,--gc-sections"
           GOOS: linux
           GOARCH: amd64
@@ -298,14 +315,13 @@ jobs:
                    -trimpath \
                    -tags="netgo osusergo musl" \
                    -ldflags="-s -w" \
-                   -o "../tls_client/bin/tls-client.so" .
+                   -o "../tls_client/bin/tls-client-linux-amd64-musl.so" .
 
       - name: Strip & Compress
         run: |
-          strip -R .comment -R .note.GNU-stack --strip-unneeded tls_client/bin/tls-client.so || true
-          upx --best --lzma tls_client/bin/tls-client.so || true
+          strip -R .comment -R .note.GNU-stack --strip-unneeded tls_client/bin/tls-client-linux-amd64-musl.so || true
+          upx --best --lzma tls_client/bin/tls-client-linux-amd64-musl.so || true
 
-      # 🌟 关键：生成支持 Alpine 的 musllinux 标签 Wheel
       - name: Build Wheel
         run: |
           python3 -m build --wheel -C--build-option=--plat-name=musllinux_1_1_x86_64
@@ -316,43 +332,72 @@ jobs:
           name: wheel-alpine-amd64
           path: dist/*.whl
 
+      - name: Upload Raw Binary Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: bin-alpine-amd64
+          path: tls_client/bin/tls-client-linux-amd64-musl.so
+
   # -----------------------------------------------------------------------
   # 5. Build Source Distribution & Publish All Wheels to PyPI
   # -----------------------------------------------------------------------
   sync-and-publish:
-    name: Collect and Publish to PyPI
+    name: Collect, Sync to GitHub & Publish to PyPI
     needs: [build-native, build-windows-386-cross, build-linux-cross, build-alpine]
     runs-on: ubuntu-latest
     steps:
       - name: Checkout Repository
         uses: actions/checkout@v4
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }} # 确保拥有写权限以 push 核心库
 
       - name: Set up Python
         uses: actions/setup-python@v5
         with:
           python-version: "3.11"
 
-      - name: Create Dist Directory
-        run: mkdir -p dist
+      - name: Create Target Directories
+        run: |
+          mkdir -p dist
+          mkdir -p tls_client/bin
 
-      # 下载所有的平台特定的 .whl 文件
+      # 下载所有的平台特定的 .whl 轮子文件和裸二进制文件
       - name: Download All Artifacts
         uses: actions/download-artifact@v4
         with:
           path: tmp_artifacts
 
-      - name: Organize Wheels
+      # 🌟 将多系统的编译二进制和轮子分别归类整理
+      - name: Organize Wheels & Binaries
         run: |
+          # 归类所有平台专属 Wheels 包
           find tmp_artifacts/ -type f -name "*.whl" -exec cp {} dist/ \;
+          # 归类所有平台专属裸二进制动态库到 tls_client/bin/
+          find tmp_artifacts/ -type f -name "tls-client-*" -exec cp {} tls_client/bin/ \;
+          
+          echo "=== Collected Binaries in tls_client/bin/ ==="
+          ls -lh tls_client/bin/
           echo "=== Collected Wheels in dist/ ==="
           ls -lh dist/
 
-      # 🌟 额外生成一个 Source Distribution（.tar.gz源码包），以防万一
+      # 🌟 新增：自动将编译好的动态库同步并提交推送回你的 GitHub 仓库（仅在常规分支推送时执行，规避 Tag 冲突）
+      - name: Auto Commit and Push back to GitHub
+        if: github.ref == 'refs/heads/main' || github.ref == 'refs/heads/master'
+        uses: stefanzweifel/git-auto-commit-action@v5
+        with:
+          commit_message: "chore: automated compilation of cross-compiled cores [skip ci]"
+          branch: ${{ github.head_ref || github.ref_name }}
+          file_pattern: 'tls_client/bin/*'
+          commit_user_name: "github-actions[bot]"
+          commit_user_email: "github-actions[bot]@users.noreply.github.com"
+
+      # 额外生成一个 Source Distribution
       - name: Build Source Tarball
         run: |
           python -m pip install --upgrade pip build
           python -m build --sdist
 
+      # 安全发布至 PyPI
       - name: Publish to PyPI
         if: startsWith(github.ref, 'refs/tags/v') || github.event_name == 'workflow_dispatch'
         uses: pypa/gh-action-pypi-publish@release/v1
