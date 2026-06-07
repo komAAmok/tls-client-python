@@ -31,24 +31,32 @@ jobs:
             ext: .so
             cgo_ldflags: "-Wl,--gc-sections -Wl,-z,relro -Wl,-z,now"
             plat: "manylinux2014_x86_64"
+            cc: "clang" # 🌟 极客优化：Linux 切换为 clang 编译器
+            cgo_cflags: "-Oz -g0 -fdata-sections -ffunction-sections -fno-asynchronous-unwind-tables -fno-ident" # 🌟 极客优化：使用极致体积压缩参数 -Oz
           - runner: macos-latest
             goos: darwin
             goarch: amd64
             ext: .dylib
             cgo_ldflags: "-Wl,-dead_strip"
             plat: "macosx_10_9_x86_64"
+            cc: "clang"
+            cgo_cflags: "-Oz -g0 -fdata-sections -ffunction-sections -fno-asynchronous-unwind-tables -fno-ident" # 🌟 极客优化：macOS 开启 -Oz
           - runner: macos-latest
             goos: darwin
             goarch: arm64
             ext: .dylib
             cgo_ldflags: "-Wl,-dead_strip"
             plat: "macosx_11_0_arm64"
+            cc: "clang"
+            cgo_cflags: "-Oz -g0 -fdata-sections -ffunction-sections -fno-asynchronous-unwind-tables -fno-ident" # 🌟 极客优化：macOS 开启 -Oz
           - runner: windows-latest
             goos: windows
             goarch: amd64
             ext: .dll
             cgo_ldflags: "-Wl,--gc-sections"
             plat: "win_amd64"
+            cc: "gcc" # Windows 保持 gcc 稳定版
+            cgo_cflags: "-Os -g0 -fdata-sections -ffunction-sections -fno-asynchronous-unwind-tables -fno-ident"
 
     steps:
       - name: Checkout Code
@@ -60,12 +68,13 @@ jobs:
           go-version: "1.24"
           cache: true
 
-      # 🌟 优化：在 Ubuntu 宿主机上下载并部署最新的官方 UPX 4.2.4 稳定版
-      - name: Install UPX (Linux/Windows)
+      # 🌟 极客优化：在 Linux 上顺便安装 clang，并下载部署官方最新的 UPX 4.2.4
+      - name: Install UPX & Clang (Linux/Windows)
         if: matrix.goos != 'darwin'
         shell: bash
         run: |
           if [ "${{ matrix.goos }}" = "linux" ]; then
+            sudo apt-get update && sudo apt-get install -y clang
             wget https://github.com/upx/upx/releases/download/v4.2.4/upx-4.2.4-amd64_linux.tar.xz
             tar -xf upx-4.2.4-amd64_linux.tar.xz
             sudo mv upx-4.2.4-amd64_linux/upx /usr/local/bin/upx
@@ -83,18 +92,21 @@ jobs:
         shell: bash
         env:
           CGO_ENABLED: 1
-          CGO_CFLAGS: "-Os -g0 -fdata-sections -ffunction-sections -fno-asynchronous-unwind-tables -fno-ident"
+          CC: ${{ matrix.cc }}
+          CGO_CFLAGS: ${{ matrix.cgo_cflags }}
           CGO_LDFLAGS: ${{ matrix.cgo_ldflags }}
           GOOS: ${{ matrix.goos }}
           GOARCH: ${{ matrix.goarch }}
         run: |
           mkdir -p ../tls_client/bin
-          # 🌟 采用带系统/架构后缀的命名规则，且追加 -extldflags "-Wl,-s" 进行预剥离
+          # 🌟 极客优化：加入 -gcflags、-asmflags 全深度擦除路径元数据，并在 -ldflags 中擦除 -buildid=
           go build -buildmode=c-shared \
                    -buildvcs=false \
                    -trimpath \
                    -tags="netgo osusergo" \
-                   -ldflags="-s -w -extldflags '-Wl,-s'" \
+                   -gcflags="all=-trimpath=${{ github.workspace }}" \
+                   -asmflags="all=-trimpath=${{ github.workspace }}" \
+                   -ldflags="-s -w -buildid= -extldflags '-Wl,-s'" \
                    -o "../tls_client/bin/tls-client-${{ matrix.goos }}-${{ matrix.goarch }}${{ matrix.ext }}" .
 
       - name: Strip Binary Safely
@@ -107,16 +119,16 @@ jobs:
             strip -R .comment -R .note.GNU-stack --strip-unneeded "$TARGET" || true
           fi
 
-      # 🌟 优化：对 Linux 平台的 .so 文件追加 --shlib 共享库强制压缩标记
+      # 🌟 极客优化：升级为 --ultra-brute 极限穷举压缩机制，对 .so 追加 --shlib
       - name: Compress with UPX (Non-Mac)
         if: matrix.goos != 'darwin'
         shell: bash
         run: |
           TARGET="tls_client/bin/tls-client-${{ matrix.goos }}-${{ matrix.goarch }}${{ matrix.ext }}"
           if [ "${{ matrix.goos }}" = "linux" ]; then
-            upx --best --lzma --shlib "$TARGET" || true
+            upx --ultra-brute --shlib "$TARGET" || true
           else
-            upx --best --lzma "$TARGET" || true
+            upx --ultra-brute "$TARGET" || true
           fi
 
       - name: Build Wheel
@@ -158,7 +170,7 @@ jobs:
         with:
           python-version: "3.11"
 
-      # 🌟 优化：下载并安装 Linux 宿主机下的原生 UPX 4.2.4，用以压缩生成的 win32.dll
+      # 🌟 极客优化：安装最新版 UPX 4.2.4 用于压缩 win32
       - name: Install MinGW 32-bit Cross Compiler & UPX 4.2.4
         run: |
           sudo apt-get update
@@ -178,17 +190,20 @@ jobs:
           CC: i686-w64-mingw32-gcc
         run: |
           mkdir -p ../tls_client/bin
+          # 🌟 极客优化：加入全深度擦除路径元数据与 buildid
           go build -buildmode=c-shared \
                    -buildvcs=false \
                    -trimpath \
                    -tags="netgo osusergo" \
-                   -ldflags="-s -w -extldflags '-Wl,-s'" \
+                   -gcflags="all=-trimpath=${{ github.workspace }}" \
+                   -asmflags="all=-trimpath=${{ github.workspace }}" \
+                   -ldflags="-s -w -buildid= -extldflags '-Wl,-s'" \
                    -o "../tls_client/bin/tls-client-windows-386.dll" .
 
       - name: Strip & Compress
         run: |
           i686-w64-mingw32-strip --strip-unneeded tls_client/bin/tls-client-windows-386.dll || true
-          upx --best --lzma tls_client/bin/tls-client-windows-386.dll || true
+          upx --ultra-brute tls_client/bin/tls-client-windows-386.dll || true # 🌟 开启 --ultra-brute
 
       - name: Build Wheel
         run: |
@@ -272,18 +287,21 @@ jobs:
           CC: ${{ matrix.cc }}
         run: |
           mkdir -p ../tls_client/bin
+          # 🌟 极客优化：全深度擦除路径元数据与 buildid
           go build -buildmode=c-shared \
                    -buildvcs=false \
                    -trimpath \
                    -tags="netgo osusergo" \
-                   -ldflags="-s -w -extldflags '-Wl,-s'" \
+                   -gcflags="all=-trimpath=${{ github.workspace }}" \
+                   -asmflags="all=-trimpath=${{ github.workspace }}" \
+                   -ldflags="-s -w -buildid= -extldflags '-Wl,-s'" \
                    -o "../tls_client/bin/tls-client-linux-${{ matrix.goarch }}${{ matrix.ext }}" .
 
-      # 🌟 优化：对 Linux 跨平台 ELF 动态库追加 --shlib 参数
+      # 🌟 优化：对 Linux 跨平台 ELF 动态库追加 --shlib 与 --ultra-brute 压缩参数
       - name: Strip & Compress
         run: |
           ${{ matrix.strip_cmd }} -R .comment -R .note.GNU-stack --strip-unneeded tls_client/bin/tls-client-linux-${{ matrix.goarch }}${{ matrix.ext }} || true
-          upx --best --lzma --shlib tls_client/bin/tls-client-linux-${{ matrix.goarch }}${{ matrix.ext }} || true
+          upx --ultra-brute --shlib tls_client/bin/tls-client-linux-${{ matrix.goarch }}${{ matrix.ext }} || true
 
       - name: Build Wheel
         run: |
@@ -321,24 +339,28 @@ jobs:
         working-directory: cffi_binding
         env:
           CGO_ENABLED: 1
+          # 🌟 极客优化：Alpine 对齐 CGO 编译体积参数（包含 -fno-asynchronous-unwind-tables）
           CGO_CFLAGS: "-Os -g0 -fdata-sections -ffunction-sections -fno-asynchronous-unwind-tables -fno-ident"
           CGO_LDFLAGS: "-Wl,--gc-sections"
           GOOS: linux
           GOARCH: amd64
         run: |
           mkdir -p ../tls_client/bin
+          # 🌟 极客优化：全深度擦除路径元数据与 buildid
           go build -buildmode=c-shared \
                    -buildvcs=false \
                    -trimpath \
                    -tags="netgo osusergo musl" \
-                   -ldflags="-s -w -extldflags '-Wl,-s'" \
+                   -gcflags="all=-trimpath=${{ github.workspace }}" \
+                   -asmflags="all=-trimpath=${{ github.workspace }}" \
+                   -ldflags="-s -w -buildid= -extldflags '-Wl,-s'" \
                    -o "../tls_client/bin/tls-client-linux-amd64-musl.so" .
 
-      # 🌟 优化：对 Alpine 本地 ELF 动态库追加 --shlib 参数
+      # 🌟 优化：对 Alpine 本地 ELF 动态库追加 --shlib 与 --ultra-brute 压缩参数
       - name: Strip & Compress
         run: |
           strip -R .comment -R .note.GNU-stack --strip-unneeded tls_client/bin/tls-client-linux-amd64-musl.so || true
-          upx --best --lzma --shlib tls_client/bin/tls-client-linux-amd64-musl.so || true
+          upx --ultra-brute --shlib tls_client/bin/tls-client-linux-amd64-musl.so || true
 
       - name: Build Wheel
         run: |
