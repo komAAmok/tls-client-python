@@ -1,4 +1,4 @@
-name: Build and Sync tls-client Cores & Publish to PyPI
+name: Build Platform-Specific Wheels & Publish to PyPI
 
 on:
   push:
@@ -7,19 +7,19 @@ on:
       - 'cffi_binding/**'
       - 'tls_client/**'
     tags:
-      - 'v*' # 🌟 关键新增：当推送版本标签（如 v1.0.0）时触发 PyPI 发布
+      - 'v*'
   workflow_dispatch:
 
 permissions:
   contents: write
-  id-token: write # 🌟 关键新增：PyPI 官方 Trusted Publishing 认证所需的 OIDC 权限
+  id-token: write
 
 jobs:
   # -----------------------------------------------------------------------
-  # 1. Build native and macOS architectures (64-bit platforms)
+  # 1. Build and Pack Native Platforms (Linux-amd64, macOS, Windows-amd64)
   # -----------------------------------------------------------------------
   build-native:
-    name: Build ${{ matrix.goos }}-${{ matrix.goarch }}
+    name: Build & Pack ${{ matrix.goos }}-${{ matrix.goarch }}
     runs-on: ${{ matrix.runner }}
     strategy:
       fail-fast: false
@@ -56,42 +56,69 @@ jobs:
           go-version: "1.24"
           cache: true
 
+      - name: Install UPX (Linux/Windows)
+        if: matrix.goos != 'darwin'
+        shell: bash
+        run: |
+          if [ "${{ matrix.goos }}" = "linux" ]; then
+            sudo apt-get update && sudo apt-get install -y upx-ucl
+          elif [ "${{ matrix.goos }}" = "windows" ]; then
+            choco install upx --no-progress
+          fi
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
       - name: Build Core
         working-directory: cffi_binding
         shell: bash
         env:
           CGO_ENABLED: 1
-          CGO_CFLAGS: "-Os -g0 -fdata-sections -ffunction-sections -fno-asynchronous-unwind-tables"
+          CGO_CFLAGS: "-Os -g0 -fdata-sections -ffunction-sections -fno-asynchronous-unwind-tables -fno-ident"
           CGO_LDFLAGS: ${{ matrix.cgo_ldflags }}
           GOOS: ${{ matrix.goos }}
           GOARCH: ${{ matrix.goarch }}
         run: |
-          mkdir -p dist
+          mkdir -p ../tls_client/bin
+          # 🌟 统一命名，每个包里只有属于该平台的一个动态库
           go build -buildmode=c-shared \
                    -buildvcs=false \
                    -trimpath \
                    -tags="netgo osusergo" \
                    -ldflags="-s -w" \
-                   -o "dist/tls-client-${{ matrix.goos }}-${{ matrix.goarch }}${{ matrix.ext }}" .
+                   -o "../tls_client/bin/tls-client${{ matrix.ext }}" .
 
       - name: Strip Binary Safely
         shell: bash
         run: |
-          TARGET="cffi_binding/dist/tls-client-${{ matrix.goos }}-${{ matrix.goarch }}${{ matrix.ext }}"
+          TARGET="tls_client/bin/tls-client${{ matrix.ext }}"
           if [ "${{ matrix.goos }}" = "darwin" ]; then
             strip -x "$TARGET" || true
           else
-            strip --strip-unneeded "$TARGET" || true
+            strip -R .comment -R .note.GNU-stack --strip-unneeded "$TARGET" || true
           fi
 
-      - name: Upload Intermediary Artifact
+      - name: Compress with UPX (Non-Mac)
+        if: matrix.goos != 'darwin'
+        shell: bash
+        run: |
+          upx --best --lzma "tls_client/bin/tls-client${{ matrix.ext }}" || true
+
+      - name: Build Wheel
+        run: |
+          python -m pip install --upgrade pip build
+          python -m build --wheel
+
+      - name: Upload Platform Wheel Artifact
         uses: actions/upload-artifact@v4
         with:
-          name: core-${{ matrix.goos }}-${{ matrix.goarch }}
-          path: cffi_binding/dist/tls-client-${{ matrix.goos }}-${{ matrix.goarch }}${{ matrix.ext }}
+          name: wheel-${{ matrix.goos }}-${{ matrix.goarch }}
+          path: dist/*.whl
 
   # -----------------------------------------------------------------------
-  # 2. Cross-compile Windows 32-bit (386) on Linux
+  # 2. Cross-compile and Pack Windows 32-bit (386) on Linux
   # -----------------------------------------------------------------------
   build-windows-386-cross:
     name: Cross Windows-386
@@ -106,41 +133,53 @@ jobs:
           go-version: "1.24"
           cache: true
 
-      - name: Install MinGW 32-bit Cross Compiler
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install MinGW 32-bit Cross Compiler & UPX
         run: |
           sudo apt-get update
-          sudo apt-get install -y gcc-mingw-w64-i686
+          sudo apt-get install -y gcc-mingw-w64-i686 upx-ucl
 
       - name: Build Core
         working-directory: cffi_binding
         env:
           CGO_ENABLED: 1
-          CGO_CFLAGS: "-Os -g0 -fdata-sections -ffunction-sections -fno-asynchronous-unwind-tables"
+          CGO_CFLAGS: "-Os -g0 -fdata-sections -ffunction-sections -fno-asynchronous-unwind-tables -fno-ident"
           CGO_LDFLAGS: "-Wl,--gc-sections"
           GOOS: windows
           GOARCH: "386"
           CC: i686-w64-mingw32-gcc
         run: |
-          mkdir -p dist
+          mkdir -p ../tls_client/bin
           go build -buildmode=c-shared \
                    -buildvcs=false \
                    -trimpath \
                    -tags="netgo osusergo" \
                    -ldflags="-s -w" \
-                   -o "dist/tls-client-windows-386.dll" .
+                   -o "../tls_client/bin/tls-client.dll" .
 
-      - name: Strip Windows 32-bit Binary
+      - name: Strip & Compress
         run: |
-          i686-w64-mingw32-strip --strip-unneeded cffi_binding/dist/tls-client-windows-386.dll || true
+          i686-w64-mingw32-strip --strip-unneeded tls_client/bin/tls-client.dll || true
+          upx --best --lzma tls_client/bin/tls-client.dll || true
 
-      - name: Upload Intermediary Artifact
+      # 🌟 关键：通过 --plat-name=win32 显式生成 32位 Windows 标签的 Wheel
+      - name: Build Wheel
+        run: |
+          python -m pip install --upgrade pip build
+          python -m build --wheel -C--global-option=--plat-name=win32
+
+      - name: Upload Artifact
         uses: actions/upload-artifact@v4
         with:
-          name: core-windows-386
-          path: cffi_binding/dist/tls-client-windows-386.dll
+          name: wheel-windows-386
+          path: dist/*.whl
 
   # -----------------------------------------------------------------------
-  # 3. Cross-compile Linux ARM & 386 architectures (glibc based)
+  # 3. Cross-compile and Pack Linux ARM & 386 (glibc based)
   # -----------------------------------------------------------------------
   build-linux-cross:
     name: Cross Linux-${{ matrix.goarch }}
@@ -154,19 +193,19 @@ jobs:
             compiler_pkg: gcc-arm-linux-gnueabihf
             cc: arm-linux-gnueabihf-gcc
             strip_cmd: arm-linux-gnueabihf-strip
-            ext: .so
+            plat: manylinux2014_armv7l
           - goarch: arm64
             goarm: ""
             compiler_pkg: gcc-aarch64-linux-gnu
             cc: aarch64-linux-gnu-gcc
             strip_cmd: aarch64-linux-gnu-strip
-            ext: .so
+            plat: manylinux2014_aarch64
           - goarch: "386"
             goarm: ""
             compiler_pkg: gcc-multilib
             cc: gcc
             strip_cmd: strip
-            ext: .so
+            plat: manylinux2014_i686
 
     steps:
       - name: Checkout Code
@@ -178,42 +217,54 @@ jobs:
           go-version: "1.24"
           cache: true
 
-      - name: Install Cross-Compiler
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install Cross-Compiler & UPX
         run: |
           sudo apt-get update
-          sudo apt-get install -y ${{ matrix.compiler_pkg }}
+          sudo apt-get install -y ${{ matrix.compiler_pkg }} upx-ucl
 
       - name: Build Core
         working-directory: cffi_binding
         env:
           CGO_ENABLED: 1
-          CGO_CFLAGS: "-Os -g0 -fdata-sections -ffunction-sections -fno-asynchronous-unwind-tables"
+          CGO_CFLAGS: "-Os -g0 -fdata-sections -ffunction-sections -fno-asynchronous-unwind-tables -fno-ident"
           CGO_LDFLAGS: "-Wl,--gc-sections -Wl,-z,relro -Wl,-z,now"
           GOOS: linux
           GOARCH: ${{ matrix.goarch }}
           GOARM: ${{ matrix.goarm }}
           CC: ${{ matrix.cc }}
         run: |
-          mkdir -p dist
+          mkdir -p ../tls_client/bin
           go build -buildmode=c-shared \
                    -buildvcs=false \
                    -trimpath \
                    -tags="netgo osusergo" \
                    -ldflags="-s -w" \
-                   -o "dist/tls-client-linux-${{ matrix.goarch }}${{ matrix.ext }}" .
+                   -o "../tls_client/bin/tls-client.so" .
 
-      - name: Strip Binary Safely
+      - name: Strip & Compress
         run: |
-          ${{ matrix.strip_cmd }} --strip-unneeded "cffi_binding/dist/tls-client-linux-${{ matrix.goarch }}${{ matrix.ext }}" || true
+          ${{ matrix.strip_cmd }} -R .comment -R .note.GNU-stack --strip-unneeded tls_client/bin/tls-client.so || true
+          upx --best --lzma tls_client/bin/tls-client.so || true
 
-      - name: Upload Intermediary Artifact
+      # 🌟 关键：通过指定 --plat-name 生成对应的 manylinux 标签 Wheel
+      - name: Build Wheel
+        run: |
+          python -m pip install --upgrade pip build
+          python -m build --wheel -C--global-option=--plat-name=${{ matrix.plat }}
+
+      - name: Upload Artifact
         uses: actions/upload-artifact@v4
         with:
-          name: core-linux-${{ matrix.goarch }}
-          path: cffi_binding/dist/tls-client-linux-${{ matrix.goarch }}${{ matrix.ext }}
+          name: wheel-linux-${{ matrix.goarch }}
+          path: dist/*.whl
 
   # -----------------------------------------------------------------------
-  # 4. Native-compile for Alpine Linux (musl libc based)
+  # 4. Native-compile and Pack for Alpine Linux (musl libc based)
   # -----------------------------------------------------------------------
   build-alpine:
     name: Build Alpine-amd64 (musl)
@@ -225,88 +276,78 @@ jobs:
         uses: actions/checkout@v4
 
       - name: Install Build Dependencies
-        run: apk add --no-cache gcc musl-dev git binutils
+        run: apk add --no-cache gcc musl-dev git binutils upx python3 py3-pip py3-build
 
       - name: Build Core
         working-directory: cffi_binding
         env:
           CGO_ENABLED: 1
-          CGO_CFLAGS: "-Os -g0 -fdata-sections -ffunction-sections"
+          CGO_CFLAGS: "-Os -g0 -fdata-sections -ffunction-sections -fno-ident"
           CGO_LDFLAGS: "-Wl,--gc-sections"
           GOOS: linux
           GOARCH: amd64
         run: |
-          mkdir -p dist
+          mkdir -p ../tls_client/bin
           go build -buildmode=c-shared \
                    -buildvcs=false \
                    -trimpath \
                    -tags="netgo osusergo musl" \
                    -ldflags="-s -w" \
-                   -o "dist/tls-client-alpine-amd64.so" .
+                   -o "../tls_client/bin/tls-client.so" .
 
-      - name: Strip Binary
-        run: strip --strip-unneeded "cffi_binding/dist/tls-client-alpine-amd64.so" || true
+      - name: Strip & Compress
+        run: |
+          strip -R .comment -R .note.GNU-stack --strip-unneeded tls_client/bin/tls-client.so || true
+          upx --best --lzma tls_client/bin/tls-client.so || true
 
-      - name: Upload Intermediary Artifact
+      # 🌟 关键：生成支持 Alpine 的 musllinux 标签 Wheel
+      - name: Build Wheel
+        run: |
+          python3 -m build --wheel -C--global-option=--plat-name=musllinux_1_1_x86_64
+
+      - name: Upload Artifact
         uses: actions/upload-artifact@v4
         with:
-          name: core-alpine-amd64
-          path: cffi_binding/dist/tls-client-alpine-amd64.so
+          name: wheel-alpine-amd64
+          path: dist/*.whl
 
   # -----------------------------------------------------------------------
-  # 5. Sync Binaries, Pack Wheel and Publish to PyPI
+  # 5. Build Source Distribution & Publish All Wheels to PyPI
   # -----------------------------------------------------------------------
   sync-and-publish:
-    name: Sync Cores & Publish to PyPI
+    name: Collect and Publish to PyPI
     needs: [build-native, build-windows-386-cross, build-linux-cross, build-alpine]
     runs-on: ubuntu-latest
     steps:
       - name: Checkout Repository
         uses: actions/checkout@v4
-        with:
-          token: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Set up Python
         uses: actions/setup-python@v5
         with:
-          python-version: "3.11" # 使用稳定的现代 Python 构建通用 Wheel 包
+          python-version: "3.11"
 
-      - name: Create Target Binary Directory
-        run: mkdir -p tls_client/bin
+      - name: Create Dist Directory
+        run: mkdir -p dist
 
+      # 下载所有的平台特定的 .whl 文件
       - name: Download All Artifacts
         uses: actions/download-artifact@v4
         with:
           path: tmp_artifacts
 
-      - name: Organize and Move Binaries
+      - name: Organize Wheels
         run: |
-          find tmp_artifacts/ -type f \( -name "*.so" -o -name "*.dll" -o -name "*.dylib" \) -exec cp {} tls_client/bin/ \;
-          echo "=== Binaries in tls_client/bin/ ==="
-          ls -la tls_client/bin/
+          find tmp_artifacts/ -type f -name "*.whl" -exec cp {} dist/ \;
+          echo "=== Collected Wheels in dist/ ==="
+          ls -lh dist/
 
-      # 🌟 修复：仅在常规 master/main 分支推送时才同步回 GitHub，规避 Tag 冲突
-      - name: Auto Commit and Push back to Repo
-        if: github.ref == 'refs/heads/main' || github.ref == 'refs/heads/master'
-        uses: stefanzweifel/git-auto-commit-action@v5
-        with:
-          commit_message: "chore: automated cross-compiled cores synchronization [skip ci]"
-          branch: ${{ github.head_ref || github.ref_name }}
-          file_pattern: 'tls_client/bin/*'
-          commit_user_name: "github-actions[bot]"
-          commit_user_email: "github-actions[bot]@users.noreply.github.com"
-
-      # 🌟 新增：打包 Python 项目
-      - name: Install Build Dependencies
+      # 🌟 额外生成一个 Source Distribution（.tar.gz源码包），以防万一
+      - name: Build Source Tarball
         run: |
-          python -m pip install --upgrade pip
-          python -m pip install build
+          python -m pip install --upgrade pip build
+          python -m build --sdist
 
-      - name: Build Wheel and Source Tarball
-        run: python -m build
-
-      # 🌟 新增：自动发布到 PyPI 社区
-      # 触发机制：当你推送 v* 格式的 Tag（例如 v1.0.0）或者在 GitHub 手动点击 workflow_dispatch 运行时触发
       - name: Publish to PyPI
         if: startsWith(github.ref, 'refs/tags/v') || github.event_name == 'workflow_dispatch'
         uses: pypa/gh-action-pypi-publish@release/v1
