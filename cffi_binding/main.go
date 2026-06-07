@@ -122,6 +122,10 @@ typedef struct {
     int   disable_http3;
     int   disable_ipv4;
     int   disable_ipv6;
+    int   tcp_ttl;
+    int   tcp_window_size;
+    int   tcp_window_scale;
+    int   tcp_mss;
     int   without_cookie_jar;
     int   catch_panics;
     int   with_debug;
@@ -417,6 +421,10 @@ type requestConfig struct {
 	disableHTTP3             bool
 	disableIPv4              bool
 	disableIPv6              bool
+	tcpTTL                   int
+	tcpWindowSize            int
+	tcpWindowScale           int
+	tcpMSS                   int
 	withoutCookieJar         bool
 	catchPanics              bool
 	withDebug                bool
@@ -468,6 +476,10 @@ func deepCopyRequestOptions(opts *C.RequestOptions) (cfg *requestConfig) {
 		disableHTTP3:           int(opts.disable_http3) != 0,
 		disableIPv4:            int(opts.disable_ipv4) != 0,
 		disableIPv6:            int(opts.disable_ipv6) != 0,
+		tcpTTL:                 int(opts.tcp_ttl),
+		tcpWindowSize:          int(opts.tcp_window_size),
+		tcpWindowScale:         int(opts.tcp_window_scale),
+		tcpMSS:                 int(opts.tcp_mss),
 		withoutCookieJar:       int(opts.without_cookie_jar) != 0,
 		catchPanics:            int(opts.catch_panics) != 0,
 		withDebug:              int(opts.with_debug) != 0,
@@ -764,7 +776,7 @@ func buildCacheKey(opts *C.RequestOptions) string {
 	la := C.GoString(opts.local_address)
 
 	h := sha256.New()
-	fmt.Fprintf(h, "%s|%s|%s|%s|%d|%d|%d|%d|%d|%d|%d|%d|%d|%d|%d|%d|%d|%d|%d|%d|%d|%d|%d|%d|%d|%d",
+	fmt.Fprintf(h, "%s|%s|%s|%s|%d|%d|%d|%d|%d|%d|%d|%d|%d|%d|%d|%d|%d|%d|%d|%d|%d|%d|%d|%d|%d|%d|%d|%d|%d|%d",
 		ci, px, sn, la,
 		int(opts.insecure_skip_verify),
 		int(opts.force_http1),
@@ -788,6 +800,10 @@ func buildCacheKey(opts *C.RequestOptions) string {
 		int(opts.with_default_bad_pin_handler),
 		int(opts.timeout_seconds),
 		int(opts.timeout_milliseconds),
+		int(opts.tcp_ttl),
+		int(opts.tcp_window_size),
+		int(opts.tcp_window_scale),
+		int(opts.tcp_mss),
 	)
 	// Include pseudo-header orders in the cache key so different orders
 	// produce distinct transports.
@@ -1173,6 +1189,25 @@ func buildClient(opts *C.RequestOptions) (tls_client.HttpClient, error) {
 		options = append(options, tls_client.WithDisableIPV4())
 	}
 
+	// TCP/IP fingerprint — use profiles.intPtr() to heap-allocate values so
+	// pointers inside TcpFingerprint remain valid after this function returns.
+	if int(opts.tcp_ttl) > 0 || int(opts.tcp_window_size) > 0 || int(opts.tcp_window_scale) > 0 || int(opts.tcp_mss) > 0 {
+		fp := profiles.TcpFingerprint{}
+		if ttl := int(opts.tcp_ttl); ttl > 0 {
+			fp.TTL = profiles.IntPtr(ttl)
+		}
+		if ws := int(opts.tcp_window_size); ws > 0 {
+			fp.WindowSize = profiles.IntPtr(ws)
+		}
+		if wsc := int(opts.tcp_window_scale); wsc > 0 {
+			fp.WindowScale = profiles.IntPtr(wsc)
+		}
+		if mss := int(opts.tcp_mss); mss > 0 {
+			fp.MSS = profiles.IntPtr(mss)
+		}
+		options = append(options, tls_client.WithTcpFingerprint(fp))
+	}
+
 	if int(opts.catch_panics) == 1 {
 		options = append(options, tls_client.WithCatchPanics())
 	}
@@ -1489,7 +1524,7 @@ func buildCacheKeyFromConfig(cfg *requestConfig) string {
 	h := sha256.New()
 	// Match buildCacheKey format — use %%d with int(bool) so sync and async
 	// paths produce identical cache keys when cache_key_hash is not provided.
-	fmt.Fprintf(h, "%s|%s|%s|%s|%d|%d|%d|%d|%d|%d|%d|%d|%d|%d|%d|%d|%d|%d|%d|%d|%d|%d|%d|%d|%d|%d",
+	fmt.Fprintf(h, "%s|%s|%s|%s|%d|%d|%d|%d|%d|%d|%d|%d|%d|%d|%d|%d|%d|%d|%d|%d|%d|%d|%d|%d|%d|%d|%d|%d|%d|%d",
 		cfg.clientIdentifier, cfg.proxy, cfg.serverNameOverwrite, cfg.localAddress,
 		b2i(cfg.insecureSkipVerify), b2i(cfg.forceHttp1), b2i(cfg.withRandomTLSExtOrder), b2i(cfg.withProtocolRacing),
 		cfg.maxIdleConns, cfg.maxIdleConnsPerHost, cfg.maxConnsPerHost,
@@ -1498,6 +1533,7 @@ func buildCacheKeyFromConfig(cfg *requestConfig) string {
 		b2i(cfg.disableHTTP3), b2i(cfg.disableIPv4), b2i(cfg.disableIPv6), b2i(cfg.followRedirects),
 		b2i(cfg.withoutCookieJar), b2i(cfg.allowEmptyCookies), b2i(cfg.withDefaultBadPinHandler),
 		cfg.timeoutSeconds, cfg.timeoutMilliseconds,
+		cfg.tcpTTL, cfg.tcpWindowSize, cfg.tcpWindowScale, cfg.tcpMSS,
 	)
 	if len(cfg.pseudoHeaderOrder) > 0 {
 		for _, s := range cfg.pseudoHeaderOrder {
@@ -1757,6 +1793,26 @@ func buildClientFromConfig(cfg *requestConfig) (tls_client.HttpClient, error) {
 	if cfg.disableIPv4 {
 		options = append(options, tls_client.WithDisableIPV4())
 	}
+
+	// TCP/IP fingerprint (async path) — use profiles.IntPtr() to heap-allocate
+	// values so pointers inside TcpFingerprint remain valid after this function returns.
+	if cfg.tcpTTL > 0 || cfg.tcpWindowSize > 0 || cfg.tcpWindowScale > 0 || cfg.tcpMSS > 0 {
+		fp := profiles.TcpFingerprint{}
+		if cfg.tcpTTL > 0 {
+			fp.TTL = profiles.IntPtr(cfg.tcpTTL)
+		}
+		if cfg.tcpWindowSize > 0 {
+			fp.WindowSize = profiles.IntPtr(cfg.tcpWindowSize)
+		}
+		if cfg.tcpWindowScale > 0 {
+			fp.WindowScale = profiles.IntPtr(cfg.tcpWindowScale)
+		}
+		if cfg.tcpMSS > 0 {
+			fp.MSS = profiles.IntPtr(cfg.tcpMSS)
+		}
+		options = append(options, tls_client.WithTcpFingerprint(fp))
+	}
+
 	if cfg.catchPanics {
 		options = append(options, tls_client.WithCatchPanics())
 	}

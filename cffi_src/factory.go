@@ -357,6 +357,25 @@ func getTlsClient(requestInput RequestInput, sessionId string, withSession bool)
 		options = append(options, tls_client.WithDisableIPV4())
 	}
 
+	// TCP/IP fingerprint — use profiles.IntPtr() to heap-allocate values so
+	// pointers inside TcpFingerprint remain valid after this function returns.
+	if requestInput.TcpTTL > 0 || requestInput.TcpWindowSize > 0 || requestInput.TcpWindowScale > 0 || requestInput.TcpMSS > 0 {
+		fp := profiles.TcpFingerprint{}
+		if requestInput.TcpTTL > 0 {
+			fp.TTL = profiles.IntPtr(requestInput.TcpTTL)
+		}
+		if requestInput.TcpWindowSize > 0 {
+			fp.WindowSize = profiles.IntPtr(requestInput.TcpWindowSize)
+		}
+		if requestInput.TcpWindowScale > 0 {
+			fp.WindowScale = profiles.IntPtr(requestInput.TcpWindowScale)
+		}
+		if requestInput.TcpMSS > 0 {
+			fp.MSS = profiles.IntPtr(requestInput.TcpMSS)
+		}
+		options = append(options, tls_client.WithTcpFingerprint(fp))
+	}
+
 	if requestInput.TransportOptions != nil {
 		transportOptions := &tls_client.TransportOptions{
 			DisableKeepAlives:      requestInput.TransportOptions.DisableKeepAlives,

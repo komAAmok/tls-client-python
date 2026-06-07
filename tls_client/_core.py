@@ -278,6 +278,26 @@ class Request(TypedDict, total=False):
 
     Whether to disable IPv6.
     """
+    tcp_ttl: Optional[int]
+    """IP TTL 覆盖。0=自动从预设推断。
+
+    IP TTL override. 0=auto from profile.
+    """
+    tcp_window_size: Optional[int]
+    """TCP 窗口大小覆盖。0=自动从预设推断。
+
+    TCP window size override. 0=auto from profile.
+    """
+    tcp_window_scale: Optional[int]
+    """TCP 窗口缩放因子覆盖。0=自动从预设推断。
+
+    TCP window scale override. 0=auto from profile.
+    """
+    tcp_mss: Optional[int]
+    """TCP MSS 覆盖。0=自动从预设推断。
+
+    TCP MSS override. 0=auto from profile.
+    """
     catch_panics: Optional[bool]
     """是否捕获 Go panic。
 
@@ -604,6 +624,10 @@ typedef struct {
     int   disable_http3;
     int   disable_ipv4;
     int   disable_ipv6;
+    int   tcp_ttl;
+    int   tcp_window_size;
+    int   tcp_window_scale;
+    int   tcp_mss;
     int   without_cookie_jar;
     int   catch_panics;
     int   with_debug;
@@ -1030,7 +1054,7 @@ def _compute_cache_key_hash(r: dict) -> str:
     The format matches Go's buildCacheKey exactly — same field order,
     same separators, same sort order for maps, same hex encoding.
 
-    FORMAT VERSION: 1
+    FORMAT VERSION: 2
     If you change the hash format below, increment the version AND update
     Go's buildCacheKey / buildCacheKeyFromConfig in cffi_binding/main.go
     and the corresponding test in test_cache_key_parity.py.  Format drift
@@ -1056,7 +1080,8 @@ def _compute_cache_key_hash(r: dict) -> str:
         f"{r['disable_ipv4']}|{r['disable_ipv6']}|{r['follow_redirects']}|"
         f"{r['without_cookie_jar']}|{r['allow_empty_cookies']}|"
         f"{r['with_default_bad_pin_handler']}|"
-        f"{r['timeout_seconds']}|{r['timeout_milliseconds']}"
+        f"{r['timeout_seconds']}|{r['timeout_milliseconds']}|"
+        f"{r['tcp_ttl']}|{r['tcp_window_size']}|{r['tcp_window_scale']}|{r['tcp_mss']}"
     )
     h.update(main.encode("utf-8"))
 
@@ -1263,6 +1288,10 @@ def _populate_request_options(
     opts.disable_http3 = _val("disable_http3", True)
     opts.disable_ipv4 = _val("disable_ipv4", True)
     opts.disable_ipv6 = _val("disable_ipv6", True)
+    opts.tcp_ttl = _val("tcp_ttl")
+    opts.tcp_window_size = _val("tcp_window_size")
+    opts.tcp_window_scale = _val("tcp_window_scale")
+    opts.tcp_mss = _val("tcp_mss")
     opts.catch_panics = _val("catch_panics", True)
     opts.with_debug = _val("with_debug", True)
 
@@ -1697,9 +1726,41 @@ class Session:
         """是否禁用 IPv6 / Whether to disable IPv6."""
         return bool(self.defaults["disable_ipv6"])
 
-    @disable_ipv6.setter
-    def disable_ipv6(self, value: bool) -> None:
-        self.defaults["disable_ipv6"] = 1 if value else 0
+    @property
+    def tcp_ttl(self) -> int:
+        """IP TTL / IP TTL value. 0 = auto from profile."""
+        return self.defaults["tcp_ttl"]
+
+    @tcp_ttl.setter
+    def tcp_ttl(self, value: int) -> None:
+        self.defaults["tcp_ttl"] = value
+
+    @property
+    def tcp_window_size(self) -> int:
+        """TCP receive window size. 0 = auto from profile."""
+        return self.defaults["tcp_window_size"]
+
+    @tcp_window_size.setter
+    def tcp_window_size(self, value: int) -> None:
+        self.defaults["tcp_window_size"] = value
+
+    @property
+    def tcp_window_scale(self) -> int:
+        """TCP window scale factor. 0 = auto from profile."""
+        return self.defaults["tcp_window_scale"]
+
+    @tcp_window_scale.setter
+    def tcp_window_scale(self, value: int) -> None:
+        self.defaults["tcp_window_scale"] = value
+
+    @property
+    def tcp_mss(self) -> int:
+        """TCP Maximum Segment Size. 0 = auto from profile."""
+        return self.defaults["tcp_mss"]
+
+    @tcp_mss.setter
+    def tcp_mss(self, value: int) -> None:
+        self.defaults["tcp_mss"] = value
 
     @property
     def allow_empty_cookies(self) -> bool:
@@ -1816,6 +1877,15 @@ class Session:
         disable_ipv4: bool = False,
         # 禁用 IPv6 / Disable IPv6
         disable_ipv6: bool = False,
+        # ── TCP/IP Fingerprint ──
+        # IP TTL (Time To Live). Windows=128, Linux/macOS=64. 0=auto from profile
+        tcp_ttl: int = 0,
+        # TCP receive window size. Windows=64240, Linux/macOS=65535. 0=auto
+        tcp_window_size: int = 0,
+        # TCP window scale factor. Windows=8, Linux=7, macOS=6. 0=auto
+        tcp_window_scale: int = 0,
+        # TCP Maximum Segment Size. Standard Ethernet=1460. 0=auto
+        tcp_mss: int = 0,
         # ── Cookie ──
         # 是否允许空 Cookie / Whether to allow empty-value cookies
         allow_empty_cookies: bool = False,
@@ -1871,6 +1941,10 @@ class Session:
             "disable_http3": 1 if disable_http3 else 0,
             "disable_ipv4": 1 if disable_ipv4 else 0,
             "disable_ipv6": 1 if disable_ipv6 else 0,
+            "tcp_ttl": tcp_ttl,
+            "tcp_window_size": tcp_window_size,
+            "tcp_window_scale": tcp_window_scale,
+            "tcp_mss": tcp_mss,
             "catch_panics": 1 if catch_panics else 0,
             "with_debug": 1 if with_debug else 0,
         }
@@ -2014,6 +2088,14 @@ class Session:
         disable_ipv4: Optional[bool] = None,
         # 覆盖 IPv6 禁用 / Override disable IPv6
         disable_ipv6: Optional[bool] = None,
+        # 覆盖 TCP TTL / Override TCP TTL
+        tcp_ttl: Optional[int] = None,
+        # 覆盖 TCP 窗口大小 / Override TCP window size
+        tcp_window_size: Optional[int] = None,
+        # 覆盖 TCP 窗口缩放 / Override TCP window scale
+        tcp_window_scale: Optional[int] = None,
+        # 覆盖 TCP MSS / Override TCP MSS
+        tcp_mss: Optional[int] = None,
         # 覆盖 panic 捕获 / Override catch-panics
         catch_panics: Optional[bool] = None,
         # 覆盖调试日志 / Override debug logging
@@ -2107,6 +2189,10 @@ class Session:
             "disable_http3": _val("disable_http3", disable_http3, True),
             "disable_ipv4": _val("disable_ipv4", disable_ipv4, True),
             "disable_ipv6": _val("disable_ipv6", disable_ipv6, True),
+            "tcp_ttl": _val("tcp_ttl", tcp_ttl),
+            "tcp_window_size": _val("tcp_window_size", tcp_window_size),
+            "tcp_window_scale": _val("tcp_window_scale", tcp_window_scale),
+            "tcp_mss": _val("tcp_mss", tcp_mss),
             "follow_redirects": _val("follow_redirects", follow_redirects, True),
             "without_cookie_jar": _val("without_cookie_jar", without_cookie_jar, True),
             "allow_empty_cookies": _val("allow_empty_cookies", allow_empty_cookies, True),
@@ -2224,6 +2310,10 @@ class Session:
         opts.disable_http3 = _val("disable_http3", disable_http3, True)
         opts.disable_ipv4 = _val("disable_ipv4", disable_ipv4, True)
         opts.disable_ipv6 = _val("disable_ipv6", disable_ipv6, True)
+        opts.tcp_ttl = _val("tcp_ttl", tcp_ttl)
+        opts.tcp_window_size = _val("tcp_window_size", tcp_window_size)
+        opts.tcp_window_scale = _val("tcp_window_scale", tcp_window_scale)
+        opts.tcp_mss = _val("tcp_mss", tcp_mss)
         opts.catch_panics = _val("catch_panics", catch_panics, True)
         opts.with_debug = _val("with_debug", with_debug, True)
 
@@ -2328,6 +2418,31 @@ def _next_request_id() -> int:
     return _request_counter
 
 
+def _resolve_async_response(ffi, future, raw_gc):
+    """Unpack C response and resolve future ON THE EVENT LOOP THREAD.
+
+    Called via loop.call_soon_threadsafe from the CFFI callback bridge.
+    By deferring all ffi.string / ffi.buffer / .decode() operations to the
+    event loop thread, the Go OS thread callback releases the GIL in
+    microseconds instead of milliseconds — eliminating GIL contention at
+    high concurrency (>10K req/s).
+
+    C memory is kept alive by ffi.gc(raw_res, lib.FreeResponse) until
+    this function completes and the reference to raw_gc is dropped.
+    """
+    try:
+        if not future.done():
+            if raw_gc.err_msg != ffi.NULL:
+                err = ffi.string(raw_gc.err_msg).decode("utf-8", errors="replace")
+                future.set_exception(RuntimeError(err))
+            else:
+                response = _unpack_c_response(ffi, raw_gc)
+                future.set_result(response)
+    except BaseException as exc:
+        if not future.done():
+            future.set_exception(exc)
+
+
 def _make_async_callback(ffi, lib):
     """Create a CFFI callback that Go goroutines invoke with results.
 
@@ -2347,55 +2462,67 @@ def _make_async_callback(ffi, lib):
 
     @ffi.callback("void(uintptr_t, ResponseResult*)")
     def _on_async_response(request_id: int, raw_res: Any) -> None:
-        # The ENTIRE callback body MUST be wrapped in try/except Exception.
         # This callback executes on a Go-managed OS thread.  If any Python
         # exception escapes uncaught, the Python interpreter crashes with
-        # Fatal Python error: Segmentation fault (Constraint 3).
+        # Fatal Python error: Segmentation fault.
+        #
+        # GIL OPTIMIZATION: Instead of doing expensive ffi.string / ffi.buffer
+        # / .decode() work here (which holds the GIL for milliseconds), we
+        # immediately wrap raw_res with ffi.gc (keeping C memory alive) and
+        # defer ALL unpacking to the event loop thread via call_soon_threadsafe.
+        # The callback releases the GIL in microseconds, eliminating GIL
+        # contention at high concurrency (>10K req/s).
+        gc_bound = False  # track whether ffi.gc was called — see except handler
         try:
-            # Step 5-6: Unpack response
-            if raw_res == ffi.NULL or raw_res.err_msg != ffi.NULL:
-                err = "Go engine returned NULL"
-                if raw_res != ffi.NULL and raw_res.err_msg != ffi.NULL:
-                    err = ffi.string(raw_res.err_msg).decode("utf-8", errors="replace")
-                response: Any = RuntimeError(err)
-            else:
-                response = _unpack_c_response(ffi, raw_res)
-        except Exception as exc:
-            response = exc
-        finally:
-            # Step 6: Free C memory in all code paths (success, error, panic)
-            if raw_res != ffi.NULL:
-                lib.FreeResponse(raw_res)
-
-        # Step 9: Schedule Future resolution on the event loop thread.
-        # Must use call_soon_threadsafe — direct set_result/set_exception
-        # from a non-event-loop thread is NOT thread-safe (Constraint 4).
-        try:
+            # Phase 1: Pop _pending_requests & cancel defensive timeout.
             with _pending_lock:
                 future, _keep_alive, timeout_handle = _pending_requests.pop(
                     request_id, (None, None, None)
                 )
-                # _keep_alive is now released — the goroutine has finished,
-                # so the C pointers it held via unsafe.Slice are no longer needed.
+                # _keep_alive is now released — the goroutine has finished.
 
-            # Cancel the defensive timeout — the Go goroutine completed.
             if timeout_handle is not None:
                 timeout_handle.cancel()
 
-            if future is None:
-                return  # request was cancelled or timed out
+            if future is None or future.done():
+                # Already resolved or timed out.  Free C memory and exit.
+                if raw_res != ffi.NULL:
+                    lib.FreeResponse(raw_res)
+                return
 
-            if not future.done():
-                loop = future.get_loop()
-                if isinstance(response, Exception):
-                    loop.call_soon_threadsafe(future.set_exception, response)
-                else:
-                    loop.call_soon_threadsafe(future.set_result, response)
-        except Exception:
-            # If even Future resolution fails, there is nothing we can do —
-            # the event loop may be shut down.  Silently swallow to prevent
-            # a process crash.
-            pass
+            # Handle NULL result synchronously (no C memory to manage).
+            if raw_res == ffi.NULL:
+                future.get_loop().call_soon_threadsafe(
+                    future.set_exception,
+                    RuntimeError("Go engine returned NULL")
+                )
+                return
+
+            # Phase 2: Defer unpacking to event loop thread.
+            # ffi.gc binds FreeResponse to the Python GC — the C memory
+            # stays alive until _resolve_async_response drops raw_gc.
+            raw_gc = ffi.gc(raw_res, lib.FreeResponse)
+            gc_bound = True
+            loop = future.get_loop()
+            loop.call_soon_threadsafe(_resolve_async_response, ffi, future, raw_gc)
+
+        except BaseException:
+            # Log swallowed exception for diagnostics before cleaning up.
+            import traceback as _tb
+            print("[tls-client] async callback suppressed exception:", file=sys.stderr)
+            _tb.print_exc(file=sys.stderr)
+            # Absolute last resort: free C memory, then swallow.
+            # If ffi.gc already bound FreeResponse, release the GC binding
+            # via ffi.release() to prevent double-free when raw_gc is
+            # garbage-collected later (call_soon_threadsafe may raise if
+            # the event loop has already been closed).
+            if raw_res != ffi.NULL:
+                try:
+                    if gc_bound:
+                        ffi.release(raw_gc)
+                    lib.FreeResponse(raw_res)
+                except BaseException:
+                    pass
 
     return _on_async_response
 
@@ -2513,6 +2640,15 @@ class AsyncSession:
         disable_ipv4: bool = False,
         # 禁用 IPv6 / Disable IPv6
         disable_ipv6: bool = False,
+        # ── TCP/IP Fingerprint ──
+        # IP TTL (Time To Live). Windows=128, Linux/macOS=64. 0=auto from profile
+        tcp_ttl: int = 0,
+        # TCP receive window size. Windows=64240, Linux/macOS=65535. 0=auto
+        tcp_window_size: int = 0,
+        # TCP window scale factor. Windows=8, Linux=7, macOS=6. 0=auto
+        tcp_window_scale: int = 0,
+        # TCP Maximum Segment Size. Standard Ethernet=1460. 0=auto
+        tcp_mss: int = 0,
         # ── Cookie ──
         # 是否允许空 Cookie / Whether to allow empty-value cookies
         allow_empty_cookies: bool = False,
@@ -2558,6 +2694,10 @@ class AsyncSession:
             read_buffer_size=read_buffer_size,
             disable_ipv4=disable_ipv4,
             disable_ipv6=disable_ipv6,
+            tcp_ttl=tcp_ttl,
+            tcp_window_size=tcp_window_size,
+            tcp_window_scale=tcp_window_scale,
+            tcp_mss=tcp_mss,
             allow_empty_cookies=allow_empty_cookies,
             without_cookie_jar=without_cookie_jar,
             catch_panics=catch_panics,
@@ -2741,6 +2881,10 @@ class AsyncSession:
             "disable_http3": _ckb("disable_http3"),
             "disable_ipv4": _ckb("disable_ipv4"),
             "disable_ipv6": _ckb("disable_ipv6"),
+            "tcp_ttl": _ck("tcp_ttl"),
+            "tcp_window_size": _ck("tcp_window_size"),
+            "tcp_window_scale": _ck("tcp_window_scale"),
+            "tcp_mss": _ck("tcp_mss"),
             "follow_redirects": _ckb("follow_redirects"),
             "without_cookie_jar": _ckb("without_cookie_jar"),
             "allow_empty_cookies": _ckb("allow_empty_cookies"),
@@ -2781,7 +2925,7 @@ class AsyncSession:
         go_timeout = float(opts.timeout_seconds) if opts.timeout_seconds > 0 else 30.0
         if opts.timeout_milliseconds > 0:
             go_timeout = float(opts.timeout_milliseconds) / 1000.0
-        safe_timeout = max(60.0, min(go_timeout * 2.0 + 10.0, 600.0))
+        safe_timeout = max(60.0, min(go_timeout * 2.0 + 2.0, 600.0))
 
         def _on_zombie_timeout(rid: int) -> None:
             # Safe: by this point the Go goroutine has either completed
@@ -3012,7 +3156,12 @@ class AsyncSession:
             allow_empty_cookies=allow_empty_cookies,
             without_cookie_jar=without_cookie_jar,
             disable_http3=disable_http3, disable_ipv4=disable_ipv4,
-            disable_ipv6=disable_ipv6, catch_panics=catch_panics,
+            disable_ipv6=disable_ipv6,
+            tcp_ttl=tcp_ttl,
+            tcp_window_size=tcp_window_size,
+            tcp_window_scale=tcp_window_scale,
+            tcp_mss=tcp_mss,
+            catch_panics=catch_panics,
             with_debug=with_debug,
             **kwargs,
         )

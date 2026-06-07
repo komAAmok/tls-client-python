@@ -104,6 +104,7 @@ type ClientProfile struct {
 	http3PriorityParam     uint32
 	http3PseudoHeaderOrder []string
 	http3SendGreaseFrames  bool
+	tcpFingerprint         *TcpFingerprint // nil = auto-infer from Client name
 }
 
 func NewClientProfile(clientHelloId tls.ClientHelloID, settings map[http2.SettingID]uint32, settingsOrder []http2.SettingID, pseudoHeaderOrder []string, connectionFlow uint32, priorities []http2.Priority, headerPriority *http2.PriorityParam, streamID uint32, allowHTTP bool, http3Settings map[uint64]uint64, http3SettingsOrder []uint64, http3PriorityParam uint32, http3PseudoHeaderOrder []string, http3SendGreaseFrames bool) ClientProfile {
@@ -123,6 +124,84 @@ func NewClientProfile(clientHelloId tls.ClientHelloID, settings map[http2.Settin
 		http3PseudoHeaderOrder: http3PseudoHeaderOrder,
 		http3SendGreaseFrames:  http3SendGreaseFrames,
 	}
+}
+
+// TcpFingerprint holds the TCP/IP stack parameters that should be set on outgoing
+// connections to mimic a specific operating system.  Each field is a pointer — nil
+// means "use the OS default"; a non-nil value forces the corresponding socket option.
+type TcpFingerprint struct {
+	TTL         *int // IP TTL (Time To Live).  Windows=128, Linux/macOS=64.
+	WindowSize  *int // TCP receive window size.  Windows=64240, Linux/macOS=65535.
+	WindowScale *int // TCP window scale factor.  Windows=8, Linux=7, macOS=6.
+	MSS         *int // TCP MSS (Maximum Segment Size).  Standard Ethernet=1460.
+}
+
+// DefaultTcpFingerprints maps client names to their default OS TCP fingerprints.
+var DefaultTcpFingerprints = map[string]TcpFingerprint{
+	"Windows": {TTL: IntPtr(128), WindowSize: IntPtr(64240), WindowScale: IntPtr(8), MSS: IntPtr(1460)},
+	"Linux":   {TTL: IntPtr(64), WindowSize: IntPtr(65535), WindowScale: IntPtr(7), MSS: IntPtr(1460)},
+	"macOS":   {TTL: IntPtr(64), WindowSize: IntPtr(65535), WindowScale: IntPtr(6), MSS: IntPtr(1460)},
+	"iOS":     {TTL: IntPtr(64), WindowSize: IntPtr(65535), WindowScale: IntPtr(6), MSS: IntPtr(1460)},
+	"Android": {TTL: IntPtr(64), WindowSize: IntPtr(65535), WindowScale: IntPtr(7), MSS: IntPtr(1460)},
+}
+
+// clientToPlatform maps the Client name in a ClientHelloID to the platform name
+// used in DefaultTcpFingerprints.  Entries not in this map receive no automatic
+// TCP fingerprint (all nil).
+//
+// Client names come from the Client field of tls.ClientHelloID in each profile.
+// Safari_IOS_* profiles all use Client: "iOS" (confirmed by code search).
+var clientToPlatform = map[string]string{
+	// Desktop browsers
+	"Chrome":  "Windows",
+	"Brave":   "Windows",
+	"Opera":   "Windows",
+	"Safari":  "macOS",
+	"Firefox": "Linux",
+	// iOS – Safari_IOS_*, ZalandoIOS, NikeIOS, MMSIos, MeshIos, ConfirmedIos
+	"iOS":          "iOS",
+	"MMSIos":       "iOS",
+	"MeshIos":      "iOS",
+	"MeshIos2":     "iOS",
+	"ConfirmedIos": "iOS",
+	"ZalandoIosCustom": "iOS",
+	"NikeIosCustom":    "iOS",
+	// iPad
+	"iPad": "iOS",
+	// Android
+	"Android":               "Android",
+	"OkHttp":                "Android",
+	"MeshAndroid":           "Android",
+	"MeshAndroid2":          "Android",
+	"ConfirmedAndroid":      "Android",
+	"ZalandoAndroidCustom":  "Android",
+	"NikeAndroidCustom":     "Android",
+	// Cloudscraper is Chrome-based (Windows TCP fingerprint)
+	"CloudflareCustom": "Windows",
+}
+
+// GetTcpFingerprint returns the TCP fingerprint for this profile.
+// If the profile has an explicit tcpFingerprint set, it is returned.
+// Otherwise the Client name is mapped to a platform and the platform default
+// is returned.  Returns nil when no mapping exists (user must set explicitly).
+func (c ClientProfile) GetTcpFingerprint() *TcpFingerprint {
+	if c.tcpFingerprint != nil {
+		return c.tcpFingerprint
+	}
+	platform, ok := clientToPlatform[c.clientHelloId.Client]
+	if !ok {
+		return nil
+	}
+	fp := DefaultTcpFingerprints[platform]
+	return &fp
+}
+
+// IntPtr returns a pointer to a heap-allocated copy of v.
+// Use this (not &localVar) when storing pointers in TcpFingerprint to avoid
+// dangling pointers after the calling function returns.
+func IntPtr(v int) *int {
+	cp := v
+	return &cp
 }
 
 func (c ClientProfile) GetClientHelloSpec() (tls.ClientHelloSpec, error) {

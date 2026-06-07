@@ -96,6 +96,8 @@ type httpClientConfig struct {
 	// Establish a connection to origin server via ipv6 only
 	disableIPV4 bool
 
+	tcpFingerprintOverride *profiles.TcpFingerprint // nil = auto-infer from profile
+
 	enabledBandwidthTracker bool
 
 	preHooks  []PreRequestHookFunc
@@ -354,6 +356,15 @@ func WithPreHook(hook PreRequestHookFunc) HttpClientOption {
 func WithPostHook(hook PostResponseHookFunc) HttpClientOption {
 	return func(config *httpClientConfig) {
 		config.postHooks = append(config.postHooks, hook)
+	}
+}
+
+// WithTcpFingerprint sets custom TCP/IP fingerprint parameters (TTL, WindowSize, WindowScale, MSS).
+// Non-nil fields override the automatic values derived from the ClientProfile.
+// Nil fields fall back to the automatic profile-derived value.
+func WithTcpFingerprint(fp profiles.TcpFingerprint) HttpClientOption {
+	return func(config *httpClientConfig) {
+		config.tcpFingerprintOverride = &fp
 	}
 }
 

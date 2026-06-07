@@ -180,6 +180,12 @@ func (c *customContextDialer) DialContext(ctx context.Context, network, addr str
 }
 
 func buildFromConfig(logger Logger, config *httpClientConfig) (*http.Client, proxy.ContextDialer, bandwidth.BandwidthTracker, profiles.ClientProfile, error) {
+	// Merge TCP fingerprint: auto-derived from profile + manual user override
+	tcpFp := MergeTcpFingerprint(config.clientProfile.GetTcpFingerprint(), config.tcpFingerprintOverride)
+	if tcpFp != nil && config.dialContext == nil {
+		config.dialer.Control = tcpControl(tcpFp)
+	}
+
 	var dialer proxy.ContextDialer
 	dialer = newDirectDialer(config.timeout, config.localAddr, config.dialer)
 
@@ -331,6 +337,11 @@ func (c *httpClient) GetProxy() string {
 }
 
 func (c *httpClient) applyProxy() error {
+	tcpFp := MergeTcpFingerprint(c.config.clientProfile.GetTcpFingerprint(), c.config.tcpFingerprintOverride)
+	if tcpFp != nil && c.config.dialContext == nil {
+		c.config.dialer.Control = tcpControl(tcpFp)
+	}
+
 	var dialer proxy.ContextDialer
 	dialer = proxy.Direct
 

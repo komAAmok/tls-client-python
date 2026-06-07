@@ -82,6 +82,10 @@ type RequestInput struct {
 	IsRotatingProxy             bool                `json:"isRotatingProxy"`
 	DisableIPV6                 bool                `json:"disableIPV6"`
 	DisableIPV4                 bool                `json:"disableIPV4"`
+	TcpTTL                      int                 `json:"tcpTTL"`
+	TcpWindowSize               int                 `json:"tcpWindowSize"`
+	TcpWindowScale              int                 `json:"tcpWindowScale"`
+	TcpMSS                      int                 `json:"tcpMSS"`
 	WithDebug                   bool                `json:"withDebug"`
 	WithCustomCookieJar         bool                `json:"withCustomCookieJar"`
 	WithoutCookieJar            bool                `json:"withoutCookieJar"`
