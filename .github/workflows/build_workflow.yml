@@ -30,25 +30,25 @@ jobs:
             goarch: amd64
             ext: .so
             cgo_ldflags: "-Wl,--gc-sections -Wl,-z,relro -Wl,-z,now"
-            plat: "manylinux2014_x86_64" # 🌟 新增：对原生 Linux 强制标记为 manylinux
+            plat: "manylinux2014_x86_64" # 🌟 显式指定：Linux 标签
           - runner: macos-latest
             goos: darwin
             goarch: amd64
             ext: .dylib
             cgo_ldflags: "-Wl,-dead_strip"
-            plat: ""
+            plat: "macosx_10_9_x86_64"  # 🌟 显式指定：Mac Intel 标签
           - runner: macos-latest
             goos: darwin
             goarch: arm64
             ext: .dylib
             cgo_ldflags: "-Wl,-dead_strip"
-            plat: ""
+            plat: "macosx_11_0_arm64"   # 🌟 显式指定：Mac M系列芯片标签
           - runner: windows-latest
             goos: windows
             goarch: amd64
             ext: .dll
             cgo_ldflags: "-Wl,--gc-sections"
-            plat: ""
+            plat: "win_amd64"           # 🌟 显式指定：Windows 64位标签
 
     steps:
       - name: Checkout Code
@@ -86,7 +86,7 @@ jobs:
           GOARCH: ${{ matrix.goarch }}
         run: |
           mkdir -p ../tls_client/bin
-          # 🌟 统一命名，每个包里只有属于该平台的一个动态库
+          # 统一命名
           go build -buildmode=c-shared \
                    -buildvcs=false \
                    -trimpath \
@@ -110,16 +110,12 @@ jobs:
         run: |
           upx --best --lzma "tls_client/bin/tls-client${{ matrix.ext }}" || true
 
-      # 🌟 优化：如果定义了 plat（即 Linux），则强制使用 -C--build-option=--plat-name
+      # 🌟 核心修复：无视任何默认机制，对所有构建平台强制应用对应的 --plat-name
       - name: Build Wheel
         shell: bash
         run: |
           python -m pip install --upgrade pip build
-          if [ -n "${{ matrix.plat }}" ]; then
-            python -m build --wheel -C--build-option=--plat-name=${{ matrix.plat }}
-          else
-            python -m build --wheel
-          fi
+          python -m build --wheel -C--build-option=--plat-name=${{ matrix.plat }}
 
       - name: Upload Platform Wheel Artifact
         uses: actions/upload-artifact@v4
@@ -291,7 +287,7 @@ jobs:
         working-directory: cffi_binding
         env:
           CGO_ENABLED: 1
-          CGO_CFLAGS: "-Os -g0 -fdata-sections -ffunction-sections -fno-ident"
+          CGO_CFLAGS: "-Os -g0 -fdata-sections -ffunction-sections -fno-asynchronous-unwind-tables -fno-ident"
           CGO_LDFLAGS: "-Wl,--gc-sections"
           GOOS: linux
           GOARCH: amd64
