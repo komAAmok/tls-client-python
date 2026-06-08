@@ -34,7 +34,7 @@ import platform
 import sys
 import threading
 from pathlib import Path
-from typing import Any, Dict, List, Literal, Optional
+from typing import Any, Dict, List, Optional
 import hashlib
 
 from tls_client._default_headers import DEFAULT_HEADERS
