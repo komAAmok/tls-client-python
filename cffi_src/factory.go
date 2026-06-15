@@ -248,6 +248,17 @@ func BuildResponse(sessionId string, withSession bool, resp *http.Response, cook
 				return Response{}, NewTLSClientError(err)
 			}
 		}
+	} else {
+		var err error
+		if input.StreamOutputPath != nil {
+			respBodyBytes, err = readAllBodyWithStreamToFile(bodyReader, input)
+		} else {
+			respBodyBytes, err = io.ReadAll(bodyReader)
+		}
+
+		if err != nil {
+			return Response{}, NewTLSClientError(err)
+		}
 	}
 
 	finalResponse := string(respBodyBytes)
