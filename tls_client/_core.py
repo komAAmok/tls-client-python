@@ -2349,22 +2349,28 @@ class Session:
         return self.execute_request(method, url, **kwargs)
 
     def get(self, url: str, *, headers: Optional[Dict[str, str]] = None, **kwargs: Any) -> Response:
-        return self.execute_request("GET", url, headers=headers, **kwargs)
+        return self.request("GET", url, headers=headers, **kwargs)
 
     def post(self, url: str, *, headers: Optional[Dict[str, str]] = None, body: Optional[bytes] = None, **kwargs: Any) -> Response:
-        return self.execute_request("POST", url, headers=headers, body=body, **kwargs)
+        if body is not None:
+            kwargs.setdefault("data", body)
+        return self.request("POST", url, headers=headers, **kwargs)
 
     def head(self, url: str, *, headers: Optional[Dict[str, str]] = None, **kwargs: Any) -> Response:
-        return self.execute_request("HEAD", url, headers=headers, **kwargs)
+        return self.request("HEAD", url, headers=headers, **kwargs)
 
     def put(self, url: str, *, headers: Optional[Dict[str, str]] = None, body: Optional[bytes] = None, **kwargs: Any) -> Response:
-        return self.execute_request("PUT", url, headers=headers, body=body, **kwargs)
+        if body is not None:
+            kwargs.setdefault("data", body)
+        return self.request("PUT", url, headers=headers, **kwargs)
 
     def delete(self, url: str, *, headers: Optional[Dict[str, str]] = None, **kwargs: Any) -> Response:
-        return self.execute_request("DELETE", url, headers=headers, **kwargs)
+        return self.request("DELETE", url, headers=headers, **kwargs)
 
     def patch(self, url: str, *, headers: Optional[Dict[str, str]] = None, body: Optional[bytes] = None, **kwargs: Any) -> Response:
-        return self.execute_request("PATCH", url, headers=headers, body=body, **kwargs)
+        if body is not None:
+            kwargs.setdefault("data", body)
+        return self.request("PATCH", url, headers=headers, **kwargs)
 
     def request(
         self,
