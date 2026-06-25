@@ -1075,228 +1075,50 @@ func getOrCreateClient(opts *C.RequestOptions) (tls_client.HttpClient, error) {
 }
 
 func buildClient(opts *C.RequestOptions) (tls_client.HttpClient, error) {
-	ci := C.GoString(opts.client_identifier)
-
-	// Build the client profile: use CustomTlsClient if provided, otherwise
-	// resolve by identifier (mapped or default).
-	var clientProfile profiles.ClientProfile
-	if opts.custom_tls_client != nil {
-		var profErr error
-		clientProfile, profErr = buildCustomProfileFromC(opts.custom_tls_client)
-		if profErr != nil {
-			return nil, fmt.Errorf("failed to build custom TLS profile: %w", profErr)
-		}
-	} else {
-		clientProfile = profiles.DefaultClientProfile
-		if mapped, ok := profiles.MappedTLSClients[ci]; ok {
-			clientProfile = mapped
-		}
+	// Convert C struct → requestConfig and delegate to buildClientFromConfig,
+	// eliminating the ~200-line duplication with the async path.
+	cfg := &requestConfig{
+		clientIdentifier:         C.GoString(opts.client_identifier),
+		timeoutSeconds:           int(opts.timeout_seconds),
+		timeoutMilliseconds:      int(opts.timeout_milliseconds),
+		followRedirects:          int(opts.follow_redirects) != 0,
+		insecureSkipVerify:       int(opts.insecure_skip_verify) != 0,
+		forceHttp1:               int(opts.force_http1) != 0,
+		withRandomTLSExtOrder:    int(opts.with_random_tls_extension_order) != 0,
+		withProtocolRacing:       int(opts.with_protocol_racing) != 0,
+		serverNameOverwrite:      C.GoString(opts.server_name_overwrite),
+		localAddress:             C.GoString(opts.local_address),
+		proxy:                    C.GoString(opts.proxy),
+		maxIdleConns:             int(opts.max_idle_connections),
+		maxIdleConnsPerHost:      int(opts.max_idle_connections_per_host),
+		maxConnsPerHost:          int(opts.max_connections_per_host),
+		maxResponseHeaderBytes:   int(opts.max_response_header_bytes),
+		writeBufferSize:          int(opts.write_buffer_size),
+		readBufferSize:           int(opts.read_buffer_size),
+		idleConnTimeoutSeconds:   int(opts.idle_conn_timeout_seconds),
+		disableKeepAlives:        int(opts.disable_keep_alives) != 0,
+		disableCompression:       int(opts.disable_compression) != 0,
+		allowEmptyCookies:        int(opts.allow_empty_cookies) != 0,
+		disableHTTP3:             int(opts.disable_http3) != 0,
+		disableIPv4:              int(opts.disable_ipv4) != 0,
+		disableIPv6:              int(opts.disable_ipv6) != 0,
+		tcpTTL:                   int(opts.tcp_ttl),
+		tcpWindowSize:            int(opts.tcp_window_size),
+		tcpWindowScale:           int(opts.tcp_window_scale),
+		tcpMSS:                   int(opts.tcp_mss),
+		withoutCookieJar:         int(opts.without_cookie_jar) != 0,
+		catchPanics:              int(opts.catch_panics) != 0,
+		withDebug:                int(opts.with_debug) != 0,
+		withDefaultBadPinHandler: int(opts.with_default_bad_pin_handler) != 0,
+		pseudoHeaderOrder:        cStrSlice(opts.pseudo_header_order, int(opts.pseudo_header_order_len)),
+		h3PseudoHeaderOrder:      cStrSlice(opts.h3_pseudo_header_order, int(opts.h3_pseudo_header_order_len)),
+		defaultHeaders:           cHeadersToHTTP(opts.default_headers, int(opts.default_headers_len)),
+		connectHeaders:           cHeadersToHTTP(opts.connect_headers, int(opts.connect_headers_len)),
+		certificatePinningHosts:  cPinsToMap(opts.certificate_pinning_hosts, int(opts.certificate_pinning_hosts_len)),
+		clientCertificates:       cClientCerts(opts.client_certificates, int(opts.client_certificates_len)),
+		customTLSClient:          opts.custom_tls_client,
 	}
-
-	// If a custom pseudo-header order was provided, create a modified
-	// profile that overrides the default order for HTTP/2 and/or HTTP/3.
-	phLen := int(opts.pseudo_header_order_len)
-	h3phLen := int(opts.h3_pseudo_header_order_len)
-
-	if phLen > 0 || h3phLen > 0 {
-		// H3 order: use explicit h3 field if provided, else fall back to H2 order
-		h2Order := clientProfile.GetPseudoHeaderOrder()
-		h3Order := clientProfile.GetHttp3PseudoHeaderOrder()
-
-		if phLen > 0 && opts.pseudo_header_order != nil {
-			phSlice := unsafe.Slice(opts.pseudo_header_order, phLen)
-			customH2 := make([]string, phLen)
-			for i := 0; i < phLen; i++ {
-				customH2[i] = C.GoString(phSlice[i])
-			}
-			h2Order = customH2
-			// If no explicit H3 order, use H2 order for H3 as well
-			if h3phLen == 0 || opts.h3_pseudo_header_order == nil {
-				h3Order = customH2
-			}
-		}
-
-		if h3phLen > 0 && opts.h3_pseudo_header_order != nil {
-			h3phSlice := unsafe.Slice(opts.h3_pseudo_header_order, h3phLen)
-			customH3 := make([]string, h3phLen)
-			for i := 0; i < h3phLen; i++ {
-				customH3[i] = C.GoString(h3phSlice[i])
-			}
-			h3Order = customH3
-		}
-
-		clientProfile = profiles.NewClientProfile(
-			clientProfile.GetClientHelloId(),
-			clientProfile.GetSettings(),
-			clientProfile.GetSettingsOrder(),
-			h2Order,
-			clientProfile.GetConnectionFlow(),
-			clientProfile.GetPriorities(),
-			clientProfile.GetHeaderPriority(),
-			clientProfile.GetStreamID(),
-			clientProfile.GetAllowHTTP(),
-			clientProfile.GetHttp3Settings(),
-			clientProfile.GetHttp3SettingsOrder(),
-			clientProfile.GetHttp3PriorityParam(),
-			h3Order,
-			clientProfile.GetHttp3SendGreaseFrames(),
-		)
-	}
-
-	var options []tls_client.HttpClientOption
-	options = append(options, tls_client.WithClientProfile(clientProfile))
-
-	// Timeout: prefer milliseconds if set, else seconds, else default
-	var timeoutOption tls_client.HttpClientOption
-	if ms := int(opts.timeout_milliseconds); ms > 0 {
-		timeoutOption = tls_client.WithTimeoutMilliseconds(ms)
-	} else if s := int(opts.timeout_seconds); s > 0 {
-		timeoutOption = tls_client.WithTimeoutSeconds(s)
-	} else {
-		timeoutOption = tls_client.WithTimeoutSeconds(tls_client.DefaultTimeoutSeconds)
-	}
-	options = append(options, timeoutOption)
-
-	if int(opts.follow_redirects) == 0 {
-		options = append(options, tls_client.WithNotFollowRedirects())
-	}
-
-	if int(opts.insecure_skip_verify) == 1 {
-		options = append(options, tls_client.WithInsecureSkipVerify())
-	}
-
-	if int(opts.force_http1) == 1 {
-		options = append(options, tls_client.WithForceHttp1())
-	}
-
-	if int(opts.with_random_tls_extension_order) == 1 {
-		options = append(options, tls_client.WithRandomTLSExtensionOrder())
-	}
-
-	if int(opts.disable_http3) == 1 {
-		options = append(options, tls_client.WithDisableHttp3())
-	}
-
-	if int(opts.with_protocol_racing) == 1 {
-		options = append(options, tls_client.WithProtocolRacing())
-	}
-
-	if int(opts.disable_ipv6) == 1 {
-		options = append(options, tls_client.WithDisableIPV6())
-	}
-
-	if int(opts.disable_ipv4) == 1 {
-		options = append(options, tls_client.WithDisableIPV4())
-	}
-
-	// TCP/IP fingerprint — use profiles.intPtr() to heap-allocate values so
-	// pointers inside TcpFingerprint remain valid after this function returns.
-	if int(opts.tcp_ttl) > 0 || int(opts.tcp_window_size) > 0 || int(opts.tcp_window_scale) > 0 || int(opts.tcp_mss) > 0 {
-		fp := profiles.TcpFingerprint{}
-		if ttl := int(opts.tcp_ttl); ttl > 0 {
-			fp.TTL = profiles.IntPtr(ttl)
-		}
-		if ws := int(opts.tcp_window_size); ws > 0 {
-			fp.WindowSize = profiles.IntPtr(ws)
-		}
-		if wsc := int(opts.tcp_window_scale); wsc > 0 {
-			fp.WindowScale = profiles.IntPtr(wsc)
-		}
-		if mss := int(opts.tcp_mss); mss > 0 {
-			fp.MSS = profiles.IntPtr(mss)
-		}
-		options = append(options, tls_client.WithTcpFingerprint(fp))
-	}
-
-	if int(opts.catch_panics) == 1 {
-		options = append(options, tls_client.WithCatchPanics())
-	}
-
-	if int(opts.with_debug) == 1 {
-		options = append(options, tls_client.WithDebug())
-	}
-
-	sni := C.GoString(opts.server_name_overwrite)
-	if sni != "" {
-		options = append(options, tls_client.WithServerNameOverwrite(sni))
-	}
-
-	proxy := C.GoString(opts.proxy)
-	if proxy != "" {
-		options = append(options, tls_client.WithProxyUrl(proxy))
-	}
-
-	// Local address (bind to specific interface/IP)
-	localAddr := C.GoString(opts.local_address)
-	if localAddr != "" {
-		addr, addrErr := net.ResolveTCPAddr("", localAddr)
-		if addrErr != nil {
-			return nil, fmt.Errorf("failed to resolve local address %q: %w", localAddr, addrErr)
-		}
-		options = append(options, tls_client.WithLocalAddr(*addr))
-	}
-
-	transportOpts := &tls_client.TransportOptions{
-		MaxIdleConns:           int(opts.max_idle_connections),
-		MaxIdleConnsPerHost:    int(opts.max_idle_connections_per_host),
-		MaxConnsPerHost:        int(opts.max_connections_per_host),
-		MaxResponseHeaderBytes: int64(opts.max_response_header_bytes),
-		WriteBufferSize:        int(opts.write_buffer_size),
-		ReadBufferSize:         int(opts.read_buffer_size),
-		DisableKeepAlives:      int(opts.disable_keep_alives) == 1,
-		DisableCompression:     int(opts.disable_compression) == 1,
-	}
-	// Client certificates for mTLS
-	if ccLen := int(opts.client_certificates_len); ccLen > 0 && opts.client_certificates != nil {
-		transportOpts.Certificates = cClientCerts(opts.client_certificates, ccLen)
-	}
-	// Default idle connection timeout of 30s — prevents unbounded
-	// connection-pool growth when the caller does not set it explicitly.
-	if idleSec := int(opts.idle_conn_timeout_seconds); idleSec > 0 {
-		d := time.Duration(idleSec) * time.Second
-		transportOpts.IdleConnTimeout = &d
-	} else {
-		d := 30 * time.Second
-		transportOpts.IdleConnTimeout = &d
-	}
-	options = append(options, tls_client.WithTransportOptions(transportOpts))
-
-	// Cookie jar
-	if int(opts.without_cookie_jar) == 1 {
-		// No cookie jar at all – cookies are neither stored nor sent
-	} else {
-		var jarOptions []tls_client.CookieJarOption
-		if int(opts.allow_empty_cookies) == 1 {
-			jarOptions = append(jarOptions, tls_client.WithAllowEmptyCookies())
-		}
-		jar := tls_client.NewCookieJar(jarOptions...)
-		options = append(options, tls_client.WithCookieJar(jar))
-	}
-
-	// Default headers – added to every request when the request itself
-	// does not specify a value for the same key.
-	if dhLen := int(opts.default_headers_len); dhLen > 0 && opts.default_headers != nil {
-		dh := cHeadersToHTTP(opts.default_headers, dhLen)
-		options = append(options, tls_client.WithDefaultHeaders(dh))
-	}
-
-	// Connect headers – injected into the proxy CONNECT tunnel request.
-	if chLen := int(opts.connect_headers_len); chLen > 0 && opts.connect_headers != nil {
-		ch := cHeadersToHTTP(opts.connect_headers, chLen)
-		options = append(options, tls_client.WithConnectHeaders(ch))
-	}
-
-	// Certificate pinning – map host → list of SPKI pin hashes.
-	if cpLen := int(opts.certificate_pinning_hosts_len); cpLen > 0 && opts.certificate_pinning_hosts != nil {
-		pins := cPinsToMap(opts.certificate_pinning_hosts, cpLen)
-		var pinHandler tls_client.BadPinHandlerFunc
-		if int(opts.with_default_bad_pin_handler) == 1 {
-			pinHandler = tls_client.DefaultBadPinHandler
-		}
-		options = append(options, tls_client.WithCertificatePinning(pins, pinHandler))
-	}
-
-	return tls_client.NewHttpClient(tls_client.NewNoopLogger(), options...)
+	return buildClientFromConfig(cfg)
 }
 
 // cHeadersToHTTP converts a C HttpHeader array to Go http.Header (map[string][]string).
@@ -1948,7 +1770,9 @@ func executeRequestFromConfig(cfg *requestConfig) *C.ResponseResult {
 		result.err_msg = C.CString(fmt.Sprintf("request failed: %v", reqErr))
 		return result
 	}
-	defer resp.Body.Close()
+	// Use a closure so Body.Close() is called on the final value of resp.Body
+	// (which may be replaced by DecompressBodyByType below).
+	defer func() { resp.Body.Close() }()
 
 	if !cfg.disableCompression && !resp.Uncompressed {
 		ce := resp.Header.Get("Content-Encoding")
@@ -2299,7 +2123,9 @@ func ExecuteRequest(opts *C.RequestOptions) *C.ResponseResult {
 		result.err_msg = C.CString(fmt.Sprintf("request failed: %v", reqErr))
 		return result
 	}
-	defer resp.Body.Close()
+	// Use a closure so Body.Close() is called on the final value of resp.Body
+	// (which may be replaced by DecompressBodyByType below).
+	defer func() { resp.Body.Close() }()
 
 	// ---- read response body -----------------------------------------------
 
@@ -2524,6 +2350,13 @@ func RequestAsync(opts *C.RequestOptions, requestID C.uintptr_t, cb unsafe.Point
 	// Every goroutine MUST have a top-level defer/recover to prevent
 	// any panic from crashing the Python process (Constraint 3).
 	go func() {
+		// Ensure customTLSClient memory is always freed, regardless of panic.
+		defer func() {
+			if cfg != nil && cfg.customTLSClient != nil {
+				freeCustomTLSClient(cfg.customTLSClient)
+			}
+		}()
+
 		defer func() {
 			if r := recover(); r != nil {
 				// Attempt to send a panic error via the callback.
@@ -2536,12 +2369,6 @@ func RequestAsync(opts *C.RequestOptions, requestID C.uintptr_t, cb unsafe.Point
 					res.status_code = 0
 				}
 				C.invoke_async_callback(cb, requestID, res)
-			}
-
-		// Clean up custom TLS client memory regardless of panic.
-		// cfg may be nil if deepCopyRequestOptions panicked — guard against that.
-		if cfg != nil && cfg.customTLSClient != nil {
-				freeCustomTLSClient(cfg.customTLSClient)
 			}
 		}()
 

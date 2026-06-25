@@ -34,7 +34,7 @@ import platform
 import sys
 import threading
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple, Union
 import hashlib
 
 from tls_client._default_headers import DEFAULT_HEADERS
@@ -1233,115 +1233,6 @@ def _compute_cache_key_hash(r: dict) -> str:
 
 
 # ---------------------------------------------------------------------------
-# Shared RequestOptions builder — eliminates ~80 lines of duplicated
-# C‑struct logic between Session.execute_request and AsyncSession._execute_async
-# ---------------------------------------------------------------------------
-
-def _populate_request_options(
-    ffi: Any,
-    opts: Any,
-    keep_alive: list,
-    defaults: Dict[str, Any],
-    overrides: Dict[str, Any],
-) -> None:
-    """Set every field on *opts* by looking up ``overrides[name]`` first,
-    then falling back to ``defaults[name]``.  Bool fields are auto‑converted
-    to C ``int`` (0/1).  String / array / dict fields call the appropriate
-    ``_build_*`` helper and extend *keep_alive*."""
-
-    def _val(name: str, as_bool: bool = False) -> Any:
-        v = overrides.get(name)
-        if v is None:
-            v = defaults.get(name)  # defensive: missing key → None instead of KeyError
-        if as_bool:
-            return 1 if v else 0
-        return v
-
-    # ---- String fields (nullable C strings) -------------------------------
-    for field in (
-        "proxy",
-        "client_identifier",
-        "server_name_overwrite",
-        "request_host_override",
-        "local_address",
-    ):
-        c_val = _c_string(ffi, _val(field))
-        setattr(opts, field, c_val)
-        if c_val != ffi.NULL:
-            keep_alive.append(c_val)
-
-    # ---- Array / dict fields (C arrays of structs) ------------------------
-    (
-        opts.pseudo_header_order,
-        opts.pseudo_header_order_len,
-    ) = _build_string_array(ffi, _val("pseudo_header_order"), keep_alive)
-
-    (
-        opts.h3_pseudo_header_order,
-        opts.h3_pseudo_header_order_len,
-    ) = _build_string_array(ffi, _val("h3_pseudo_header_order"), keep_alive)
-
-    opts.default_headers, opts.default_headers_len = _build_headers(
-        ffi, _val("default_headers"), keep_alive
-    )
-    opts.connect_headers, opts.connect_headers_len = _build_headers(
-        ffi, _val("connect_headers"), keep_alive
-    )
-    (
-        opts.certificate_pinning_hosts,
-        opts.certificate_pinning_hosts_len,
-    ) = _build_pin_entries(
-        ffi, _val("certificate_pinning_hosts"), keep_alive
-    )
-    opts.request_cookies, opts.request_cookies_len = _build_headers(
-        ffi, _val("request_cookies"), keep_alive
-    )
-    (
-        opts.client_certificates,
-        opts.client_certificates_len,
-    ) = _build_client_certificates(
-        ffi, _val("client_certificates"), keep_alive
-    )
-    opts.custom_tls_client = _build_custom_tls_client(
-        ffi, _val("custom_tls_client"), keep_alive
-    )
-
-    # ---- Scalar fields (int / bool→int) -----------------------------------
-    opts.timeout_seconds = _val("timeout_seconds")
-    opts.timeout_milliseconds = _val("timeout_milliseconds")
-    opts.follow_redirects = _val("follow_redirects", True)
-    opts.insecure_skip_verify = _val("insecure_skip_verify", True)
-    opts.force_http1 = _val("force_http1", True)
-    opts.with_random_tls_extension_order = _val(
-        "with_random_tls_extension_order", True
-    )
-    opts.with_protocol_racing = _val("with_protocol_racing", True)
-    opts.with_default_bad_pin_handler = _val(
-        "with_default_bad_pin_handler", True
-    )
-    opts.max_idle_connections = _val("max_idle_connections")
-    opts.max_idle_connections_per_host = _val("max_idle_connections_per_host")
-    opts.max_connections_per_host = _val("max_connections_per_host")
-    opts.disable_keep_alives = _val("disable_keep_alives", True)
-    opts.disable_compression = _val("disable_compression", True)
-    opts.idle_conn_timeout_seconds = _val("idle_conn_timeout_seconds")
-    opts.max_response_header_bytes = _val("max_response_header_bytes")
-    opts.write_buffer_size = _val("write_buffer_size")
-    opts.read_buffer_size = _val("read_buffer_size")
-    opts.allow_empty_cookies = _val("allow_empty_cookies", True)
-    opts.without_cookie_jar = _val("without_cookie_jar", True)
-    opts.disable_http3 = _val("disable_http3", True)
-    opts.disable_ipv4 = _val("disable_ipv4", True)
-    opts.disable_ipv6 = _val("disable_ipv6", True)
-    opts.tcp_ttl = _val("tcp_ttl")
-    opts.tcp_window_size = _val("tcp_window_size")
-    opts.tcp_window_scale = _val("tcp_window_scale")
-    opts.tcp_mss = _val("tcp_mss")
-    opts.catch_panics = _val("catch_panics", True)
-    opts.with_debug = _val("with_debug", True)
-
-
-# ---------------------------------------------------------------------------
 # Response unpacking — shared between sync ExecuteRequest and async callback
 # ---------------------------------------------------------------------------
 
@@ -1843,6 +1734,53 @@ class Session:
     def with_debug(self, value: bool) -> None:
         self.defaults["with_debug"] = 1 if value else 0
 
+    # -- auth ----------------------------------------------------------------
+
+    @property
+    def auth(self) -> Optional[Tuple[str, str]]:
+        """HTTP 认证元组 ``(username, password)`` / HTTP auth tuple ``(username, password)``."""
+        return self.defaults.get("auth")
+
+    @auth.setter
+    def auth(self, value: Optional[Tuple[str, str]]) -> None:
+        self.defaults["auth"] = value
+
+    # -- params (query string) ----------------------------------------------
+
+    @property
+    def params(self) -> Optional[Dict[str, str]]:
+        """查询字符串参数字典 / Query-string parameter dict."""
+        return self.defaults.get("params")
+
+    @params.setter
+    def params(self, value: Optional[Dict[str, str]]) -> None:
+        self.defaults["params"] = value
+
+    # -- cert (client SSL certificate) --------------------------------------
+
+    @property
+    def cert(self) -> Optional[Union[str, Tuple[str, str]]]:
+        """客户端 SSL 证书路径 / Client SSL cert path.
+
+        ``str``: 单独 cert 文件 ; ``(cert_path, key_path)``: cert + key 文件。
+        """
+        return self.defaults.get("cert")
+
+    @cert.setter
+    def cert(self, value: Optional[Union[str, Tuple[str, str]]]) -> None:
+        self.defaults["cert"] = value
+
+    # -- stream (response streaming mode) -----------------------------------
+
+    @property
+    def stream(self) -> bool:
+        """是否流式读取响应体 / Whether to stream the response body."""
+        return bool(self.defaults.get("stream", False))
+
+    @stream.setter
+    def stream(self, value: bool) -> None:
+        self.defaults["stream"] = 1 if value else 0
+
     def __init__(
         self,
         *,
@@ -1936,6 +1874,15 @@ class Session:
         allow_empty_cookies: bool = False,
         # 完全禁用 Cookie Jar / Completely disable Cookie Jar
         without_cookie_jar: bool = False,
+        # ── requests 兼容属性 ──  /  requests-compatible properties ──
+        # HTTP 认证元组 (username, password)  / HTTP auth tuple
+        auth: Optional[Tuple[str, str]] = None,
+        # 查询字符串参数字典  / Query-string parameter dict
+        params: Optional[Dict[str, str]] = None,
+        # 客户端 SSL 证书路径  / Client SSL cert path
+        cert: Optional[Union[str, Tuple[str, str]]] = None,
+        # 是否流式读取响应体  / Whether to stream the response body
+        stream: bool = False,
         # ── 调试 / 安全 ──  /  Debug / Safety ──
         # 是否在 Go 侧捕获 panic / Whether to catch Go panics
         catch_panics: bool = True,
@@ -1959,6 +1906,10 @@ class Session:
             "proxy": proxy,
             "pseudo_header_order": pseudo_header_order,
             "h3_pseudo_header_order": h3_pseudo_header_order,
+            "auth": auth,
+            "params": params,
+            "cert": cert,
+            "stream": 1 if stream else 0,
             "default_headers": (
                 default_headers
                 if default_headers is not None
@@ -2415,6 +2366,139 @@ class Session:
     def patch(self, url: str, *, headers: Optional[Dict[str, str]] = None, body: Optional[bytes] = None, **kwargs: Any) -> Response:
         return self.execute_request("PATCH", url, headers=headers, body=body, **kwargs)
 
+    def request(
+        self,
+        method: str,
+        url: str,
+        *,
+        params: Optional[Dict[str, str]] = None,
+        data: Union[bytes, str, Dict[str, str], None] = None,
+        json: Any = None,
+        headers: Optional[Dict[str, str]] = None,
+        auth: Optional[Tuple[str, str]] = None,
+        cookies: Optional[Dict[str, str]] = None,
+        stream: Optional[bool] = None,
+        cert: Optional[Union[str, Tuple[str, str]]] = None,
+        timeout: Optional[int] = None,
+        allow_redirects: Optional[bool] = None,
+        proxies: Optional[Dict[str, str]] = None,
+        verify: Optional[bool] = None,
+        **kwargs: Any,
+    ) -> Response:
+        """``requests`` 兼容的通用 HTTP 请求方法。
+
+        ``requests``-compatible universal HTTP request method.
+
+        支持 ``params``、``data``、``json``、``auth``、``cookies``、``cert``、
+        ``proxies``、``allow_redirects``、``timeout``、``verify`` 等标准参数。
+        每个参数都会映射到 ``execute_request`` 的内部参数名。
+        """
+        # ── params: append to URL query string ────────────────────────────
+        if params:
+            from urllib.parse import urlencode, urlparse, urlunparse
+            parsed = urlparse(url)
+            merged = dict(
+                (k, v) for k, v in (p.split("=", 1) for p in parsed.query.split("&") if p)
+            )
+            merged.update(params)
+            url = urlunparse(parsed._replace(
+                query=urlencode([(k, v) for k, v in merged.items()])
+            ))
+
+        # ── body: data / json ─────────────────────────────────────────────
+        body = kwargs.pop("body", None)
+        if body is None and data is not None:
+            if isinstance(data, dict):
+                from urllib.parse import urlencode
+                body = urlencode(data).encode("utf-8")
+                if headers is None:
+                    headers = {}
+                if "Content-Type" not in {k.lower(): v for k, v in (headers or {}).items()}:
+                    headers = dict(headers or {})
+                    headers["Content-Type"] = "application/x-www-form-urlencoded"
+            elif isinstance(data, str):
+                body = data.encode("utf-8")
+            else:
+                body = data
+        if json is not None:
+            import json as _json
+            body = _json.dumps(json, ensure_ascii=False).encode("utf-8")
+            if headers is None:
+                headers = {}
+            if "Content-Type" not in {k.lower(): v for k, v in (headers or {}).items()}:
+                headers = dict(headers or {})
+                headers["Content-Type"] = "application/json"
+
+        # ── auth: Basic Auth header ───────────────────────────────────────
+        _auth = auth if auth is not None else self.defaults.get("auth")
+        if _auth is not None:
+            import base64
+            user, pwd = _auth
+            encoded = base64.b64encode(f"{user}:{pwd}".encode("utf-8")).decode("ascii")
+            if headers is None:
+                headers = {}
+            headers = dict(headers or {})
+            headers.setdefault("Authorization", f"Basic {encoded}")
+
+        # ── cert: file path → client_certificates ────────────────────────
+        _cert = cert if cert is not None else self.defaults.get("cert")
+        client_certificates = kwargs.pop("client_certificates", None)
+        if client_certificates is None and _cert is not None:
+            if isinstance(_cert, str):
+                with open(_cert, "rb") as f:
+                    cert_bytes = f.read()
+                client_certificates = [{"cert_pem": cert_bytes, "key_pem": cert_bytes}]
+            elif isinstance(_cert, tuple) and len(_cert) == 2:
+                with open(_cert[0], "rb") as f:
+                    cert_bytes = f.read()
+                with open(_cert[1], "rb") as f:
+                    key_bytes = f.read()
+                client_certificates = [{"cert_pem": cert_bytes, "key_pem": key_bytes}]
+
+        # ── cookies ──────────────────────────────────────────────────────
+        _cookies = cookies if cookies is not None else kwargs.pop("request_cookies", None)
+        kwargs.pop("request_cookies", None)  # guard against duplicate kwarg in **kwargs
+
+        # ── proxies (dict → single proxy string) ─────────────────────────
+        _proxies = proxies
+        if _proxies is not None:
+            scheme = url.split(":", 1)[0].lower()
+            proxy_url = _proxies.get(scheme) or _proxies.get("all") or next(
+                iter(_proxies.values()), None
+            )
+            kwargs.setdefault("proxy", proxy_url)
+
+        # ── name mapping: requests → execute_request ─────────────────────
+        if allow_redirects is not None:
+            kwargs.setdefault("follow_redirects", allow_redirects)
+        if timeout is not None:
+            kwargs.setdefault("timeout", timeout)
+        if verify is not None:
+            kwargs.setdefault("verify", verify)
+        if stream is not None:
+            kwargs.setdefault("stream", stream)
+
+        return self.execute_request(
+            method, url,
+            headers=headers,
+            body=body,
+            request_cookies=_cookies,
+            client_certificates=client_certificates,
+            **kwargs,
+        )
+
+    def options(self, url: str, **kwargs: Any) -> Response:
+        """发送 HTTP OPTIONS 请求 / Send an HTTP OPTIONS request."""
+        return self.request("OPTIONS", url, **kwargs)
+
+    def close(self) -> None:
+        """关闭会话，释放 Go 客户端池中的空闲连接。
+
+        Close the session and release idle connections in the Go client pool.
+        """
+        _, lib = _get_ffi()
+        lib.ClearClientPool()
+
     @staticmethod
     def clear_client_pool() -> None:
         """Close all idle connections in the global Go client pool."""
@@ -2455,12 +2539,14 @@ class Session:
 _pending_requests: Dict[int, tuple] = {}
 _pending_lock = threading.Lock()
 _request_counter = 0
+_request_counter_lock = threading.Lock()
 
 
 def _next_request_id() -> int:
     global _request_counter
-    _request_counter += 1
-    return _request_counter
+    with _request_counter_lock:
+        _request_counter += 1
+        return _request_counter
 
 
 def _resolve_async_response(ffi, future, raw_gc):
@@ -2699,6 +2785,15 @@ class AsyncSession:
         allow_empty_cookies: bool = False,
         # 完全禁用 Cookie Jar / Completely disable Cookie Jar
         without_cookie_jar: bool = False,
+        # ── requests 兼容属性 ──  /  requests-compatible properties ──
+        # HTTP 认证元组 (username, password)  / HTTP auth tuple
+        auth: Optional[Tuple[str, str]] = None,
+        # 查询字符串参数字典  / Query-string parameter dict
+        params: Optional[Dict[str, str]] = None,
+        # 客户端 SSL 证书路径  / Client SSL cert path
+        cert: Optional[Union[str, Tuple[str, str]]] = None,
+        # 是否流式读取响应体  / Whether to stream the response body
+        stream: bool = False,
         # ── 调试 / 安全 ──  /  Debug / Safety ──
         # 是否在 Go 侧捕获 panic / Whether to catch Go panics
         catch_panics: bool = True,
@@ -2745,6 +2840,10 @@ class AsyncSession:
             tcp_mss=tcp_mss,
             allow_empty_cookies=allow_empty_cookies,
             without_cookie_jar=without_cookie_jar,
+            auth=auth,
+            params=params,
+            cert=cert,
+            stream=stream,
             catch_panics=catch_panics,
             with_debug=with_debug,
         )
@@ -2817,6 +2916,57 @@ class AsyncSession:
             if as_bool:
                 return 1 if v else 0
             return v
+
+        # Pre-compute cache key BEFORE _val() consumes kwargs.
+        # kwargs.get() is non-destructive so values remain for _val() below.
+        def _ck(name):
+            return kwargs.get(name, self._session.defaults.get(name))
+        def _ckb(name):
+            v = kwargs.get(name, self._session.defaults.get(name))
+            return 1 if v else 0
+        ck_hash = _compute_cache_key_hash({
+            "client_identifier": _ck("client_identifier") or "",
+            "proxy": _ck("proxy") or "",
+            "server_name_overwrite": _ck("server_name_overwrite") or "",
+            "local_address": _ck("local_address") or "",
+            "insecure_skip_verify": _ckb("insecure_skip_verify"),
+            "force_http1": _ckb("force_http1"),
+            "with_random_tls_extension_order": _ckb("with_random_tls_extension_order"),
+            "with_protocol_racing": _ckb("with_protocol_racing"),
+            "max_idle_connections": _ck("max_idle_connections"),
+            "max_idle_connections_per_host": _ck("max_idle_connections_per_host"),
+            "max_connections_per_host": _ck("max_connections_per_host"),
+            "max_response_header_bytes": _ck("max_response_header_bytes"),
+            "write_buffer_size": _ck("write_buffer_size"),
+            "read_buffer_size": _ck("read_buffer_size"),
+            "idle_conn_timeout_seconds": _ck("idle_conn_timeout_seconds"),
+            "disable_keep_alives": _ckb("disable_keep_alives"),
+            "disable_compression": _ckb("disable_compression"),
+            "disable_http3": _ckb("disable_http3"),
+            "disable_ipv4": _ckb("disable_ipv4"),
+            "disable_ipv6": _ckb("disable_ipv6"),
+            "tcp_ttl": _ck("tcp_ttl"),
+            "tcp_window_size": _ck("tcp_window_size"),
+            "tcp_window_scale": _ck("tcp_window_scale"),
+            "tcp_mss": _ck("tcp_mss"),
+            "follow_redirects": _ckb("follow_redirects"),
+            "without_cookie_jar": _ckb("without_cookie_jar"),
+            "allow_empty_cookies": _ckb("allow_empty_cookies"),
+            "with_default_bad_pin_handler": _ckb("with_default_bad_pin_handler"),
+            "timeout_seconds": _ck("timeout_seconds"),
+            "timeout_milliseconds": _ck("timeout_milliseconds"),
+            "pseudo_header_order": _ck("pseudo_header_order"),
+            "h3_pseudo_header_order": _ck("h3_pseudo_header_order"),
+            "default_headers": _ck("default_headers"),
+            "connect_headers": _ck("connect_headers"),
+            "certificate_pinning_hosts": _ck("certificate_pinning_hosts"),
+            "client_certificates": _ck("client_certificates"),
+            "custom_tls_client": _ck("custom_tls_client"),
+        })
+        c_ck = _c_string(ffi, ck_hash)
+        if c_ck != ffi.NULL:
+            keep_alive.append(c_ck)
+        opts.cache_key_hash = c_ck
 
         opts.timeout_seconds = _val("timeout_seconds")
         opts.timeout_milliseconds = _val("timeout_milliseconds")
@@ -2905,54 +3055,6 @@ class AsyncSession:
         ctc = _val("custom_tls_client")
         ctc_ptr = _build_custom_tls_client(ffi, ctc, keep_alive)
         opts.custom_tls_client = ctc_ptr
-
-        # Pre-compute cache key hash and attach to opts (avoids ~50 CGO calls on hit).
-        # Use kwargs.get() (non-destructive) so later _val() calls still find overrides.
-        def _ck(name):  return kwargs.get(name, self._session.defaults.get(name))
-        def _ckb(name): v = kwargs.get(name, self._session.defaults.get(name)); return 1 if v else 0
-        ck_hash = _compute_cache_key_hash({
-            "client_identifier": _ck("client_identifier") or "",
-            "proxy": _ck("proxy") or "",
-            "server_name_overwrite": _ck("server_name_overwrite") or "",
-            "local_address": _ck("local_address") or "",
-            "insecure_skip_verify": _ckb("insecure_skip_verify"),
-            "force_http1": _ckb("force_http1"),
-            "with_random_tls_extension_order": _ckb("with_random_tls_extension_order"),
-            "with_protocol_racing": _ckb("with_protocol_racing"),
-            "max_idle_connections": _ck("max_idle_connections"),
-            "max_idle_connections_per_host": _ck("max_idle_connections_per_host"),
-            "max_connections_per_host": _ck("max_connections_per_host"),
-            "max_response_header_bytes": _ck("max_response_header_bytes"),
-            "write_buffer_size": _ck("write_buffer_size"),
-            "read_buffer_size": _ck("read_buffer_size"),
-            "idle_conn_timeout_seconds": _ck("idle_conn_timeout_seconds"),
-            "disable_keep_alives": _ckb("disable_keep_alives"),
-            "disable_compression": _ckb("disable_compression"),
-            "disable_http3": _ckb("disable_http3"),
-            "disable_ipv4": _ckb("disable_ipv4"),
-            "disable_ipv6": _ckb("disable_ipv6"),
-            "tcp_ttl": _ck("tcp_ttl"),
-            "tcp_window_size": _ck("tcp_window_size"),
-            "tcp_window_scale": _ck("tcp_window_scale"),
-            "tcp_mss": _ck("tcp_mss"),
-            "follow_redirects": _ckb("follow_redirects"),
-            "without_cookie_jar": _ckb("without_cookie_jar"),
-            "allow_empty_cookies": _ckb("allow_empty_cookies"),
-            "with_default_bad_pin_handler": _ckb("with_default_bad_pin_handler"),
-            "timeout_seconds": _ck("timeout_seconds"),
-            "timeout_milliseconds": _ck("timeout_milliseconds"),
-            "pseudo_header_order": _ck("pseudo_header_order"),
-            "h3_pseudo_header_order": _ck("h3_pseudo_header_order"),
-            "default_headers": _ck("default_headers"),
-            "connect_headers": _ck("connect_headers"),
-            "certificate_pinning_hosts": _ck("certificate_pinning_hosts"),
-            "client_certificates": _ck("client_certificates"),
-            "custom_tls_client": _ck("custom_tls_client"),
-        })
-        c_ck = _c_string(ffi, ck_hash)
-        if c_ck != ffi.NULL:
-            keep_alive.append(c_ck)
-        opts.cache_key_hash = c_ck
 
         # ---- streaming fields (injected by stream_to_file) -----------------
         stream_path = kwargs.pop("_stream_output_path", ffi.NULL)
@@ -3247,6 +3349,125 @@ class AsyncSession:
 
     async def patch(self, url: str, *, headers: Optional[Dict[str, str]] = None, body: Optional[bytes] = None, **kwargs: Any) -> Response:
         return await self.execute_request("PATCH", url, headers=headers, body=body, **kwargs)
+
+    async def request(
+        self,
+        method: str,
+        url: str,
+        *,
+        params: Optional[Dict[str, str]] = None,
+        data: Union[bytes, str, Dict[str, str], None] = None,
+        json: Any = None,
+        headers: Optional[Dict[str, str]] = None,
+        auth: Optional[Tuple[str, str]] = None,
+        cookies: Optional[Dict[str, str]] = None,
+        stream: Optional[bool] = None,
+        cert: Optional[Union[str, Tuple[str, str]]] = None,
+        timeout: Optional[int] = None,
+        allow_redirects: Optional[bool] = None,
+        proxies: Optional[Dict[str, str]] = None,
+        verify: Optional[bool] = None,
+        **kwargs: Any,
+    ) -> Response:
+        """``requests`` 兼容的异步 HTTP 请求方法。
+
+        ``requests``-compatible async HTTP request method.
+
+        :attr:`params` 自动拼接到 URL，:attr:`data` / :attr:`json` 自动编码请求体，
+        :attr:`auth` 自动设置 ``Authorization`` 头，:attr:`cert` 自动读取文件并转为 mTLS 证书。
+        所有参数均可通过 Session 属性预设，也可单次请求覆盖。
+        """
+        if params:
+            from urllib.parse import urlencode, urlparse, urlunparse
+            parsed = urlparse(url)
+            merged = dict(
+                (k, v) for k, v in (p.split("=", 1) for p in parsed.query.split("&") if p)
+            )
+            merged.update(params)
+            url = urlunparse(parsed._replace(
+                query=urlencode([(k, v) for k, v in merged.items()])
+            ))
+        body = kwargs.pop("body", None)
+        if body is None and data is not None:
+            if isinstance(data, dict):
+                from urllib.parse import urlencode
+                body = urlencode(data).encode("utf-8")
+                if headers is None:
+                    headers = {}
+                if "Content-Type" not in {k.lower(): v for k, v in (headers or {}).items()}:
+                    headers = dict(headers or {})
+                    headers["Content-Type"] = "application/x-www-form-urlencoded"
+            elif isinstance(data, str):
+                body = data.encode("utf-8")
+            else:
+                body = data
+        if json is not None:
+            import json as _json
+            body = _json.dumps(json, ensure_ascii=False).encode("utf-8")
+            if headers is None:
+                headers = {}
+            if "Content-Type" not in {k.lower(): v for k, v in (headers or {}).items()}:
+                headers = dict(headers or {})
+                headers["Content-Type"] = "application/json"
+        _auth = auth if auth is not None else self._session.defaults.get("auth")
+        if _auth is not None:
+            import base64
+            user, pwd = _auth
+            encoded = base64.b64encode(f"{user}:{pwd}".encode("utf-8")).decode("ascii")
+            if headers is None:
+                headers = {}
+            headers = dict(headers or {})
+            headers.setdefault("Authorization", f"Basic {encoded}")
+        _cert = cert if cert is not None else self._session.defaults.get("cert")
+        client_certificates = kwargs.pop("client_certificates", None)
+        if client_certificates is None and _cert is not None:
+            if isinstance(_cert, str):
+                with open(_cert, "rb") as f:
+                    cert_bytes = f.read()
+                client_certificates = [{"cert_pem": cert_bytes, "key_pem": cert_bytes}]
+            elif isinstance(_cert, tuple) and len(_cert) == 2:
+                with open(_cert[0], "rb") as f:
+                    cert_bytes = f.read()
+                with open(_cert[1], "rb") as f:
+                    key_bytes = f.read()
+                client_certificates = [{"cert_pem": cert_bytes, "key_pem": key_bytes}]
+        _cookies = cookies if cookies is not None else kwargs.pop("request_cookies", None)
+        kwargs.pop("request_cookies", None)  # guard against duplicate kwarg in **kwargs
+        _proxies = proxies
+        if _proxies is not None:
+            scheme = url.split(":", 1)[0].lower()
+            proxy_url = _proxies.get(scheme) or _proxies.get("all") or next(
+                iter(_proxies.values()), None
+            )
+            kwargs.setdefault("proxy", proxy_url)
+        if allow_redirects is not None:
+            kwargs.setdefault("follow_redirects", allow_redirects)
+        if timeout is not None:
+            kwargs.setdefault("timeout", timeout)
+        if verify is not None:
+            kwargs.setdefault("verify", verify)
+        if stream is not None:
+            kwargs.setdefault("stream", stream)
+        return await self.execute_request(
+            method, url,
+            headers=headers,
+            body=body,
+            request_cookies=_cookies,
+            client_certificates=client_certificates,
+            **kwargs,
+        )
+
+    async def options(self, url: str, **kwargs: Any) -> Response:
+        """发送异步 HTTP OPTIONS 请求 / Send an async HTTP OPTIONS request."""
+        return await self.request("OPTIONS", url, **kwargs)
+
+    def close(self) -> None:
+        """关闭异步会话，释放 Go 客户端池中的空闲连接。
+
+        Close the async session and release idle connections in the Go client pool.
+        """
+        _, lib = _get_ffi()
+        lib.ClearClientPool()
 
     @staticmethod
     def clear_client_pool() -> None:

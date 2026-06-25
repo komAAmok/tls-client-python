@@ -15,7 +15,6 @@ import (
 	"golang.org/x/net/html/charset"
 
 	http "github.com/bogdanfinn/fhttp"
-	"github.com/bogdanfinn/fhttp/cookiejar"
 	"github.com/bogdanfinn/fhttp/http2"
 	tls_client "github.com/bogdanfinn/tls-client"
 	tls "github.com/bogdanfinn/utls"
@@ -431,11 +430,11 @@ func getTlsClient(requestInput RequestInput, sessionId string, withSession bool)
 			jarOptions = append(jarOptions, tls_client.WithDebugLogger())
 		}
 
-		jar, _ := cookiejar.New(nil)
 		if requestInput.WithCustomCookieJar {
 			jar := tls_client.NewCookieJar(jarOptions...)
 			options = append(options, tls_client.WithCookieJar(jar))
 		} else {
+			jar := tls_client.NewCookieJar()
 			options = append(options, tls_client.WithCookieJar(jar))
 		}
 	}

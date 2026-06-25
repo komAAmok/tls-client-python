@@ -62,7 +62,7 @@ type httpClient struct {
 	logger           Logger
 	bandwidthTracker bandwidth.BandwidthTracker
 	config           *httpClientConfig
-	headerLck        sync.Mutex
+	mu               sync.RWMutex
 	dialer           proxy.ContextDialer
 
 	preHooksLck  sync.RWMutex
@@ -129,7 +129,7 @@ func NewHttpClient(logger Logger, options ...HttpClientOption) (HttpClient, erro
 		Client:           *client,
 		logger:           logger,
 		config:           config,
-		headerLck:        sync.Mutex{},
+		mu:               sync.RWMutex{},
 		bandwidthTracker: bandwidthTracker,
 		dialer:           dialer,
 		preHooksLck:      sync.RWMutex{},
@@ -315,6 +315,9 @@ func (c *httpClient) applyFollowRedirect() {
 //
 //	"http://user:pass@host:port"
 func (c *httpClient) SetProxy(proxyUrl string) error {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
 	currentProxy := c.config.proxyUrl
 
 	c.logger.Debug("set proxy from %s to %s", c.config.proxyUrl, proxyUrl)
@@ -408,6 +411,8 @@ func (c *httpClient) SetCookies(u *url.URL, cookies []*http.Cookie) {
 
 // SetCookieJar sets a jar as the clients cookie jar. This is the recommended way when you want to "clear" the existing cookiejar
 func (c *httpClient) SetCookieJar(jar http.CookieJar) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
 	c.Jar = jar
 }
 
@@ -539,30 +544,29 @@ func (c *httpClient) Do(req *http.Request) (*http.Response, error) {
 	return resp, err
 }
 
-func (c *httpClient) do(req *http.Request) (*http.Response, error) {
+func (c *httpClient) do(req *http.Request) (resp *http.Response, err error) {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+
 	if c.config.catchPanics {
 		defer func() {
-			err := recover()
-
-			if err != nil && c.config.debug {
-				c.logger.Debug(fmt.Sprintf("panic occurred in tls client request handling: %s", err))
-			}
-
-			if err != nil && !c.config.debug {
-				c.logger.Info("critical error during request handling")
+			if r := recover(); r != nil {
+				err = fmt.Errorf("panic during request handling: %v", r)
+				if c.config.debug {
+					c.logger.Debug("panic occurred in tls client request handling: %s", r)
+				} else {
+					c.logger.Info("critical error during request handling")
+				}
 			}
 		}()
 	}
 
 	// Header order must be defined in all lowercase. On HTTP 1 people sometimes define them also in uppercase and then ordering does not work.
-	c.headerLck.Lock()
-
 	if len(req.Header) == 0 {
 		req.Header = c.config.defaultHeaders.Clone()
 	}
 
 	req.Header[http.HeaderOrderKey] = allToLower(req.Header[http.HeaderOrderKey])
-	c.headerLck.Unlock()
 
 	if c.config.debug {
 		debugReq := req.Clone(context.Background())
@@ -590,7 +594,7 @@ func (c *httpClient) do(req *http.Request) (*http.Response, error) {
 		c.logger.Debug("raw request bytes sent over wire: %d (%d kb)", len(requestBytes), len(requestBytes)/1024)
 	}
 
-	resp, err := c.Client.Do(req)
+	resp, err = c.Client.Do(req)
 	if err != nil {
 		c.logger.Debug("failed to do request: %s", err.Error())
 		return nil, err
