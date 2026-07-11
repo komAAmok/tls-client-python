@@ -5,7 +5,7 @@ import (
 	tls "github.com/bogdanfinn/utls"
 )
 
-var DefaultClientProfile = Chrome_146
+var DefaultClientProfile = Chrome_150
 
 var MappedTLSClients = map[string]ClientProfile{
 	"chrome_103":             Chrome_103,
@@ -32,6 +32,8 @@ var MappedTLSClients = map[string]ClientProfile{
 	"chrome_144_PSK":         Chrome_144_PSK,
 	"chrome_146":             Chrome_146,
 	"chrome_146_PSK":         Chrome_146_PSK,
+	"chrome_150":             Chrome_150,
+	"chrome_150_PSK":         Chrome_150_PSK,
 	"brave_146":              Brave_146,
 	"brave_146_PSK":          Brave_146_PSK,
 	"safari_15_6_1":          Safari_15_6_1,
