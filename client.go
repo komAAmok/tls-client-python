@@ -346,7 +346,7 @@ func (c *httpClient) applyProxy() error {
 	}
 
 	var dialer proxy.ContextDialer
-	dialer = proxy.Direct
+	dialer = newDirectDialer(c.config.timeout, c.config.localAddr, c.config.dialer)
 
 	if c.config.proxyUrl != "" && c.config.proxyDialerFactory == nil {
 		c.logger.Debug("proxy url %s supplied - using proxy connect dialer", c.config.proxyUrl)
@@ -382,6 +382,7 @@ func (c *httpClient) applyProxy() error {
 	}
 
 	c.Transport = transport
+	c.dialer = dialer
 
 	return nil
 }

@@ -29,6 +29,7 @@ const (
 	okhttpAndroid = "okhttp_Android"
 
 	browserleaksEndpoint = "https://tls.browserleaks.com/json"
+	peetApiEndpoint      = "https://tls.peet.ws/api/all"
 
 	ja3String             = "ja3String"
 	ja3Hash               = "ja3Hash"

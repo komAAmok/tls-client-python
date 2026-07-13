@@ -28,7 +28,10 @@ Classes
 """
 
 import asyncio
+import base64
 import ctypes
+import copy
+import json as _json
 import os
 import platform
 import sys
@@ -36,6 +39,7 @@ import threading
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple, Union
 import hashlib
+from urllib.parse import urlencode
 
 from tls_client._default_headers import DEFAULT_HEADERS
 
@@ -500,6 +504,302 @@ class Response:
 
     def __str__(self) -> str:
         return self.__repr__()
+
+
+def _merge_url_params(url: str, params: Dict[str, str]) -> str:
+    query = urlencode(params)
+    if not query:
+        return url
+
+    base, marker, fragment = url.partition("#")
+    if "?" not in base:
+        merged = f"{base}?{query}"
+    elif base.endswith("?") or base.endswith("&"):
+        merged = f"{base}{query}"
+    else:
+        merged = f"{base}&{query}"
+
+    if not marker:
+        return merged
+    return f"{merged}#{fragment}"
+
+
+def _ensure_header(
+    headers: Optional[Dict[str, str]],
+    header_name: str,
+    value: str,
+    *,
+    owned: bool = False,
+) -> Tuple[Dict[str, str], bool]:
+    if headers is None:
+        return {header_name: value}, True
+
+    needle = header_name.lower()
+    for key in headers:
+        if key.lower() == needle:
+            return headers, owned
+
+    if owned:
+        headers[header_name] = value
+        return headers, True
+
+    merged = dict(headers)
+    merged[header_name] = value
+    return merged, True
+
+
+ProxyConfig = Union[str, Dict[str, str]]
+_MISSING = object()
+
+
+def _resolve_proxy_url(
+    proxy: Optional[ProxyConfig],
+    url: str,
+) -> Optional[str]:
+    if proxy is None:
+        return None
+    if isinstance(proxy, str):
+        return proxy
+    scheme = url.split(":", 1)[0].lower()
+    return (
+        proxy.get(scheme)
+        or proxy.get(f"{scheme}://")
+        or proxy.get("all")
+        or proxy.get("all://")
+        or next(iter(proxy.values()), None)
+    )
+
+
+def _clone_default_value(value: Any) -> Any:
+    if isinstance(value, dict):
+        if any(isinstance(v, (dict, list, set, tuple)) for v in value.values()):
+            return copy.deepcopy(value)
+        return dict(value)
+    if isinstance(value, list):
+        if any(isinstance(v, (dict, list, set, tuple)) for v in value):
+            return copy.deepcopy(value)
+        return list(value)
+    if isinstance(value, set):
+        if any(isinstance(v, (dict, list, set, tuple)) for v in value):
+            return copy.deepcopy(value)
+        return set(value)
+    if isinstance(value, tuple):
+        if any(isinstance(v, (dict, list, set, tuple)) for v in value):
+            return copy.deepcopy(value)
+        return tuple(value)
+    return value
+
+
+def _load_client_certificates(
+    cert: Union[str, Tuple[str, str]],
+) -> Optional[List[Dict[str, bytes]]]:
+    if isinstance(cert, str):
+        with open(cert, "rb") as f:
+            cert_bytes = f.read()
+        return [{"cert_pem": cert_bytes, "key_pem": cert_bytes}]
+
+    if isinstance(cert, tuple) and len(cert) == 2:
+        with open(cert[0], "rb") as f:
+            cert_bytes = f.read()
+        with open(cert[1], "rb") as f:
+            key_bytes = f.read()
+        return [{"cert_pem": cert_bytes, "key_pem": key_bytes}]
+
+    return None
+
+
+def _prepare_request_compat(
+    *,
+    get_default,
+    url: str,
+    params: Optional[Dict[str, str]],
+    data: Union[bytes, str, Dict[str, str], None],
+    json_data: Any,
+    headers: Optional[Dict[str, str]],
+    auth: Optional[Tuple[str, str]],
+    cookies: Optional[Dict[str, str]],
+    stream: Optional[bool],
+    cert: Optional[Union[str, Tuple[str, str]]],
+    timeout: Optional[int],
+    allow_redirects: Optional[bool],
+    proxies: Optional[Dict[str, str]],
+    verify: Optional[bool],
+    kwargs: Dict[str, Any],
+) -> Tuple[str, Optional[bytes], Optional[Dict[str, str]], Optional[Dict[str, str]], Optional[List[Dict[str, bytes]]]]:
+    if params:
+        url = _merge_url_params(url, params)
+
+    body = kwargs.pop("body", None)
+    headers_owned = False
+
+    if body is None and data is not None:
+        if isinstance(data, dict):
+            body = urlencode(data).encode("utf-8")
+            headers, headers_owned = _ensure_header(
+                headers,
+                "Content-Type",
+                "application/x-www-form-urlencoded",
+                owned=headers_owned,
+            )
+        elif isinstance(data, str):
+            body = data.encode("utf-8")
+        else:
+            body = data
+
+    if json_data is not None:
+        body = _json.dumps(json_data, ensure_ascii=False).encode("utf-8")
+        headers, headers_owned = _ensure_header(
+            headers,
+            "Content-Type",
+            "application/json",
+            owned=headers_owned,
+        )
+
+    effective_auth = auth if auth is not None else get_default("auth")
+    if effective_auth is not None:
+        user, pwd = effective_auth
+        encoded = base64.b64encode(f"{user}:{pwd}".encode("utf-8")).decode("ascii")
+        headers, headers_owned = _ensure_header(
+            headers,
+            "Authorization",
+            f"Basic {encoded}",
+            owned=headers_owned,
+        )
+
+    client_certificates = kwargs.pop("client_certificates", None)
+    effective_cert = cert if cert is not None else get_default("cert")
+    if client_certificates is None and effective_cert is not None:
+        client_certificates = _load_client_certificates(effective_cert)
+
+    if cookies is not None:
+        request_cookies = cookies
+        kwargs.pop("request_cookies", None)
+    else:
+        request_cookies = kwargs.pop("request_cookies", None)
+
+    if proxies is not None:
+        proxy_source = proxies
+    else:
+        proxy_source = kwargs["proxy"] if "proxy" in kwargs else _MISSING
+        if proxy_source is _MISSING:
+            proxy_source = get_default("proxy")
+
+    effective_proxy = _resolve_proxy_url(proxy_source, url)
+    if effective_proxy is not None:
+        kwargs["proxy"] = effective_proxy
+
+    if allow_redirects is not None and "follow_redirects" not in kwargs:
+        kwargs["follow_redirects"] = allow_redirects
+    if timeout is not None and "timeout" not in kwargs:
+        kwargs["timeout"] = timeout
+    if verify is not None and "verify" not in kwargs:
+        kwargs["verify"] = verify
+    if stream is not None and "stream" not in kwargs:
+        kwargs["stream"] = stream
+
+    return url, body, headers, request_cookies, client_certificates
+
+
+def _copy_snapshot_value(value: Any) -> Any:
+    if isinstance(value, dict):
+        return dict(value)
+    if isinstance(value, list):
+        return list(value)
+    if isinstance(value, set):
+        return set(value)
+    if isinstance(value, tuple):
+        return tuple(value)
+    return value
+
+
+SYNC_REQUEST_DEFAULT_KEYS = (
+    "proxy",
+    "pseudo_header_order",
+    "h3_pseudo_header_order",
+    "default_headers",
+    "connect_headers",
+    "certificate_pinning_hosts",
+    "client_certificates",
+    "custom_tls_client",
+    "client_identifier",
+    "server_name_overwrite",
+    "local_address",
+    "insecure_skip_verify",
+    "force_http1",
+    "with_random_tls_extension_order",
+    "with_protocol_racing",
+    "max_idle_connections",
+    "max_idle_connections_per_host",
+    "max_connections_per_host",
+    "max_response_header_bytes",
+    "write_buffer_size",
+    "read_buffer_size",
+    "idle_conn_timeout_seconds",
+    "disable_keep_alives",
+    "disable_compression",
+    "disable_http3",
+    "disable_ipv4",
+    "disable_ipv6",
+    "follow_redirects",
+    "without_cookie_jar",
+    "allow_empty_cookies",
+    "with_default_bad_pin_handler",
+    "timeout_seconds",
+    "timeout_milliseconds",
+    "tcp_ttl",
+    "tcp_window_size",
+    "tcp_window_scale",
+    "tcp_mss",
+    "catch_panics",
+    "with_debug",
+    "request_host_override",
+    "request_cookies",
+)
+
+
+ASYNC_REQUEST_DEFAULT_KEYS = (
+    "proxy",
+    "client_identifier",
+    "server_name_overwrite",
+    "local_address",
+    "insecure_skip_verify",
+    "force_http1",
+    "with_random_tls_extension_order",
+    "with_protocol_racing",
+    "max_idle_connections",
+    "max_idle_connections_per_host",
+    "max_connections_per_host",
+    "max_response_header_bytes",
+    "write_buffer_size",
+    "read_buffer_size",
+    "idle_conn_timeout_seconds",
+    "disable_keep_alives",
+    "disable_compression",
+    "disable_http3",
+    "disable_ipv4",
+    "disable_ipv6",
+    "tcp_ttl",
+    "tcp_window_size",
+    "tcp_window_scale",
+    "tcp_mss",
+    "follow_redirects",
+    "without_cookie_jar",
+    "allow_empty_cookies",
+    "with_default_bad_pin_handler",
+    "timeout_seconds",
+    "timeout_milliseconds",
+    "pseudo_header_order",
+    "h3_pseudo_header_order",
+    "default_headers",
+    "connect_headers",
+    "certificate_pinning_hosts",
+    "client_certificates",
+    "custom_tls_client",
+    "request_host_override",
+    "request_cookies",
+    "catch_panics",
+    "with_debug",
+)
 
 
 # ---------------------------------------------------------------------------
@@ -1106,11 +1406,12 @@ def _compute_cache_key_hash(r: dict) -> str:
     causes silent cache poisoning (different keys → duplicate clients).
     """
     h = hashlib.sha256()
+    update = h.update
 
-    ci = r.get("client_identifier") or ""
-    px = r.get("proxy") or ""
-    sn = r.get("server_name_overwrite") or ""
-    la = r.get("local_address") or ""
+    ci = r["client_identifier"] or ""
+    px = r["proxy"] or ""
+    sn = r["server_name_overwrite"] or ""
+    la = r["local_address"] or ""
 
     # ── 22 int fields (matching Go's 22 %%d format verbs) ──────────────
     main = (
@@ -1128,57 +1429,57 @@ def _compute_cache_key_hash(r: dict) -> str:
         f"{r['timeout_seconds']}|{r['timeout_milliseconds']}|"
         f"{r['tcp_ttl']}|{r['tcp_window_size']}|{r['tcp_window_scale']}|{r['tcp_mss']}"
     )
-    h.update(main.encode("utf-8"))
+    update(main.encode("utf-8"))
 
     # ── Pseudo-header orders ──────────────────────────────────────────
-    ph = r.get("pseudo_header_order")
+    ph = r["pseudo_header_order"]
     if ph:
         for s in ph:
-            h.update(f":{s}".encode("utf-8"))
+            update(f":{s}".encode("utf-8"))
     else:
-        h.update(b":<default>")
+        update(b":<default>")
 
-    h3ph = r.get("h3_pseudo_header_order")
+    h3ph = r["h3_pseudo_header_order"]
     if h3ph:
         for s in h3ph:
-            h.update(f"#{s}".encode("utf-8"))
+            update(f"#{s}".encode("utf-8"))
     else:
-        h.update(b"#<default>")
+        update(b"#<default>")
 
     # ── Default / connect headers (sorted by key) ─────────────────────
-    for prefix, key in [("~dh:", "default_headers"), ("~ch:", "connect_headers")]:
-        headers = r.get(key)
+    for prefix, key in (("~dh:", "default_headers"), ("~ch:", "connect_headers")):
+        headers = r[key]
         if headers:
-            for k in sorted(headers.keys()):
-                h.update(f"{prefix}{k}={headers[k]}".encode("utf-8"))
+            for k, v in sorted(headers.items()):
+                update(f"{prefix}{k}={v}".encode("utf-8"))
 
     # ── Certificate pinning (sorted by host) ──────────────────────────
-    cp = r.get("certificate_pinning_hosts")
+    cp = r["certificate_pinning_hosts"]
     if cp:
-        for host in sorted(cp.keys()):
-            h.update(f"^cp:{host}=".encode("utf-8"))
-            for pin in cp[host]:
-                h.update(f"{pin},".encode("utf-8"))
+        for host, pins in sorted(cp.items()):
+            update(f"^cp:{host}=".encode("utf-8"))
+            for pin in pins:
+                update(f"{pin},".encode("utf-8"))
 
     # ── Client certificates ───────────────────────────────────────────
-    cc = r.get("client_certificates")
+    cc = r["client_certificates"]
     if cc:
         for cert in cc:
             cert_pem = cert.get("cert_pem", b"")
             key_pem = cert.get("key_pem", b"")
-            h.update(f"|cc:{hashlib.sha256(cert_pem).hexdigest()}".encode("utf-8"))
-            h.update(f"|ck:{hashlib.sha256(key_pem).hexdigest()}".encode("utf-8"))
+            update(f"|cc:{hashlib.sha256(cert_pem).hexdigest()}".encode("utf-8"))
+            update(f"|ck:{hashlib.sha256(key_pem).hexdigest()}".encode("utf-8"))
 
     # ── Custom TLS client profile ─────────────────────────────────────
-    ctc = r.get("custom_tls_client")
+    ctc = r["custom_tls_client"]
     if ctc:
-        h.update(f"|ja3={ctc.get('ja3_string', '')}".encode("utf-8"))
-        h.update(f"|cf={ctc.get('connection_flow', 0)}".encode("utf-8"))
-        h.update(f"|rsl={ctc.get('record_size_limit', 0)}".encode("utf-8"))
-        h.update(f"|sid={ctc.get('stream_id', 0)}".encode("utf-8"))
-        h.update(f"|h3pp={ctc.get('h3_priority_param', 0)}".encode("utf-8"))
-        h.update(f"|h3sgf={1 if ctc.get('h3_send_grease_frames') else 0}".encode("utf-8"))
-        h.update(f"|ah={1 if ctc.get('allow_http') else 0}".encode("utf-8"))
+        update(f"|ja3={ctc.get('ja3_string', '')}".encode("utf-8"))
+        update(f"|cf={ctc.get('connection_flow', 0)}".encode("utf-8"))
+        update(f"|rsl={ctc.get('record_size_limit', 0)}".encode("utf-8"))
+        update(f"|sid={ctc.get('stream_id', 0)}".encode("utf-8"))
+        update(f"|h3pp={ctc.get('h3_priority_param', 0)}".encode("utf-8"))
+        update(f"|h3sgf={1 if ctc.get('h3_send_grease_frames') else 0}".encode("utf-8"))
+        update(f"|ah={1 if ctc.get('allow_http') else 0}".encode("utf-8"))
 
         str_arrays = {
             "h2_settings_order": "|h2so=", "h3_settings_order": "|h3so=",
@@ -1191,40 +1492,40 @@ def _compute_cache_key_hash(r: dict) -> str:
         for key, pfx in str_arrays.items():
             arr = ctc.get(key)
             if arr:
-                h.update(pfx.encode("utf-8"))
+                update(pfx.encode("utf-8"))
                 for i, s in enumerate(arr):
                     if i > 0:
-                        h.update(b",")
-                    h.update(str(s).encode("utf-8"))
+                        update(b",")
+                    update(str(s).encode("utf-8"))
 
         for skey, pfx in [("h2_settings", "|h2s:"), ("h3_settings", "|h3s:")]:
             settings = ctc.get(skey)
             if settings:
-                for k in sorted(settings.keys()):
-                    h.update(f"{pfx}{k}={settings[k]}".encode("utf-8"))
+                for k, v in sorted(settings.items()):
+                    update(f"{pfx}{k}={v}".encode("utf-8"))
 
         ech_payloads = ctc.get("ech_candidate_payloads")
         if ech_payloads:
             for pld in ech_payloads:
-                h.update(f"|echp:{pld}".encode("utf-8"))
+                update(f"|echp:{pld}".encode("utf-8"))
 
         ech_suites = ctc.get("ech_candidate_cipher_suites")
         if ech_suites:
             for s in sorted(ech_suites, key=lambda x: (x.get("kdfId", ""), x.get("aeadId", ""))):
-                h.update(f"|echcs:{s.get('kdfId', '')},{s.get('aeadId', '')}".encode("utf-8"))
+                update(f"|echcs:{s.get('kdfId', '')},{s.get('aeadId', '')}".encode("utf-8"))
 
         pri_frames = ctc.get("priority_frames")
         if pri_frames:
             for pf in pri_frames:
                 pp = pf.get("priorityParam", {})
-                h.update(
+                update(
                     f"|pf:{pf.get('streamID', 0)},{pp.get('streamDep', 0)},"
                     f"{1 if pp.get('exclusive') else 0},{pp.get('weight', 0)}".encode("utf-8")
                 )
 
         hp = ctc.get("header_priority")
         if hp:
-            h.update(
+            update(
                 f"|hp:{hp.get('streamDep', 0)},{1 if hp.get('exclusive') else 0},"
                 f"{hp.get('weight', 0)}".encode("utf-8")
             )
@@ -1313,6 +1614,46 @@ class Session:
     """
 
     defaults: Dict[str, Any]
+    _defaults_lock: threading.RLock
+    _closed: bool
+    _defaults_version: int
+    _selected_snapshot_cache: Dict[Tuple[str, ...], Tuple[int, Dict[str, Any]]]
+
+    def _get_default(self, name: str, default: Any = None) -> Any:
+        with self._defaults_lock:
+            if name in self.defaults:
+                return _clone_default_value(self.defaults[name])
+            return _clone_default_value(default)
+
+    def _set_default(self, name: str, value: Any) -> None:
+        with self._defaults_lock:
+            self.defaults[name] = _clone_default_value(value)
+            self._defaults_version += 1
+            self._selected_snapshot_cache.clear()
+
+    def _snapshot_defaults(self) -> Dict[str, Any]:
+        with self._defaults_lock:
+            return {k: _clone_default_value(v) for k, v in self.defaults.items()}
+
+    def _snapshot_selected_defaults(self, names: List[str]) -> Dict[str, Any]:
+        cache_key = tuple(names)
+        with self._defaults_lock:
+            cached = self._selected_snapshot_cache.get(cache_key)
+            if cached is not None:
+                version, snapshot = cached
+                if version == self._defaults_version:
+                    return {k: _copy_snapshot_value(v) for k, v in snapshot.items()}
+
+            snapshot = {
+                name: _clone_default_value(self.defaults[name])
+                for name in names
+                if name in self.defaults
+            }
+            self._selected_snapshot_cache[cache_key] = (
+                self._defaults_version,
+                snapshot,
+            )
+            return {k: _copy_snapshot_value(v) for k, v in snapshot.items()}
 
     # ------------------------------------------------------------------
     # Writable session properties — users can read/write after construction.
@@ -1327,434 +1668,438 @@ class Session:
     @property
     def client_identifier(self) -> str:
         """TLS 指纹标识 / TLS fingerprint identifier."""
-        return self.defaults["client_identifier"]
+        return self._get_default("client_identifier")
 
     @client_identifier.setter
     def client_identifier(self, value: str) -> None:
-        self.defaults["client_identifier"] = value
+        self._set_default("client_identifier", value)
 
     @property
     def force_http1(self) -> bool:
         """是否强制 HTTP/1.1 / Whether to force HTTP/1.1."""
-        return bool(self.defaults["force_http1"])
+        return bool(self._get_default("force_http1"))
 
     @force_http1.setter
     def force_http1(self, value: bool) -> None:
-        self.defaults["force_http1"] = 1 if value else 0
+        self._set_default("force_http1", 1 if value else 0)
 
     @property
     def disable_http3(self) -> bool:
         """是否完全禁用 HTTP/3 / Whether to disable HTTP/3."""
-        return bool(self.defaults["disable_http3"])
+        return bool(self._get_default("disable_http3"))
 
     @disable_http3.setter
     def disable_http3(self, value: bool) -> None:
-        self.defaults["disable_http3"] = 1 if value else 0
+        self._set_default("disable_http3", 1 if value else 0)
 
     @property
     def with_protocol_racing(self) -> bool:
         """是否启用协议竞速 / Whether to enable protocol racing."""
-        return bool(self.defaults["with_protocol_racing"])
+        return bool(self._get_default("with_protocol_racing"))
 
     @with_protocol_racing.setter
     def with_protocol_racing(self, value: bool) -> None:
-        self.defaults["with_protocol_racing"] = 1 if value else 0
+        self._set_default("with_protocol_racing", 1 if value else 0)
 
     @property
     def random_tls_extension_order(self) -> bool:
         """是否随机 TLS 扩展顺序 / Whether to randomise TLS extension order."""
-        return bool(self.defaults["with_random_tls_extension_order"])
+        return bool(self._get_default("with_random_tls_extension_order"))
 
     @random_tls_extension_order.setter
     def random_tls_extension_order(self, value: bool) -> None:
-        self.defaults["with_random_tls_extension_order"] = 1 if value else 0
+        self._set_default("with_random_tls_extension_order", 1 if value else 0)
 
     # -- timeout / redirect -------------------------------------------------
 
     @property
     def timeout(self) -> int:
         """请求超时时间（秒） / Request timeout in seconds."""
-        return self.defaults["timeout_seconds"]
+        return self._get_default("timeout_seconds")
 
     @timeout.setter
     def timeout(self, value: int) -> None:
-        self.defaults["timeout_seconds"] = value
+        self._set_default("timeout_seconds", value)
 
     @property
     def timeout_milliseconds(self) -> int:
         """请求超时时间（毫秒） / Request timeout in milliseconds."""
-        return self.defaults["timeout_milliseconds"]
+        return self._get_default("timeout_milliseconds")
 
     @timeout_milliseconds.setter
     def timeout_milliseconds(self, value: int) -> None:
-        self.defaults["timeout_milliseconds"] = value
+        self._set_default("timeout_milliseconds", value)
 
     @property
     def follow_redirects(self) -> bool:
         """是否跟随重定向 / Whether to follow redirects."""
-        return bool(self.defaults["follow_redirects"])
+        return bool(self._get_default("follow_redirects"))
 
     @follow_redirects.setter
     def follow_redirects(self, value: bool) -> None:
-        self.defaults["follow_redirects"] = 1 if value else 0
+        self._set_default("follow_redirects", 1 if value else 0)
 
     # -- TLS / certificate --------------------------------------------------
 
     @property
     def verify(self) -> bool:
         """是否验证 TLS 证书 / Whether to verify the TLS certificate."""
-        return not bool(self.defaults["insecure_skip_verify"])
+        return not bool(self._get_default("insecure_skip_verify"))
 
     @verify.setter
     def verify(self, value: bool) -> None:
-        self.defaults["insecure_skip_verify"] = 0 if value else 1
+        self._set_default("insecure_skip_verify", 0 if value else 1)
 
     @property
     def server_name_overwrite(self) -> Optional[str]:
         """SNI 主机名覆盖 / SNI hostname override."""
-        return self.defaults["server_name_overwrite"]
+        return self._get_default("server_name_overwrite")
 
     @server_name_overwrite.setter
     def server_name_overwrite(self, value: Optional[str]) -> None:
-        self.defaults["server_name_overwrite"] = value
+        self._set_default("server_name_overwrite", value)
 
     # -- proxy / local address ----------------------------------------------
 
     @property
-    def proxy(self) -> Optional[str]:
+    def proxy(self) -> Optional[ProxyConfig]:
         """代理 URL / Proxy URL."""
-        return self.defaults["proxy"]
+        return self._get_default("proxy")
 
     @proxy.setter
-    def proxy(self, value: Optional[str]) -> None:
-        self.defaults["proxy"] = value
+    def proxy(self, value: Optional[ProxyConfig]) -> None:
+        self._set_default("proxy", value)
 
     @property
-    def proxies(self) -> Optional[str]:
-        """代理 URL（别名）/ Proxy URL (alias for :attr:`proxy`)."""
-        return self.defaults["proxy"]
+    def proxies(self) -> Optional[ProxyConfig]:
+        """代理配置（别名）/ Proxy config (alias for :attr:`proxy`)."""
+        return self._get_default("proxy")
 
     @proxies.setter
-    def proxies(self, value: Optional[str]) -> None:
-        self.defaults["proxy"] = value
+    def proxies(self, value: Optional[ProxyConfig]) -> None:
+        self._set_default("proxy", value)
 
     @property
     def local_address(self) -> Optional[str]:
         """本地绑定地址 / Local bind address."""
-        return self.defaults["local_address"]
+        return self._get_default("local_address")
 
     @local_address.setter
     def local_address(self, value: Optional[str]) -> None:
-        self.defaults["local_address"] = value
+        self._set_default("local_address", value)
 
     # -- header control -----------------------------------------------------
 
     @property
     def request_host_override(self) -> Optional[str]:
         """Host 请求头覆盖 / Host header override."""
-        return self.defaults["request_host_override"]
+        return self._get_default("request_host_override")
 
     @request_host_override.setter
     def request_host_override(self, value: Optional[str]) -> None:
-        self.defaults["request_host_override"] = value
+        self._set_default("request_host_override", value)
 
     @property
     def pseudo_header_order(self) -> Optional[List[str]]:
         """HTTP/2 伪头顺序 / HTTP/2 pseudo-header order."""
-        return self.defaults["pseudo_header_order"]
+        return self._get_default("pseudo_header_order")
 
     @pseudo_header_order.setter
     def pseudo_header_order(self, value: Optional[List[str]]) -> None:
-        self.defaults["pseudo_header_order"] = value
+        self._set_default("pseudo_header_order", value)
 
     @property
     def h3_pseudo_header_order(self) -> Optional[List[str]]:
         """HTTP/3 伪头顺序 / HTTP/3 pseudo-header order."""
-        return self.defaults["h3_pseudo_header_order"]
+        return self._get_default("h3_pseudo_header_order")
 
     @h3_pseudo_header_order.setter
     def h3_pseudo_header_order(self, value: Optional[List[str]]) -> None:
-        self.defaults["h3_pseudo_header_order"] = value
+        self._set_default("h3_pseudo_header_order", value)
 
     @property
     def default_headers(self) -> Optional[Dict[str, str]]:
         """默认请求头字典 / Default headers dict."""
-        return self.defaults["default_headers"]
+        return self._get_default("default_headers")
 
     @default_headers.setter
     def default_headers(self, value: Optional[Dict[str, str]]) -> None:
-        self.defaults["default_headers"] = value
+        self._set_default("default_headers", value)
 
     @property
     def headers(self) -> Optional[Dict[str, str]]:
         """默认请求头字典（别名）/ Default headers dict (alias for :attr:`default_headers`)."""
-        return self.defaults["default_headers"]
+        return self._get_default("default_headers")
 
     @headers.setter
     def headers(self, value: Optional[Dict[str, str]]) -> None:
-        self.defaults["default_headers"] = value
+        self._set_default("default_headers", value)
 
     @property
     def connect_headers(self) -> Optional[Dict[str, str]]:
         """代理 CONNECT 隧道请求头字典 / Proxy CONNECT tunnel headers."""
-        return self.defaults["connect_headers"]
+        return self._get_default("connect_headers")
 
     @connect_headers.setter
     def connect_headers(self, value: Optional[Dict[str, str]]) -> None:
-        self.defaults["connect_headers"] = value
+        self._set_default("connect_headers", value)
 
     # -- certificate pinning ------------------------------------------------
 
     @property
     def certificate_pinning_hosts(self) -> Optional[Dict[str, List[str]]]:
         """SSL 证书固定字典 / SSL certificate pinning dict."""
-        return self.defaults["certificate_pinning_hosts"]
+        return self._get_default("certificate_pinning_hosts")
 
     @certificate_pinning_hosts.setter
     def certificate_pinning_hosts(self, value: Optional[Dict[str, List[str]]]) -> None:
-        self.defaults["certificate_pinning_hosts"] = value
+        self._set_default("certificate_pinning_hosts", value)
 
     @property
     def with_default_bad_pin_handler(self) -> bool:
         """是否调用默认 Bad-Pin 处理器 / Whether to invoke the default bad-pin handler."""
-        return bool(self.defaults["with_default_bad_pin_handler"])
+        return bool(self._get_default("with_default_bad_pin_handler"))
 
     @with_default_bad_pin_handler.setter
     def with_default_bad_pin_handler(self, value: bool) -> None:
-        self.defaults["with_default_bad_pin_handler"] = 1 if value else 0
+        self._set_default("with_default_bad_pin_handler", 1 if value else 0)
 
     # -- cookies -------------------------------------------------------------
 
     @property
     def request_cookies(self) -> Optional[Dict[str, str]]:
         """预置 Cookie 字典 / Pre-populated cookie dict."""
-        return self.defaults["request_cookies"]
+        return self._get_default("request_cookies")
 
     @request_cookies.setter
     def request_cookies(self, value: Optional[Dict[str, str]]) -> None:
-        self.defaults["request_cookies"] = value
+        self._set_default("request_cookies", value)
 
     @property
     def cookies(self) -> Optional[Dict[str, str]]:
         """预置 Cookie 字典（别名）/ Pre-populated cookie dict (alias for :attr:`request_cookies`)."""
-        return self.defaults["request_cookies"]
+        return self._get_default("request_cookies")
 
     @cookies.setter
     def cookies(self, value: Optional[Dict[str, str]]) -> None:
-        self.defaults["request_cookies"] = value
+        self._set_default("request_cookies", value)
 
     # -- custom TLS / client certs ------------------------------------------
 
     @property
     def custom_tls_client(self) -> Optional[Dict[str, Any]]:
         """完全自定义的 TLS 客户端配置 / Fully custom TLS client configuration."""
-        return self.defaults["custom_tls_client"]
+        return self._get_default("custom_tls_client")
 
     @custom_tls_client.setter
     def custom_tls_client(self, value: Optional[Dict[str, Any]]) -> None:
-        self.defaults["custom_tls_client"] = value
+        self._set_default("custom_tls_client", value)
 
     @property
     def client_certificates(self) -> Optional[List[Dict[str, bytes]]]:
         """客户端证书列表 (mTLS) / Client certificates for mTLS."""
-        return self.defaults["client_certificates"]
+        return self._get_default("client_certificates")
 
     @client_certificates.setter
     def client_certificates(self, value: Optional[List[Dict[str, bytes]]]) -> None:
-        self.defaults["client_certificates"] = value
+        self._set_default("client_certificates", value)
 
     # -- connection pool tuning ---------------------------------------------
 
     @property
     def max_idle_connections(self) -> int:
         """全局最大空闲连接数 / Global max idle connections."""
-        return self.defaults["max_idle_connections"]
+        return self._get_default("max_idle_connections")
 
     @max_idle_connections.setter
     def max_idle_connections(self, value: int) -> None:
-        self.defaults["max_idle_connections"] = value
+        self._set_default("max_idle_connections", value)
 
     @property
     def max_idle_connections_per_host(self) -> int:
         """每 Host 最大空闲连接数 / Max idle connections per host."""
-        return self.defaults["max_idle_connections_per_host"]
+        return self._get_default("max_idle_connections_per_host")
 
     @max_idle_connections_per_host.setter
     def max_idle_connections_per_host(self, value: int) -> None:
-        self.defaults["max_idle_connections_per_host"] = value
+        self._set_default("max_idle_connections_per_host", value)
 
     @property
     def max_connections_per_host(self) -> int:
         """每 Host 最大总连接数 / Max total connections per host."""
-        return self.defaults["max_connections_per_host"]
+        return self._get_default("max_connections_per_host")
 
     @max_connections_per_host.setter
     def max_connections_per_host(self, value: int) -> None:
-        self.defaults["max_connections_per_host"] = value
+        self._set_default("max_connections_per_host", value)
 
     @property
     def disable_keep_alives(self) -> bool:
         """是否禁用 Keep-Alive / Whether to disable Keep-Alive."""
-        return bool(self.defaults["disable_keep_alives"])
+        return bool(self._get_default("disable_keep_alives"))
 
     @disable_keep_alives.setter
     def disable_keep_alives(self, value: bool) -> None:
-        self.defaults["disable_keep_alives"] = 1 if value else 0
+        self._set_default("disable_keep_alives", 1 if value else 0)
 
     @property
     def disable_compression(self) -> bool:
         """是否禁用响应解压 / Whether to disable decompression."""
-        return bool(self.defaults["disable_compression"])
+        return bool(self._get_default("disable_compression"))
 
     @disable_compression.setter
     def disable_compression(self, value: bool) -> None:
-        self.defaults["disable_compression"] = 1 if value else 0
+        self._set_default("disable_compression", 1 if value else 0)
 
     @property
     def idle_conn_timeout_seconds(self) -> int:
         """空闲连接超时（秒） / Idle connection timeout (seconds)."""
-        return self.defaults["idle_conn_timeout_seconds"]
+        return self._get_default("idle_conn_timeout_seconds")
 
     @idle_conn_timeout_seconds.setter
     def idle_conn_timeout_seconds(self, value: int) -> None:
-        self.defaults["idle_conn_timeout_seconds"] = value
+        self._set_default("idle_conn_timeout_seconds", value)
 
     @property
     def max_response_header_bytes(self) -> int:
         """响应头最大字节数 / Max response header bytes."""
-        return self.defaults["max_response_header_bytes"]
+        return self._get_default("max_response_header_bytes")
 
     @max_response_header_bytes.setter
     def max_response_header_bytes(self, value: int) -> None:
-        self.defaults["max_response_header_bytes"] = value
+        self._set_default("max_response_header_bytes", value)
 
     @property
     def write_buffer_size(self) -> int:
         """写缓冲区大小 / Write buffer size."""
-        return self.defaults["write_buffer_size"]
+        return self._get_default("write_buffer_size")
 
     @write_buffer_size.setter
     def write_buffer_size(self, value: int) -> None:
-        self.defaults["write_buffer_size"] = value
+        self._set_default("write_buffer_size", value)
 
     @property
     def read_buffer_size(self) -> int:
         """读缓冲区大小 / Read buffer size."""
-        return self.defaults["read_buffer_size"]
+        return self._get_default("read_buffer_size")
 
     @read_buffer_size.setter
     def read_buffer_size(self, value: int) -> None:
-        self.defaults["read_buffer_size"] = value
+        self._set_default("read_buffer_size", value)
 
     # -- IP stack / cookies / debug -----------------------------------------
 
     @property
     def disable_ipv4(self) -> bool:
         """是否禁用 IPv4 / Whether to disable IPv4."""
-        return bool(self.defaults["disable_ipv4"])
+        return bool(self._get_default("disable_ipv4"))
 
     @disable_ipv4.setter
     def disable_ipv4(self, value: bool) -> None:
-        self.defaults["disable_ipv4"] = 1 if value else 0
+        self._set_default("disable_ipv4", 1 if value else 0)
 
     @property
     def disable_ipv6(self) -> bool:
         """是否禁用 IPv6 / Whether to disable IPv6."""
-        return bool(self.defaults["disable_ipv6"])
+        return bool(self._get_default("disable_ipv6"))
+
+    @disable_ipv6.setter
+    def disable_ipv6(self, value: bool) -> None:
+        self._set_default("disable_ipv6", 1 if value else 0)
 
     @property
     def tcp_ttl(self) -> int:
         """IP TTL / IP TTL value. 0 = auto from profile."""
-        return self.defaults["tcp_ttl"]
+        return self._get_default("tcp_ttl")
 
     @tcp_ttl.setter
     def tcp_ttl(self, value: int) -> None:
-        self.defaults["tcp_ttl"] = value
+        self._set_default("tcp_ttl", value)
 
     @property
     def tcp_window_size(self) -> int:
         """TCP receive window size. 0 = auto from profile."""
-        return self.defaults["tcp_window_size"]
+        return self._get_default("tcp_window_size")
 
     @tcp_window_size.setter
     def tcp_window_size(self, value: int) -> None:
-        self.defaults["tcp_window_size"] = value
+        self._set_default("tcp_window_size", value)
 
     @property
     def tcp_window_scale(self) -> int:
         """TCP window scale factor. 0 = auto from profile."""
-        return self.defaults["tcp_window_scale"]
+        return self._get_default("tcp_window_scale")
 
     @tcp_window_scale.setter
     def tcp_window_scale(self, value: int) -> None:
-        self.defaults["tcp_window_scale"] = value
+        self._set_default("tcp_window_scale", value)
 
     @property
     def tcp_mss(self) -> int:
         """TCP Maximum Segment Size. 0 = auto from profile."""
-        return self.defaults["tcp_mss"]
+        return self._get_default("tcp_mss")
 
     @tcp_mss.setter
     def tcp_mss(self, value: int) -> None:
-        self.defaults["tcp_mss"] = value
+        self._set_default("tcp_mss", value)
 
     @property
     def allow_empty_cookies(self) -> bool:
         """是否允许空 Cookie / Whether to allow empty cookies."""
-        return bool(self.defaults["allow_empty_cookies"])
+        return bool(self._get_default("allow_empty_cookies"))
 
     @allow_empty_cookies.setter
     def allow_empty_cookies(self, value: bool) -> None:
-        self.defaults["allow_empty_cookies"] = 1 if value else 0
+        self._set_default("allow_empty_cookies", 1 if value else 0)
 
     @property
     def without_cookie_jar(self) -> bool:
         """是否禁用 Cookie Jar / Whether to disable Cookie Jar."""
-        return bool(self.defaults["without_cookie_jar"])
+        return bool(self._get_default("without_cookie_jar"))
 
     @without_cookie_jar.setter
     def without_cookie_jar(self, value: bool) -> None:
-        self.defaults["without_cookie_jar"] = 1 if value else 0
+        self._set_default("without_cookie_jar", 1 if value else 0)
 
     @property
     def catch_panics(self) -> bool:
         """是否捕获 Go panic / Whether to catch Go panics."""
-        return bool(self.defaults["catch_panics"])
+        return bool(self._get_default("catch_panics"))
 
     @catch_panics.setter
     def catch_panics(self, value: bool) -> None:
-        self.defaults["catch_panics"] = 1 if value else 0
+        self._set_default("catch_panics", 1 if value else 0)
 
     @property
     def with_debug(self) -> bool:
         """是否启用调试日志 / Whether to enable debug logging."""
-        return bool(self.defaults["with_debug"])
+        return bool(self._get_default("with_debug"))
 
     @with_debug.setter
     def with_debug(self, value: bool) -> None:
-        self.defaults["with_debug"] = 1 if value else 0
+        self._set_default("with_debug", 1 if value else 0)
 
     # -- auth ----------------------------------------------------------------
 
     @property
     def auth(self) -> Optional[Tuple[str, str]]:
         """HTTP 认证元组 ``(username, password)`` / HTTP auth tuple ``(username, password)``."""
-        return self.defaults.get("auth")
+        return self._get_default("auth")
 
     @auth.setter
     def auth(self, value: Optional[Tuple[str, str]]) -> None:
-        self.defaults["auth"] = value
+        self._set_default("auth", value)
 
     # -- params (query string) ----------------------------------------------
 
     @property
     def params(self) -> Optional[Dict[str, str]]:
         """查询字符串参数字典 / Query-string parameter dict."""
-        return self.defaults.get("params")
+        return self._get_default("params")
 
     @params.setter
     def params(self, value: Optional[Dict[str, str]]) -> None:
-        self.defaults["params"] = value
+        self._set_default("params", value)
 
     # -- cert (client SSL certificate) --------------------------------------
 
@@ -1764,22 +2109,22 @@ class Session:
 
         ``str``: 单独 cert 文件 ; ``(cert_path, key_path)``: cert + key 文件。
         """
-        return self.defaults.get("cert")
+        return self._get_default("cert")
 
     @cert.setter
     def cert(self, value: Optional[Union[str, Tuple[str, str]]]) -> None:
-        self.defaults["cert"] = value
+        self._set_default("cert", value)
 
     # -- stream (response streaming mode) -----------------------------------
 
     @property
     def stream(self) -> bool:
         """是否流式读取响应体 / Whether to stream the response body."""
-        return bool(self.defaults.get("stream", False))
+        return bool(self._get_default("stream", False))
 
     @stream.setter
     def stream(self, value: bool) -> None:
-        self.defaults["stream"] = 1 if value else 0
+        self._set_default("stream", 1 if value else 0)
 
     def __init__(
         self,
@@ -1809,7 +2154,9 @@ class Session:
         server_name_overwrite: Optional[str] = None,
         # ── 代理 ──  /  Proxy ──
         # 代理 URL / Proxy URL
-        proxy: Optional[str] = None,
+        proxy: Optional[ProxyConfig] = None,
+        # requests 风格代理字典 / requests-style proxies mapping
+        proxies: Optional[ProxyConfig] = None,
         # 绑定到指定的本地 IP 地址 / Bind to a specific local IP address
         local_address: Optional[str] = None,
         # ── 请求头控制 ──  /  Header Control ──
@@ -1821,6 +2168,8 @@ class Session:
         h3_pseudo_header_order: Optional[List[str]] = None,
         # 默认请求头字典 / Default headers dict
         default_headers: Optional[Dict[str, str]] = None,
+        # 默认请求头字典（别名）/ Default headers dict alias
+        headers: Optional[Dict[str, str]] = None,
         # 代理 CONNECT 隧道请求头字典 / Proxy CONNECT tunnel headers dict
         connect_headers: Optional[Dict[str, str]] = None,
         # ── 证书固定 ──  /  Certificate Pinning ──
@@ -1831,6 +2180,8 @@ class Session:
         # ── Cookie ──
         # 预置 Cookie 字典 / Pre-populated cookie dict
         request_cookies: Optional[Dict[str, str]] = None,
+        # 预置 Cookie 字典（别名）/ Pre-populated cookie dict alias
+        cookies: Optional[Dict[str, str]] = None,
         # ── 自定义 TLS ──  /  Custom TLS ──
         # 完全自定义的 TLS 客户端配置 (26 fields) / Fully custom TLS client configuration
         custom_tls_client: Optional[Dict[str, Any]] = None,
@@ -1889,6 +2240,10 @@ class Session:
         # 启用调试日志输出 / Enable debug log output
         with_debug: bool = False,
     ) -> None:
+        self._defaults_lock = threading.RLock()
+        self._closed = False
+        self._defaults_version = 0
+        self._selected_snapshot_cache = {}
         self.defaults = {
             "client_identifier": client_identifier,
             "timeout_seconds": timeout,
@@ -1903,7 +2258,7 @@ class Session:
             "server_name_overwrite": server_name_overwrite,
             "request_host_override": request_host_override,
             "local_address": local_address,
-            "proxy": proxy,
+            "proxy": proxies if proxies is not None else proxy,
             "pseudo_header_order": pseudo_header_order,
             "h3_pseudo_header_order": h3_pseudo_header_order,
             "auth": auth,
@@ -1911,8 +2266,8 @@ class Session:
             "cert": cert,
             "stream": 1 if stream else 0,
             "default_headers": (
-                default_headers
-                if default_headers is not None
+                default_headers if default_headers is not None
+                else headers if headers is not None
                 else DEFAULT_HEADERS.get(client_identifier)
             ),
             "connect_headers": connect_headers,
@@ -1920,7 +2275,7 @@ class Session:
             "with_default_bad_pin_handler": (
                 1 if with_default_bad_pin_handler else 0
             ),
-            "request_cookies": request_cookies,
+            "request_cookies": request_cookies if request_cookies is not None else cookies,
             "custom_tls_client": custom_tls_client,
             "client_certificates": client_certificates,
             "max_idle_connections": max_idle_connections,
@@ -2102,13 +2457,83 @@ class Session:
 
         Execute a single HTTP request through the Go engine.
         """
+        if self._closed:
+            raise RuntimeError("Session is closed")
         ffi, lib = _get_ffi()
+        defaults = self._snapshot_selected_defaults(SYNC_REQUEST_DEFAULT_KEYS)
+
+        effective_proxy = _resolve_proxy_url(
+            proxy if proxy is not None else defaults.get("proxy"),
+            url,
+        )
 
         def _val(name: str, override, as_bool: bool = False):
-            v = override if override is not None else self.defaults.get(name)
+            if name == "proxy":
+                v = effective_proxy
+            else:
+                v = override if override is not None else defaults.get(name)
             if as_bool:
                 return 1 if v else 0
             return v
+
+        resolved = {
+            "client_identifier": _val("client_identifier", client_identifier),
+            "proxy": _val("proxy", proxy),
+            "server_name_overwrite": _val("server_name_overwrite", server_name_overwrite),
+            "request_host_override": _val("request_host_override", request_host_override),
+            "local_address": _val("local_address", local_address),
+            "pseudo_header_order": _val("pseudo_header_order", pseudo_header_order),
+            "h3_pseudo_header_order": _val("h3_pseudo_header_order", h3_pseudo_header_order),
+            "default_headers": _val("default_headers", default_headers),
+            "connect_headers": _val("connect_headers", connect_headers),
+            "certificate_pinning_hosts": _val("certificate_pinning_hosts", certificate_pinning_hosts),
+            "request_cookies": _val("request_cookies", request_cookies),
+            "client_certificates": _val("client_certificates", client_certificates),
+            "custom_tls_client": _val("custom_tls_client", custom_tls_client),
+            "timeout_seconds": _val("timeout_seconds", timeout),
+            "timeout_milliseconds": _val("timeout_milliseconds", timeout_milliseconds),
+            "follow_redirects": _val("follow_redirects", follow_redirects, True),
+            "force_http1": _val("force_http1", force_http1, True),
+            "with_random_tls_extension_order": _val(
+                "with_random_tls_extension_order", random_tls_extension_order, True
+            ),
+            "with_protocol_racing": _val("with_protocol_racing", with_protocol_racing, True),
+            "max_idle_connections": _val("max_idle_connections", max_idle_connections),
+            "max_idle_connections_per_host": _val(
+                "max_idle_connections_per_host", max_idle_connections_per_host
+            ),
+            "max_connections_per_host": _val(
+                "max_connections_per_host", max_connections_per_host
+            ),
+            "max_response_header_bytes": _val(
+                "max_response_header_bytes", max_response_header_bytes
+            ),
+            "write_buffer_size": _val("write_buffer_size", write_buffer_size),
+            "read_buffer_size": _val("read_buffer_size", read_buffer_size),
+            "idle_conn_timeout_seconds": _val(
+                "idle_conn_timeout_seconds", idle_conn_timeout_seconds
+            ),
+            "disable_keep_alives": _val("disable_keep_alives", disable_keep_alives, True),
+            "disable_compression": _val("disable_compression", disable_compression, True),
+            "disable_http3": _val("disable_http3", disable_http3, True),
+            "disable_ipv4": _val("disable_ipv4", disable_ipv4, True),
+            "disable_ipv6": _val("disable_ipv6", disable_ipv6, True),
+            "without_cookie_jar": _val("without_cookie_jar", without_cookie_jar, True),
+            "allow_empty_cookies": _val("allow_empty_cookies", allow_empty_cookies, True),
+            "with_default_bad_pin_handler": _val(
+                "with_default_bad_pin_handler", with_default_bad_pin_handler, True
+            ),
+            "catch_panics": _val("catch_panics", catch_panics, True),
+            "with_debug": _val("with_debug", with_debug, True),
+            "tcp_ttl": _val("tcp_ttl", tcp_ttl),
+            "tcp_window_size": _val("tcp_window_size", tcp_window_size),
+            "tcp_window_scale": _val("tcp_window_scale", tcp_window_scale),
+            "tcp_mss": _val("tcp_mss", tcp_mss),
+        }
+        if verify is not None:
+            resolved["insecure_skip_verify"] = 0 if verify else 1
+        else:
+            resolved["insecure_skip_verify"] = _val("insecure_skip_verify", None, True)
 
         keep_alive: list = []
 
@@ -2120,89 +2545,46 @@ class Session:
 
         # ---- build pseudo_header_order array ------------------------------
         ph_ptr, ph_len = _build_string_array(
-            ffi, _val("pseudo_header_order", pseudo_header_order), keep_alive
+            ffi, resolved["pseudo_header_order"], keep_alive
         )
 
         # ---- build h3_pseudo_header_order array ---------------------------
         h3ph_ptr, h3ph_len = _build_string_array(
-            ffi, _val("h3_pseudo_header_order", h3_pseudo_header_order), keep_alive
+            ffi, resolved["h3_pseudo_header_order"], keep_alive
         )
 
         # ---- build default_headers array ----------------------------------
         dh_ptr, dh_len = _build_headers(
-            ffi, _val("default_headers", default_headers), keep_alive
+            ffi, resolved["default_headers"], keep_alive
         )
 
         # ---- build connect_headers array ----------------------------------
         ch_ptr, ch_len = _build_headers(
-            ffi, _val("connect_headers", connect_headers), keep_alive
+            ffi, resolved["connect_headers"], keep_alive
         )
 
         # ---- build certificate_pinning_hosts array -------------------------
         cp_ptr, cp_len = _build_pin_entries(
-            ffi, _val("certificate_pinning_hosts", certificate_pinning_hosts), keep_alive
+            ffi, resolved["certificate_pinning_hosts"], keep_alive
         )
 
         # ---- build request_cookies array -----------------------------------
         rc_ptr, rc_len = _build_headers(
-            ffi, _val("request_cookies", request_cookies), keep_alive
+            ffi, resolved["request_cookies"], keep_alive
         )
 
         # ---- build client_certificates array --------------------------------
         cc_ptr, cc_len = _build_client_certificates(
-            ffi, _val("client_certificates", client_certificates), keep_alive
+            ffi, resolved["client_certificates"], keep_alive
         )
 
         # ---- build custom_tls_client --------------------------------------
         ctc_ptr = _build_custom_tls_client(
-            ffi, _val("custom_tls_client", custom_tls_client), keep_alive
+            ffi, resolved["custom_tls_client"], keep_alive
         )
 
         # ---- pre-compute cache key hash (avoids ~50 CGO calls on cache hit) --------
-        # Resolve insecure_skip_verify considering the verify override
-        if verify is not None:
-            _isv = 0 if verify else 1
-        else:
-            _isv = _val("insecure_skip_verify", None, True)
-        ck_hash = _compute_cache_key_hash({
-            "client_identifier": _val("client_identifier", client_identifier) or "",
-            "proxy": _val("proxy", proxy) or "",
-            "server_name_overwrite": _val("server_name_overwrite", server_name_overwrite) or "",
-            "local_address": _val("local_address", local_address) or "",
-            "insecure_skip_verify": _isv,
-            "force_http1": _val("force_http1", force_http1, True),
-            "with_random_tls_extension_order": _val("with_random_tls_extension_order", random_tls_extension_order, True),
-            "with_protocol_racing": _val("with_protocol_racing", with_protocol_racing, True),
-            "max_idle_connections": _val("max_idle_connections", max_idle_connections),
-            "max_idle_connections_per_host": _val("max_idle_connections_per_host", max_idle_connections_per_host),
-            "max_connections_per_host": _val("max_connections_per_host", max_connections_per_host),
-            "max_response_header_bytes": _val("max_response_header_bytes", max_response_header_bytes),
-            "write_buffer_size": _val("write_buffer_size", write_buffer_size),
-            "read_buffer_size": _val("read_buffer_size", read_buffer_size),
-            "idle_conn_timeout_seconds": _val("idle_conn_timeout_seconds", idle_conn_timeout_seconds),
-            "disable_keep_alives": _val("disable_keep_alives", disable_keep_alives, True),
-            "disable_compression": _val("disable_compression", disable_compression, True),
-            "disable_http3": _val("disable_http3", disable_http3, True),
-            "disable_ipv4": _val("disable_ipv4", disable_ipv4, True),
-            "disable_ipv6": _val("disable_ipv6", disable_ipv6, True),
-            "tcp_ttl": _val("tcp_ttl", tcp_ttl),
-            "tcp_window_size": _val("tcp_window_size", tcp_window_size),
-            "tcp_window_scale": _val("tcp_window_scale", tcp_window_scale),
-            "tcp_mss": _val("tcp_mss", tcp_mss),
-            "follow_redirects": _val("follow_redirects", follow_redirects, True),
-            "without_cookie_jar": _val("without_cookie_jar", without_cookie_jar, True),
-            "allow_empty_cookies": _val("allow_empty_cookies", allow_empty_cookies, True),
-            "with_default_bad_pin_handler": _val("with_default_bad_pin_handler", with_default_bad_pin_handler, True),
-            "timeout_seconds": _val("timeout_seconds", timeout),
-            "timeout_milliseconds": _val("timeout_milliseconds", timeout_milliseconds),
-            "pseudo_header_order": _val("pseudo_header_order", pseudo_header_order),
-            "h3_pseudo_header_order": _val("h3_pseudo_header_order", h3_pseudo_header_order),
-            "default_headers": _val("default_headers", default_headers),
-            "connect_headers": _val("connect_headers", connect_headers),
-            "certificate_pinning_hosts": _val("certificate_pinning_hosts", certificate_pinning_hosts),
-            "client_certificates": _val("client_certificates", client_certificates),
-            "custom_tls_client": _val("custom_tls_client", custom_tls_client),
-        })
+        ck_hash = _compute_cache_key_hash(resolved)
         c_ck = _c_string(ffi, ck_hash)
         if c_ck != ffi.NULL:
             keep_alive.append(c_ck)
@@ -2232,11 +2614,11 @@ class Session:
         opts.body = body_ptr
         opts.body_len = body_len
 
-        c_proxy = _c_string(ffi, _val("proxy", proxy))
-        c_ci = _c_string(ffi, _val("client_identifier", client_identifier))
-        c_sni = _c_string(ffi, _val("server_name_overwrite", server_name_overwrite))
-        c_host_override = _c_string(ffi, _val("request_host_override", request_host_override))
-        c_local_addr = _c_string(ffi, _val("local_address", local_address))
+        c_proxy = _c_string(ffi, resolved["proxy"])
+        c_ci = _c_string(ffi, resolved["client_identifier"])
+        c_sni = _c_string(ffi, resolved["server_name_overwrite"])
+        c_host_override = _c_string(ffi, resolved["request_host_override"])
+        c_local_addr = _c_string(ffi, resolved["local_address"])
         for c in (c_proxy, c_ci, c_sni, c_host_override, c_local_addr):
             if c != ffi.NULL:
                 keep_alive.append(c)
@@ -2257,9 +2639,7 @@ class Session:
         opts.connect_headers_len = ch_len
         opts.certificate_pinning_hosts = cp_ptr
         opts.certificate_pinning_hosts_len = cp_len
-        opts.with_default_bad_pin_handler = _val(
-            "with_default_bad_pin_handler", with_default_bad_pin_handler, True
-        )
+        opts.with_default_bad_pin_handler = resolved["with_default_bad_pin_handler"]
         opts.request_cookies = rc_ptr
         opts.request_cookies_len = rc_len
         opts.client_certificates = cc_ptr
@@ -2267,51 +2647,36 @@ class Session:
         opts.custom_tls_client = ctc_ptr
         opts.cache_key_hash = c_ck
 
-        opts.timeout_seconds = _val("timeout_seconds", timeout)
-        opts.timeout_milliseconds = _val("timeout_milliseconds", timeout_milliseconds)
-        opts.follow_redirects = _val("follow_redirects", follow_redirects, True)
-        if verify is not None:
-            opts.insecure_skip_verify = 0 if verify else 1
-        else:
-            opts.insecure_skip_verify = self.defaults["insecure_skip_verify"]
-        opts.force_http1 = _val("force_http1", force_http1, True)
-        opts.with_random_tls_extension_order = _val(
-            "with_random_tls_extension_order", random_tls_extension_order, True
-        )
-        opts.with_protocol_racing = _val(
-            "with_protocol_racing", with_protocol_racing, True
-        )
+        opts.timeout_seconds = resolved["timeout_seconds"]
+        opts.timeout_milliseconds = resolved["timeout_milliseconds"]
+        opts.follow_redirects = resolved["follow_redirects"]
+        opts.insecure_skip_verify = resolved["insecure_skip_verify"]
+        opts.force_http1 = resolved["force_http1"]
+        opts.with_random_tls_extension_order = resolved["with_random_tls_extension_order"]
+        opts.with_protocol_racing = resolved["with_protocol_racing"]
         opts.server_name_overwrite = c_sni
         opts.request_host_override = c_host_override
         opts.local_address = c_local_addr
-        opts.max_idle_connections = _val("max_idle_connections", max_idle_connections)
-        opts.max_idle_connections_per_host = _val(
-            "max_idle_connections_per_host", max_idle_connections_per_host
-        )
-        opts.max_connections_per_host = _val(
-            "max_connections_per_host", max_connections_per_host
-        )
-        opts.disable_keep_alives = _val("disable_keep_alives", disable_keep_alives, True)
-        opts.disable_compression = _val("disable_compression", disable_compression, True)
-        opts.idle_conn_timeout_seconds = _val(
-            "idle_conn_timeout_seconds", idle_conn_timeout_seconds
-        )
-        opts.max_response_header_bytes = _val(
-            "max_response_header_bytes", max_response_header_bytes
-        )
-        opts.write_buffer_size = _val("write_buffer_size", write_buffer_size)
-        opts.read_buffer_size = _val("read_buffer_size", read_buffer_size)
-        opts.allow_empty_cookies = _val("allow_empty_cookies", allow_empty_cookies, True)
-        opts.without_cookie_jar = _val("without_cookie_jar", without_cookie_jar, True)
-        opts.disable_http3 = _val("disable_http3", disable_http3, True)
-        opts.disable_ipv4 = _val("disable_ipv4", disable_ipv4, True)
-        opts.disable_ipv6 = _val("disable_ipv6", disable_ipv6, True)
-        opts.tcp_ttl = _val("tcp_ttl", tcp_ttl)
-        opts.tcp_window_size = _val("tcp_window_size", tcp_window_size)
-        opts.tcp_window_scale = _val("tcp_window_scale", tcp_window_scale)
-        opts.tcp_mss = _val("tcp_mss", tcp_mss)
-        opts.catch_panics = _val("catch_panics", catch_panics, True)
-        opts.with_debug = _val("with_debug", with_debug, True)
+        opts.max_idle_connections = resolved["max_idle_connections"]
+        opts.max_idle_connections_per_host = resolved["max_idle_connections_per_host"]
+        opts.max_connections_per_host = resolved["max_connections_per_host"]
+        opts.disable_keep_alives = resolved["disable_keep_alives"]
+        opts.disable_compression = resolved["disable_compression"]
+        opts.idle_conn_timeout_seconds = resolved["idle_conn_timeout_seconds"]
+        opts.max_response_header_bytes = resolved["max_response_header_bytes"]
+        opts.write_buffer_size = resolved["write_buffer_size"]
+        opts.read_buffer_size = resolved["read_buffer_size"]
+        opts.allow_empty_cookies = resolved["allow_empty_cookies"]
+        opts.without_cookie_jar = resolved["without_cookie_jar"]
+        opts.disable_http3 = resolved["disable_http3"]
+        opts.disable_ipv4 = resolved["disable_ipv4"]
+        opts.disable_ipv6 = resolved["disable_ipv6"]
+        opts.tcp_ttl = resolved["tcp_ttl"]
+        opts.tcp_window_size = resolved["tcp_window_size"]
+        opts.tcp_window_scale = resolved["tcp_window_scale"]
+        opts.tcp_mss = resolved["tcp_mss"]
+        opts.catch_panics = resolved["catch_panics"]
+        opts.with_debug = resolved["with_debug"]
 
         # ---- streaming fields (injected by stream_to_file) -----------------
         stream_path = kwargs.pop("_stream_output_path", ffi.NULL)
@@ -2391,104 +2756,37 @@ class Session:
         verify: Optional[bool] = None,
         **kwargs: Any,
     ) -> Response:
-        """``requests`` 兼容的通用 HTTP 请求方法。
+        """``requests`` ????? HTTP ?????
 
         ``requests``-compatible universal HTTP request method.
 
-        支持 ``params``、``data``、``json``、``auth``、``cookies``、``cert``、
-        ``proxies``、``allow_redirects``、``timeout``、``verify`` 等标准参数。
-        每个参数都会映射到 ``execute_request`` 的内部参数名。
+        ?? ``params``?``data``?``json``?``auth``?``cookies``?``cert``?
+        ``proxies``?``allow_redirects``?``timeout``?``verify`` ??????
+        ????????? ``execute_request`` ???????
         """
-        # ── params: append to URL query string ────────────────────────────
-        if params:
-            from urllib.parse import urlencode, urlparse, urlunparse
-            parsed = urlparse(url)
-            merged = dict(
-                (k, v) for k, v in (p.split("=", 1) for p in parsed.query.split("&") if p)
-            )
-            merged.update(params)
-            url = urlunparse(parsed._replace(
-                query=urlencode([(k, v) for k, v in merged.items()])
-            ))
-
-        # ── body: data / json ─────────────────────────────────────────────
-        body = kwargs.pop("body", None)
-        if body is None and data is not None:
-            if isinstance(data, dict):
-                from urllib.parse import urlencode
-                body = urlencode(data).encode("utf-8")
-                if headers is None:
-                    headers = {}
-                if "Content-Type" not in {k.lower(): v for k, v in (headers or {}).items()}:
-                    headers = dict(headers or {})
-                    headers["Content-Type"] = "application/x-www-form-urlencoded"
-            elif isinstance(data, str):
-                body = data.encode("utf-8")
-            else:
-                body = data
-        if json is not None:
-            import json as _json
-            body = _json.dumps(json, ensure_ascii=False).encode("utf-8")
-            if headers is None:
-                headers = {}
-            if "Content-Type" not in {k.lower(): v for k, v in (headers or {}).items()}:
-                headers = dict(headers or {})
-                headers["Content-Type"] = "application/json"
-
-        # ── auth: Basic Auth header ───────────────────────────────────────
-        _auth = auth if auth is not None else self.defaults.get("auth")
-        if _auth is not None:
-            import base64
-            user, pwd = _auth
-            encoded = base64.b64encode(f"{user}:{pwd}".encode("utf-8")).decode("ascii")
-            if headers is None:
-                headers = {}
-            headers = dict(headers or {})
-            headers.setdefault("Authorization", f"Basic {encoded}")
-
-        # ── cert: file path → client_certificates ────────────────────────
-        _cert = cert if cert is not None else self.defaults.get("cert")
-        client_certificates = kwargs.pop("client_certificates", None)
-        if client_certificates is None and _cert is not None:
-            if isinstance(_cert, str):
-                with open(_cert, "rb") as f:
-                    cert_bytes = f.read()
-                client_certificates = [{"cert_pem": cert_bytes, "key_pem": cert_bytes}]
-            elif isinstance(_cert, tuple) and len(_cert) == 2:
-                with open(_cert[0], "rb") as f:
-                    cert_bytes = f.read()
-                with open(_cert[1], "rb") as f:
-                    key_bytes = f.read()
-                client_certificates = [{"cert_pem": cert_bytes, "key_pem": key_bytes}]
-
-        # ── cookies ──────────────────────────────────────────────────────
-        _cookies = cookies if cookies is not None else kwargs.pop("request_cookies", None)
-        kwargs.pop("request_cookies", None)  # guard against duplicate kwarg in **kwargs
-
-        # ── proxies (dict → single proxy string) ─────────────────────────
-        _proxies = proxies
-        if _proxies is not None:
-            scheme = url.split(":", 1)[0].lower()
-            proxy_url = _proxies.get(scheme) or _proxies.get("all") or next(
-                iter(_proxies.values()), None
-            )
-            kwargs.setdefault("proxy", proxy_url)
-
-        # ── name mapping: requests → execute_request ─────────────────────
-        if allow_redirects is not None:
-            kwargs.setdefault("follow_redirects", allow_redirects)
-        if timeout is not None:
-            kwargs.setdefault("timeout", timeout)
-        if verify is not None:
-            kwargs.setdefault("verify", verify)
-        if stream is not None:
-            kwargs.setdefault("stream", stream)
-
+        url, body, headers, request_cookies, client_certificates = _prepare_request_compat(
+            get_default=self._get_default,
+            url=url,
+            params=params,
+            data=data,
+            json_data=json,
+            headers=headers,
+            auth=auth,
+            cookies=cookies,
+            stream=stream,
+            cert=cert,
+            timeout=timeout,
+            allow_redirects=allow_redirects,
+            proxies=proxies,
+            verify=verify,
+            kwargs=kwargs,
+        )
         return self.execute_request(
-            method, url,
+            method,
+            url,
             headers=headers,
             body=body,
-            request_cookies=_cookies,
+            request_cookies=request_cookies,
             client_certificates=client_certificates,
             **kwargs,
         )
@@ -2502,6 +2800,7 @@ class Session:
 
         Close the session and release idle connections in the Go client pool.
         """
+        self._closed = True
         _, lib = _get_ffi()
         lib.ClearClientPool()
 
@@ -2537,11 +2836,12 @@ class Session:
 # ---------------------------------------------------------------------------
 
 # Registry of pending async requests.
-# request_id → (future, keep_alive, timeout_handle)
-#   future         — asyncio.Future resolved by the CFFI callback
-#   keep_alive     — list of CFFI pointers that must outlive the Go goroutine
-#   timeout_handle — asyncio.Handle; cancelled when callback fires, fires a
+# request_id → (future, keep_alive, timeout_handle, owner)
+#   future         – asyncio.Future resolved by the CFFI callback
+#   keep_alive     – list of CFFI pointers that must outlive the Go goroutine
+#   timeout_handle – asyncio.Handle; cancelled when callback fires, fires a
 #                     defensive cleanup if the Go goroutine never responds
+#   owner          – AsyncSession instance that created the request
 _pending_requests: Dict[int, tuple] = {}
 _pending_lock = threading.Lock()
 _request_counter = 0
@@ -2613,10 +2913,10 @@ def _make_async_callback(ffi, lib):
         try:
             # Phase 1: Pop _pending_requests & cancel defensive timeout.
             with _pending_lock:
-                future, _keep_alive, timeout_handle = _pending_requests.pop(
-                    request_id, (None, None, None)
+                future, _keep_alive, timeout_handle, _owner = _pending_requests.pop(
+                    request_id, (None, None, None, None)
                 )
-                # _keep_alive is now released — the goroutine has finished.
+                # _keep_alive is now released – the goroutine has finished.
 
             if timeout_handle is not None:
                 timeout_handle.cancel()
@@ -2726,7 +3026,9 @@ class AsyncSession:
         server_name_overwrite: Optional[str] = None,
         # ── 代理 ──  /  Proxy ──
         # 代理 URL / Proxy URL
-        proxy: Optional[str] = None,
+        proxy: Optional[ProxyConfig] = None,
+        # requests 风格代理字典 / requests-style proxies mapping
+        proxies: Optional[ProxyConfig] = None,
         # 绑定到指定的本地 IP 地址 / Bind to a specific local IP address
         local_address: Optional[str] = None,
         # ── 请求头控制 ──  /  Header Control ──
@@ -2738,6 +3040,8 @@ class AsyncSession:
         h3_pseudo_header_order: Optional[List[str]] = None,
         # 默认请求头字典 / Default headers dict
         default_headers: Optional[Dict[str, str]] = None,
+        # 默认请求头字典（别名）/ Default headers dict alias
+        headers: Optional[Dict[str, str]] = None,
         # 代理 CONNECT 隧道请求头字典 / Proxy CONNECT tunnel headers dict
         connect_headers: Optional[Dict[str, str]] = None,
         # ── 证书固定 ──  /  Certificate Pinning ──
@@ -2748,6 +3052,8 @@ class AsyncSession:
         # ── Cookie ──
         # 预置 Cookie 字典 / Pre-populated cookie dict
         request_cookies: Optional[Dict[str, str]] = None,
+        # 预置 Cookie 字典（别名）/ Pre-populated cookie dict alias
+        cookies: Optional[Dict[str, str]] = None,
         # ── 自定义 TLS ──  /  Custom TLS ──
         # 完全自定义的 TLS 客户端配置 (26 fields) / Fully custom TLS client configuration
         custom_tls_client: Optional[Dict[str, Any]] = None,
@@ -2818,15 +3124,18 @@ class AsyncSession:
             verify=verify,
             server_name_overwrite=server_name_overwrite,
             proxy=proxy,
+            proxies=proxies,
             local_address=local_address,
             request_host_override=request_host_override,
             pseudo_header_order=pseudo_header_order,
             h3_pseudo_header_order=h3_pseudo_header_order,
             default_headers=default_headers,
+            headers=headers,
             connect_headers=connect_headers,
             certificate_pinning_hosts=certificate_pinning_hosts,
             with_default_bad_pin_handler=with_default_bad_pin_handler,
             request_cookies=request_cookies,
+            cookies=cookies,
             custom_tls_client=custom_tls_client,
             client_certificates=client_certificates,
             max_idle_connections=max_idle_connections,
@@ -2880,9 +3189,16 @@ class AsyncSession:
         pass
 
     async def _execute_async(self, method: str, url: str, **kwargs: Any) -> Response:
+        if self._session._closed:
+            raise RuntimeError("AsyncSession is closed")
         ffi, lib = _get_ffi()
         callback = _get_async_callback(ffi, lib)
         loop = asyncio.get_running_loop()
+        defaults = self._session._snapshot_selected_defaults(ASYNC_REQUEST_DEFAULT_KEYS)
+        effective_proxy = _resolve_proxy_url(
+            kwargs.get("proxy", defaults.get("proxy")),
+            url,
+        )
 
         # Build RequestOptions (same as sync path)
         keep_alive: list = []
@@ -2916,91 +3232,98 @@ class AsyncSession:
 
         # Overrides (use defaults from the session, overridden by kwargs)
         def _val(name: str, as_bool: bool = False):
-            v = kwargs.pop(name, None)
-            if v is None:
-                v = self._session.defaults.get(name)
+            if name == "proxy":
+                kwargs.pop(name, None)
+                v = effective_proxy
+            else:
+                v = kwargs.pop(name, None)
+                if v is None:
+                    v = defaults.get(name)
             if as_bool:
                 return 1 if v else 0
             return v
 
-        # Pre-compute cache key BEFORE _val() consumes kwargs.
-        # kwargs.get() is non-destructive so values remain for _val() below.
-        def _ck(name):
-            return kwargs.get(name, self._session.defaults.get(name))
-        def _ckb(name):
-            v = kwargs.get(name, self._session.defaults.get(name))
-            return 1 if v else 0
-        ck_hash = _compute_cache_key_hash({
-            "client_identifier": _ck("client_identifier") or "",
-            "proxy": _ck("proxy") or "",
-            "server_name_overwrite": _ck("server_name_overwrite") or "",
-            "local_address": _ck("local_address") or "",
-            "insecure_skip_verify": _ckb("insecure_skip_verify"),
-            "force_http1": _ckb("force_http1"),
-            "with_random_tls_extension_order": _ckb("with_random_tls_extension_order"),
-            "with_protocol_racing": _ckb("with_protocol_racing"),
-            "max_idle_connections": _ck("max_idle_connections"),
-            "max_idle_connections_per_host": _ck("max_idle_connections_per_host"),
-            "max_connections_per_host": _ck("max_connections_per_host"),
-            "max_response_header_bytes": _ck("max_response_header_bytes"),
-            "write_buffer_size": _ck("write_buffer_size"),
-            "read_buffer_size": _ck("read_buffer_size"),
-            "idle_conn_timeout_seconds": _ck("idle_conn_timeout_seconds"),
-            "disable_keep_alives": _ckb("disable_keep_alives"),
-            "disable_compression": _ckb("disable_compression"),
-            "disable_http3": _ckb("disable_http3"),
-            "disable_ipv4": _ckb("disable_ipv4"),
-            "disable_ipv6": _ckb("disable_ipv6"),
-            "tcp_ttl": _ck("tcp_ttl"),
-            "tcp_window_size": _ck("tcp_window_size"),
-            "tcp_window_scale": _ck("tcp_window_scale"),
-            "tcp_mss": _ck("tcp_mss"),
-            "follow_redirects": _ckb("follow_redirects"),
-            "without_cookie_jar": _ckb("without_cookie_jar"),
-            "allow_empty_cookies": _ckb("allow_empty_cookies"),
-            "with_default_bad_pin_handler": _ckb("with_default_bad_pin_handler"),
-            "timeout_seconds": _ck("timeout_seconds"),
-            "timeout_milliseconds": _ck("timeout_milliseconds"),
-            "pseudo_header_order": _ck("pseudo_header_order"),
-            "h3_pseudo_header_order": _ck("h3_pseudo_header_order"),
-            "default_headers": _ck("default_headers"),
-            "connect_headers": _ck("connect_headers"),
-            "certificate_pinning_hosts": _ck("certificate_pinning_hosts"),
-            "client_certificates": _ck("client_certificates"),
-            "custom_tls_client": _ck("custom_tls_client"),
-        })
+        resolved = {
+            "client_identifier": _val("client_identifier"),
+            "proxy": _val("proxy"),
+            "server_name_overwrite": _val("server_name_overwrite"),
+            "request_host_override": _val("request_host_override"),
+            "local_address": _val("local_address"),
+            "pseudo_header_order": _val("pseudo_header_order"),
+            "h3_pseudo_header_order": _val("h3_pseudo_header_order"),
+            "default_headers": _val("default_headers"),
+            "connect_headers": _val("connect_headers"),
+            "certificate_pinning_hosts": _val("certificate_pinning_hosts"),
+            "request_cookies": _val("request_cookies"),
+            "client_certificates": _val("client_certificates"),
+            "custom_tls_client": _val("custom_tls_client"),
+            "timeout_seconds": _val("timeout_seconds"),
+            "timeout_milliseconds": _val("timeout_milliseconds"),
+            "follow_redirects": _val("follow_redirects", True),
+            "insecure_skip_verify": _val("insecure_skip_verify", True),
+            "force_http1": _val("force_http1", True),
+            "with_random_tls_extension_order": _val(
+                "with_random_tls_extension_order", True
+            ),
+            "with_protocol_racing": _val("with_protocol_racing", True),
+            "max_idle_connections": _val("max_idle_connections"),
+            "max_idle_connections_per_host": _val("max_idle_connections_per_host"),
+            "max_connections_per_host": _val("max_connections_per_host"),
+            "max_response_header_bytes": _val("max_response_header_bytes"),
+            "write_buffer_size": _val("write_buffer_size"),
+            "read_buffer_size": _val("read_buffer_size"),
+            "idle_conn_timeout_seconds": _val("idle_conn_timeout_seconds"),
+            "disable_keep_alives": _val("disable_keep_alives", True),
+            "disable_compression": _val("disable_compression", True),
+            "disable_http3": _val("disable_http3", True),
+            "disable_ipv4": _val("disable_ipv4", True),
+            "disable_ipv6": _val("disable_ipv6", True),
+            "without_cookie_jar": _val("without_cookie_jar", True),
+            "allow_empty_cookies": _val("allow_empty_cookies", True),
+            "with_default_bad_pin_handler": _val(
+                "with_default_bad_pin_handler", True
+            ),
+            "catch_panics": _val("catch_panics", True),
+            "with_debug": _val("with_debug", True),
+            "tcp_ttl": _val("tcp_ttl"),
+            "tcp_window_size": _val("tcp_window_size"),
+            "tcp_window_scale": _val("tcp_window_scale"),
+            "tcp_mss": _val("tcp_mss"),
+        }
+
+        ck_hash = _compute_cache_key_hash(resolved)
         c_ck = _c_string(ffi, ck_hash)
         if c_ck != ffi.NULL:
             keep_alive.append(c_ck)
         opts.cache_key_hash = c_ck
 
-        opts.timeout_seconds = _val("timeout_seconds")
-        opts.timeout_milliseconds = _val("timeout_milliseconds")
-        opts.follow_redirects = _val("follow_redirects", True)
-        opts.insecure_skip_verify = _val("insecure_skip_verify", True)
-        opts.force_http1 = _val("force_http1", True)
-        opts.with_random_tls_extension_order = _val("with_random_tls_extension_order", True)
-        opts.with_protocol_racing = _val("with_protocol_racing", True)
-        opts.max_idle_connections = _val("max_idle_connections")
-        opts.max_idle_connections_per_host = _val("max_idle_connections_per_host")
-        opts.max_connections_per_host = _val("max_connections_per_host")
-        opts.disable_keep_alives = _val("disable_keep_alives", True)
-        opts.disable_compression = _val("disable_compression", True)
-        opts.idle_conn_timeout_seconds = _val("idle_conn_timeout_seconds")
-        opts.max_response_header_bytes = _val("max_response_header_bytes")
-        opts.write_buffer_size = _val("write_buffer_size")
-        opts.read_buffer_size = _val("read_buffer_size")
-        opts.allow_empty_cookies = _val("allow_empty_cookies", True)
-        opts.without_cookie_jar = _val("without_cookie_jar", True)
-        opts.disable_http3 = _val("disable_http3", True)
-        opts.disable_ipv4 = _val("disable_ipv4", True)
-        opts.disable_ipv6 = _val("disable_ipv6", True)
-        opts.tcp_ttl = _val("tcp_ttl")
-        opts.tcp_window_size = _val("tcp_window_size")
-        opts.tcp_window_scale = _val("tcp_window_scale")
-        opts.tcp_mss = _val("tcp_mss")
-        opts.catch_panics = _val("catch_panics", True)
-        opts.with_debug = _val("with_debug", True)
+        opts.timeout_seconds = resolved["timeout_seconds"]
+        opts.timeout_milliseconds = resolved["timeout_milliseconds"]
+        opts.follow_redirects = resolved["follow_redirects"]
+        opts.insecure_skip_verify = resolved["insecure_skip_verify"]
+        opts.force_http1 = resolved["force_http1"]
+        opts.with_random_tls_extension_order = resolved["with_random_tls_extension_order"]
+        opts.with_protocol_racing = resolved["with_protocol_racing"]
+        opts.max_idle_connections = resolved["max_idle_connections"]
+        opts.max_idle_connections_per_host = resolved["max_idle_connections_per_host"]
+        opts.max_connections_per_host = resolved["max_connections_per_host"]
+        opts.disable_keep_alives = resolved["disable_keep_alives"]
+        opts.disable_compression = resolved["disable_compression"]
+        opts.idle_conn_timeout_seconds = resolved["idle_conn_timeout_seconds"]
+        opts.max_response_header_bytes = resolved["max_response_header_bytes"]
+        opts.write_buffer_size = resolved["write_buffer_size"]
+        opts.read_buffer_size = resolved["read_buffer_size"]
+        opts.allow_empty_cookies = resolved["allow_empty_cookies"]
+        opts.without_cookie_jar = resolved["without_cookie_jar"]
+        opts.disable_http3 = resolved["disable_http3"]
+        opts.disable_ipv4 = resolved["disable_ipv4"]
+        opts.disable_ipv6 = resolved["disable_ipv6"]
+        opts.tcp_ttl = resolved["tcp_ttl"]
+        opts.tcp_window_size = resolved["tcp_window_size"]
+        opts.tcp_window_scale = resolved["tcp_window_scale"]
+        opts.tcp_mss = resolved["tcp_mss"]
+        opts.catch_panics = resolved["catch_panics"]
+        opts.with_debug = resolved["with_debug"]
       
 
         # String fields
@@ -3011,54 +3334,54 @@ class AsyncSession:
             ("request_host_override", "request_host_override"),
             ("local_address", "local_address"),
         ]:
-            c_val = _c_string(ffi, _val(name))
+            c_val = _c_string(ffi, resolved[name])
             setattr(opts, field, c_val)
             if c_val != ffi.NULL:
                 keep_alive.append(c_val)
 
         # Pseudo-header orders
-        pho = _val("pseudo_header_order")
+        pho = resolved["pseudo_header_order"]
         ph_ptr, ph_len = _build_string_array(ffi, pho, keep_alive)
         opts.pseudo_header_order = ph_ptr
         opts.pseudo_header_order_len = ph_len
 
-        h3pho = _val("h3_pseudo_header_order")
+        h3pho = resolved["h3_pseudo_header_order"]
         h3ph_ptr, h3ph_len = _build_string_array(ffi, h3pho, keep_alive)
         opts.h3_pseudo_header_order = h3ph_ptr
         opts.h3_pseudo_header_order_len = h3ph_len
 
         # Default/connect headers
-        dh = _val("default_headers")
+        dh = resolved["default_headers"]
         dh_ptr, dh_len = _build_headers(ffi, dh, keep_alive)
         opts.default_headers = dh_ptr
         opts.default_headers_len = dh_len
 
-        ch = _val("connect_headers")
+        ch = resolved["connect_headers"]
         ch_ptr, ch_len = _build_headers(ffi, ch, keep_alive)
         opts.connect_headers = ch_ptr
         opts.connect_headers_len = ch_len
 
         # Certificate pinning
-        cp = _val("certificate_pinning_hosts")
+        cp = resolved["certificate_pinning_hosts"]
         cp_ptr, cp_len = _build_pin_entries(ffi, cp, keep_alive)
         opts.certificate_pinning_hosts = cp_ptr
         opts.certificate_pinning_hosts_len = cp_len
-        opts.with_default_bad_pin_handler = _val("with_default_bad_pin_handler", True)
+        opts.with_default_bad_pin_handler = resolved["with_default_bad_pin_handler"]
 
         # Request cookies
-        rc = _val("request_cookies")
+        rc = resolved["request_cookies"]
         rc_ptr, rc_len = _build_headers(ffi, rc, keep_alive)
         opts.request_cookies = rc_ptr
         opts.request_cookies_len = rc_len
 
         # Client certificates
-        cc = _val("client_certificates")
+        cc = resolved["client_certificates"]
         cc_ptr, cc_len = _build_client_certificates(ffi, cc, keep_alive)
         opts.client_certificates = cc_ptr
         opts.client_certificates_len = cc_len
 
         # Custom TLS client
-        ctc = _val("custom_tls_client")
+        ctc = resolved["custom_tls_client"]
         ctc_ptr = _build_custom_tls_client(ffi, ctc, keep_alive)
         opts.custom_tls_client = ctc_ptr
 
@@ -3095,7 +3418,7 @@ class AsyncSession:
                 entry = _pending_requests.pop(rid, None)
             if entry is None:
                 return  # already resolved via callback
-            fut, _ka, _ = entry
+            fut, _ka, _, _owner = entry
             if not fut.done():
                 try:
                     fut.get_loop().call_soon_threadsafe(
@@ -3114,10 +3437,10 @@ class AsyncSession:
         timeout_handle = loop.call_later(safe_timeout, _on_zombie_timeout, request_id)
 
         with _pending_lock:
-            # Store keep_alive alongside the Future — the goroutine reads
+            # Store keep_alive alongside the Future – the goroutine reads
             # from C memory via unsafe.Slice, so Python must keep the
             # original buffers alive until the callback fires.
-            _pending_requests[request_id] = (future, keep_alive, timeout_handle)
+            _pending_requests[request_id] = (future, keep_alive, timeout_handle, self)
 
         # Step 1-2: Call RequestAsync — Go deep-copies, dispatches goroutine,
         # returns immediately.  Python can free keep_alive memory after return.
@@ -3131,7 +3454,7 @@ class AsyncSession:
             with _pending_lock:
                 entry = _pending_requests.pop(request_id, None)
                 if entry is not None:
-                    _, _, th = entry
+                    _, _, th, _ = entry
                     th.cancel()
             raise RuntimeError("RequestAsync failed — opts or callback is nil")
 
@@ -3339,22 +3662,28 @@ class AsyncSession:
         return await self.execute_request(method, url, **kwargs)
 
     async def get(self, url: str, *, headers: Optional[Dict[str, str]] = None, **kwargs: Any) -> Response:
-        return await self.execute_request("GET", url, headers=headers, **kwargs)
+        return await self.request("GET", url, headers=headers, **kwargs)
 
     async def post(self, url: str, *, headers: Optional[Dict[str, str]] = None, body: Optional[bytes] = None, **kwargs: Any) -> Response:
-        return await self.execute_request("POST", url, headers=headers, body=body, **kwargs)
+        if body is not None:
+            kwargs.setdefault("data", body)
+        return await self.request("POST", url, headers=headers, **kwargs)
 
     async def head(self, url: str, *, headers: Optional[Dict[str, str]] = None, **kwargs: Any) -> Response:
-        return await self.execute_request("HEAD", url, headers=headers, **kwargs)
+        return await self.request("HEAD", url, headers=headers, **kwargs)
 
     async def put(self, url: str, *, headers: Optional[Dict[str, str]] = None, body: Optional[bytes] = None, **kwargs: Any) -> Response:
-        return await self.execute_request("PUT", url, headers=headers, body=body, **kwargs)
+        if body is not None:
+            kwargs.setdefault("data", body)
+        return await self.request("PUT", url, headers=headers, **kwargs)
 
     async def delete(self, url: str, *, headers: Optional[Dict[str, str]] = None, **kwargs: Any) -> Response:
-        return await self.execute_request("DELETE", url, headers=headers, **kwargs)
+        return await self.request("DELETE", url, headers=headers, **kwargs)
 
     async def patch(self, url: str, *, headers: Optional[Dict[str, str]] = None, body: Optional[bytes] = None, **kwargs: Any) -> Response:
-        return await self.execute_request("PATCH", url, headers=headers, body=body, **kwargs)
+        if body is not None:
+            kwargs.setdefault("data", body)
+        return await self.request("PATCH", url, headers=headers, **kwargs)
 
     async def request(
         self,
@@ -3375,90 +3704,37 @@ class AsyncSession:
         verify: Optional[bool] = None,
         **kwargs: Any,
     ) -> Response:
-        """``requests`` 兼容的异步 HTTP 请求方法。
+        """``requests`` ????? HTTP ?????
 
         ``requests``-compatible async HTTP request method.
 
-        :attr:`params` 自动拼接到 URL，:attr:`data` / :attr:`json` 自动编码请求体，
-        :attr:`auth` 自动设置 ``Authorization`` 头，:attr:`cert` 自动读取文件并转为 mTLS 证书。
-        所有参数均可通过 Session 属性预设，也可单次请求覆盖。
+        :attr:`params` ????? URL?:attr:`data` / :attr:`json` ????????
+        :attr:`auth` ???? ``Authorization`` ??:attr:`cert` ????????? mTLS ???
+        ???????? Session ??????????????
         """
-        if params:
-            from urllib.parse import urlencode, urlparse, urlunparse
-            parsed = urlparse(url)
-            merged = dict(
-                (k, v) for k, v in (p.split("=", 1) for p in parsed.query.split("&") if p)
-            )
-            merged.update(params)
-            url = urlunparse(parsed._replace(
-                query=urlencode([(k, v) for k, v in merged.items()])
-            ))
-        body = kwargs.pop("body", None)
-        if body is None and data is not None:
-            if isinstance(data, dict):
-                from urllib.parse import urlencode
-                body = urlencode(data).encode("utf-8")
-                if headers is None:
-                    headers = {}
-                if "Content-Type" not in {k.lower(): v for k, v in (headers or {}).items()}:
-                    headers = dict(headers or {})
-                    headers["Content-Type"] = "application/x-www-form-urlencoded"
-            elif isinstance(data, str):
-                body = data.encode("utf-8")
-            else:
-                body = data
-        if json is not None:
-            import json as _json
-            body = _json.dumps(json, ensure_ascii=False).encode("utf-8")
-            if headers is None:
-                headers = {}
-            if "Content-Type" not in {k.lower(): v for k, v in (headers or {}).items()}:
-                headers = dict(headers or {})
-                headers["Content-Type"] = "application/json"
-        _auth = auth if auth is not None else self._session.defaults.get("auth")
-        if _auth is not None:
-            import base64
-            user, pwd = _auth
-            encoded = base64.b64encode(f"{user}:{pwd}".encode("utf-8")).decode("ascii")
-            if headers is None:
-                headers = {}
-            headers = dict(headers or {})
-            headers.setdefault("Authorization", f"Basic {encoded}")
-        _cert = cert if cert is not None else self._session.defaults.get("cert")
-        client_certificates = kwargs.pop("client_certificates", None)
-        if client_certificates is None and _cert is not None:
-            if isinstance(_cert, str):
-                with open(_cert, "rb") as f:
-                    cert_bytes = f.read()
-                client_certificates = [{"cert_pem": cert_bytes, "key_pem": cert_bytes}]
-            elif isinstance(_cert, tuple) and len(_cert) == 2:
-                with open(_cert[0], "rb") as f:
-                    cert_bytes = f.read()
-                with open(_cert[1], "rb") as f:
-                    key_bytes = f.read()
-                client_certificates = [{"cert_pem": cert_bytes, "key_pem": key_bytes}]
-        _cookies = cookies if cookies is not None else kwargs.pop("request_cookies", None)
-        kwargs.pop("request_cookies", None)  # guard against duplicate kwarg in **kwargs
-        _proxies = proxies
-        if _proxies is not None:
-            scheme = url.split(":", 1)[0].lower()
-            proxy_url = _proxies.get(scheme) or _proxies.get("all") or next(
-                iter(_proxies.values()), None
-            )
-            kwargs.setdefault("proxy", proxy_url)
-        if allow_redirects is not None:
-            kwargs.setdefault("follow_redirects", allow_redirects)
-        if timeout is not None:
-            kwargs.setdefault("timeout", timeout)
-        if verify is not None:
-            kwargs.setdefault("verify", verify)
-        if stream is not None:
-            kwargs.setdefault("stream", stream)
+        url, body, headers, request_cookies, client_certificates = _prepare_request_compat(
+            get_default=self._session._get_default,
+            url=url,
+            params=params,
+            data=data,
+            json_data=json,
+            headers=headers,
+            auth=auth,
+            cookies=cookies,
+            stream=stream,
+            cert=cert,
+            timeout=timeout,
+            allow_redirects=allow_redirects,
+            proxies=proxies,
+            verify=verify,
+            kwargs=kwargs,
+        )
         return await self.execute_request(
-            method, url,
+            method,
+            url,
             headers=headers,
             body=body,
-            request_cookies=_cookies,
+            request_cookies=request_cookies,
             client_certificates=client_certificates,
             **kwargs,
         )
@@ -3472,6 +3748,29 @@ class AsyncSession:
 
         Close the async session and release idle connections in the Go client pool.
         """
+        self._session._closed = True
+        to_cancel = []
+        with _pending_lock:
+            owned_ids = [
+                request_id
+                for request_id, entry in _pending_requests.items()
+                if len(entry) == 4 and entry[3] is self
+            ]
+            for request_id in owned_ids:
+                entry = _pending_requests.pop(request_id, None)
+                if entry is not None:
+                    to_cancel.append(entry)
+        for future, _keep_alive, timeout_handle, _owner in to_cancel:
+            if timeout_handle is not None:
+                timeout_handle.cancel()
+            if future is not None and not future.done():
+                try:
+                    future.get_loop().call_soon_threadsafe(
+                        future.set_exception,
+                        RuntimeError("AsyncSession is closed"),
+                    )
+                except RuntimeError:
+                    pass
         _, lib = _get_ffi()
         lib.ClearClientPool()
 
