@@ -5,7 +5,7 @@
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 
 **High-performance Python binding for [bogdanfinn/tls-client](https://github.com/bogdanfinn/tls-client) via CFFI.**
-
+**Fully compatible with the syntax of both the tls-client library (from the original https://github.com/FlorianREGAZ/Python-Tls-Client repository) and the requests library.**
 ---
 
 ## What is TLS Fingerprinting?
