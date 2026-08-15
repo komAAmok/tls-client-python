@@ -4,7 +4,7 @@
 [![Python](https://img.shields.io/pypi/pyversions/tls-client-python)](https://pypi.org/project/tls-client-python/)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 
-**CFFI-based, high-performance Python binding for [`bogdanfinn/tls-client`](https://github.com/bogdanfinn/tls-client) — drop-in compatible with [`requests`](https://github.com/psf/requests) and [`FlorianREGAZ/Python-Tls-Client`](https://github.com/FlorianREGAZ/Python-Tls-Client).**
+**CFFI-based, high-performance Python binding for [`tls-client`](https://github.com/bogdanfinn/tls-client) — drop-in compatible with [`requests`](https://github.com/psf/requests) and [`Python-Tls-Client`](https://github.com/FlorianREGAZ/Python-Tls-Client).**
 ---
 
 ## What is TLS Fingerprinting?
