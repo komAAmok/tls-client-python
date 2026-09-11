@@ -3,10 +3,23 @@
 package main
 
 import (
+	"bytes"
 	"sync"
 	"testing"
 	"time"
 )
+
+func TestReadAllPooledDropsOversizedBuffer(t *testing.T) {
+	oversized := bytes.NewBuffer(make([]byte, 0, maxPooledBodyBuffer+1))
+	respBodyPool.Put(oversized)
+
+	if _, err := readAllPooled(bytes.NewReader(nil)); err != nil {
+		t.Fatal(err)
+	}
+	if got := respBodyPool.Get().(*bytes.Buffer); got == oversized {
+		t.Fatal("oversized response buffer was retained in the pool")
+	}
+}
 
 // resetPoolForTest clears the client pool and resets all metrics to zero.
 // Must be called at the start of each test to isolate state.

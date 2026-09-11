@@ -48,7 +48,10 @@ try:
 except ImportError:
     from typing_extensions import Literal, TypedDict  # Python 3.6–3.7
 
-from typing_extensions import TypeAlias  # Python <3.10
+try:
+    from typing import TypeAlias
+except ImportError:
+    from typing_extensions import TypeAlias  # Python 3.6-3.9
 
 
 # ---------------------------------------------------------------------------
@@ -3193,7 +3196,8 @@ class AsyncSession:
             raise RuntimeError("AsyncSession is closed")
         ffi, lib = _get_ffi()
         callback = _get_async_callback(ffi, lib)
-        loop = asyncio.get_running_loop()
+        get_running_loop = getattr(asyncio, "get_running_loop", asyncio.get_event_loop)
+        loop = get_running_loop()
         defaults = self._session._snapshot_selected_defaults(ASYNC_REQUEST_DEFAULT_KEYS)
         effective_proxy = _resolve_proxy_url(
             kwargs.get("proxy", defaults.get("proxy")),

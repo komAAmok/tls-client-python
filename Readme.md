@@ -36,6 +36,11 @@ For a deep dive, see [this excellent article on TLS fingerprinting](https://http
 | 🛡️ **Panic-proof** | All Go panics caught and surfaced as Python exceptions |
 | ⚙️ **Custom TLS** | Full 26-field custom TLS client configuration |
 
+> **macOS TCP fingerprinting:** macOS derives TCP MSS during `connect` and
+> rejects `TCP_MAXSEG` in the pre-connect socket hook. The MSS hint is therefore
+> skipped on macOS; TTL, receive-window tuning, and TLS/HTTP fingerprints remain
+> active. This avoids `MSS(1460): invalid argument` on macOS 26 and earlier.
+
 ---
 
 ## 📦 Installation
@@ -89,6 +94,42 @@ async def main():
 
 asyncio.run(main())
 ```
+
+### Requests-compatible API
+
+The synchronous API implements Requests-style request preparation, session
+state, redirects, cookies, hooks, exceptions, and response objects without
+depending on the Requests package. Network transport remains the native
+tls-client engine:
+
+```python
+import tls_client
+
+response = tls_client.get(
+    "https://example.com/api",
+    params={"page": 1},
+    headers={"Accept": "application/json"},
+    timeout=(3.05, 30),
+)
+response.raise_for_status()
+print(response.json())
+
+with tls_client.Session(client_identifier="chrome_146") as session:
+    session.headers.update({"Authorization": "Bearer token"})
+    response = session.post(
+        "https://example.com/upload",
+        files={"file": ("data.txt", b"payload")},
+        hooks={"response": lambda r, *args, **kwargs: r},
+    )
+```
+
+`Request`, `PreparedRequest`, `Response`, `exceptions`, `codes`, `cookies`,
+`auth`, `adapters`, `structures`, and all top-level HTTP helpers follow the
+commonly used Requests API. The previous low-level objects remain available as `NativeSession`,
+`NativeResponse`, and `TLSRequest`. `stream=True` exposes the normal Requests
+iteration API, but the current native ABI buffers the response before Python
+receives it. A string `verify` value enables verification with system roots;
+passing a custom CA bundle through the C ABI is not yet supported.
 
 ---
 
@@ -287,17 +328,21 @@ resp = s.get("https://tls.browserleaks.com/json", client_identifier="firefox_148
 | Property / Method | Description |
 |-------------------|-------------|
 | `status_code` | HTTP status code (int) |
-| `headers` | Response headers (dict of list) |
+| `headers` | Case-insensitive response headers |
 | `content` | Raw bytes body |
 | `text` | Decoded text body |
 | `encoding` | Detected charset |
 | `url` | Final URL after redirects |
-| `cookies` | Response cookies dict |
+| `cookies` | Requests cookie jar |
+| `history` | Redirect response history |
+| `request` | The originating `PreparedRequest` |
+| `raw` | File-like buffered raw response |
 | `used_protocol` | Protocol used (e.g. `HTTP/2.0`) |
 | `ok` | `True` if `status_code < 400` |
 | `reason` | HTTP reason phrase |
 | `json()` | Parse body as JSON |
-| `raise_for_status()` | Raise `RuntimeError` on 4xx/5xx |
+| `raise_for_status()` | Raise `tls_client.exceptions.HTTPError` on 4xx/5xx |
+| `iter_content()` / `iter_lines()` | Iterate over buffered response data |
 
 ---
 

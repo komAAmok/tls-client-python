@@ -340,12 +340,17 @@ var respBodyPool = sync.Pool{
 	},
 }
 
+const maxPooledBodyBuffer = 1024 * 1024
+
 // readAllPooled is a sync.Pool-backed replacement for io.ReadAll.
 // The returned slice is a copy — the caller owns it and the pool buffer
 // is immediately returned for reuse.
 func readAllPooled(r io.Reader) ([]byte, error) {
 	buf := respBodyPool.Get().(*bytes.Buffer)
 	defer func() {
+		if buf.Cap() > maxPooledBodyBuffer {
+			return
+		}
 		buf.Reset()
 		respBodyPool.Put(buf)
 	}()
@@ -384,8 +389,7 @@ func readBodyToCHeap(body io.Reader, contentLength int64) (*C.char, int, error) 
 
 // ---------------------------------------------------------------------------
 // Go-native request config — goroutine-safe copy of all C RequestOptions data.
-// Deep-copied by RequestAsync so the goroutine never touches C memory owned by
-// Python (which may be freed immediately after RequestAsync returns).
+// RequestAsync copies C-owned data before dispatching its goroutine.
 // ---------------------------------------------------------------------------
 
 type requestConfig struct {
@@ -443,11 +447,10 @@ type requestConfig struct {
 	cacheKeyHash             string             // pre-computed by Python to skip CGO in buildCacheKey
 }
 
-// deepCopyRequestOptions converts a C RequestOptions pointer into a
-// goroutine-safe requestConfig.  All C strings and byte arrays are copied
-// into Go-managed memory.  The caller (RequestAsync) may free the original
-// C opts immediately after this function returns.
-func deepCopyRequestOptions(opts *C.RequestOptions) (cfg *requestConfig) {
+// requestConfigFromOptions converts C request options to the shared Go form.
+// Async callers copy the request body; synchronous callers may borrow it until
+// ExecuteRequest returns.
+func requestConfigFromOptions(opts *C.RequestOptions, copyBody bool) (cfg *requestConfig) {
 	cfg = &requestConfig{
 		method:                   C.GoString(opts.method),
 		url:                      C.GoString(opts.url),
@@ -502,13 +505,14 @@ func deepCopyRequestOptions(opts *C.RequestOptions) (cfg *requestConfig) {
 		}
 	}()
 
-	// Body — copy to Go heap so the goroutine owns the memory.
-	// Python owns the original C buffer and may free it immediately after
-	// RequestAsync returns (the goroutine runs asynchronously).  Using
-	// unsafe.Slice would alias Python memory, risking use-after-free if
-	// Python's async timeout fires before the goroutine reads the body.
+	// Async requests copy the body because Python may release the C buffer as
+	// soon as RequestAsync returns. ExecuteRequest borrows it synchronously.
 	if bl := int(opts.body_len); bl > 0 && opts.body != nil {
-		cfg.body = C.GoBytes(unsafe.Pointer(opts.body), C.int(bl))
+		if copyBody {
+			cfg.body = C.GoBytes(unsafe.Pointer(opts.body), C.int(bl))
+		} else {
+			cfg.body = unsafe.Slice((*byte)(unsafe.Pointer(opts.body)), bl)
+		}
 	}
 
 	// Stream I/O strings (guard against NULL from Python ffi.NULL)
@@ -769,250 +773,6 @@ func freeCStrArr(arr **C.char, length int) {
 	C.free(unsafe.Pointer(arr))
 }
 
-func buildCacheKey(opts *C.RequestOptions) string {
-	ci := C.GoString(opts.client_identifier)
-	px := C.GoString(opts.proxy)
-	sn := C.GoString(opts.server_name_overwrite)
-	la := C.GoString(opts.local_address)
-
-	h := sha256.New()
-	fmt.Fprintf(h, "%s|%s|%s|%s|%d|%d|%d|%d|%d|%d|%d|%d|%d|%d|%d|%d|%d|%d|%d|%d|%d|%d|%d|%d|%d|%d|%d|%d|%d|%d",
-		ci, px, sn, la,
-		int(opts.insecure_skip_verify),
-		int(opts.force_http1),
-		int(opts.with_random_tls_extension_order),
-		int(opts.with_protocol_racing),
-		int(opts.max_idle_connections),
-		int(opts.max_idle_connections_per_host),
-		int(opts.max_connections_per_host),
-		int(opts.max_response_header_bytes),
-		int(opts.write_buffer_size),
-		int(opts.read_buffer_size),
-		int(opts.idle_conn_timeout_seconds),
-		int(opts.disable_keep_alives),
-		int(opts.disable_compression),
-		int(opts.disable_http3),
-		int(opts.disable_ipv4),
-		int(opts.disable_ipv6),
-		int(opts.follow_redirects),
-		int(opts.without_cookie_jar),
-		int(opts.allow_empty_cookies),
-		int(opts.with_default_bad_pin_handler),
-		int(opts.timeout_seconds),
-		int(opts.timeout_milliseconds),
-		int(opts.tcp_ttl),
-		int(opts.tcp_window_size),
-		int(opts.tcp_window_scale),
-		int(opts.tcp_mss),
-	)
-	// Include pseudo-header orders in the cache key so different orders
-	// produce distinct transports.
-	phLen := int(opts.pseudo_header_order_len)
-	if phLen > 0 && opts.pseudo_header_order != nil {
-		phSlice := unsafe.Slice(opts.pseudo_header_order, phLen)
-		for i := 0; i < phLen; i++ {
-			fmt.Fprintf(h, ":%s", C.GoString(phSlice[i]))
-		}
-	} else {
-		fmt.Fprint(h, ":<default>")
-	}
-	h3phLen := int(opts.h3_pseudo_header_order_len)
-	if h3phLen > 0 && opts.h3_pseudo_header_order != nil {
-		h3phSlice := unsafe.Slice(opts.h3_pseudo_header_order, h3phLen)
-		for i := 0; i < h3phLen; i++ {
-			fmt.Fprintf(h, "#%s", C.GoString(h3phSlice[i]))
-		}
-	} else {
-		fmt.Fprint(h, "#<default>")
-	}
-	// Default/connect headers affect client behaviour.
-	// Collect entries into a flat slice, sort by key, hash — avoids
-	// building an intermediate http.Header map that would be discarded
-	// on every cache-key computation (including cache hits).
-	dhLen := int(opts.default_headers_len)
-	if dhLen > 0 && opts.default_headers != nil {
-		dhSlice := unsafe.Slice(opts.default_headers, dhLen)
-		type dhEntry struct {
-			key, val string
-		}
-		entries := make([]dhEntry, dhLen)
-		for i := 0; i < dhLen; i++ {
-			entries[i] = dhEntry{C.GoString(dhSlice[i].key), C.GoString(dhSlice[i].value)}
-		}
-		sort.SliceStable(entries, func(i, j int) bool { return entries[i].key < entries[j].key })
-		for _, e := range entries {
-			fmt.Fprintf(h, "~dh:%s=%s", e.key, e.val)
-		}
-	}
-	chLen := int(opts.connect_headers_len)
-	if chLen > 0 && opts.connect_headers != nil {
-		chSlice := unsafe.Slice(opts.connect_headers, chLen)
-		type chEntry struct {
-			key, val string
-		}
-		entries := make([]chEntry, chLen)
-		for i := 0; i < chLen; i++ {
-			entries[i] = chEntry{C.GoString(chSlice[i].key), C.GoString(chSlice[i].value)}
-		}
-		sort.SliceStable(entries, func(i, j int) bool { return entries[i].key < entries[j].key })
-		for _, e := range entries {
-			fmt.Fprintf(h, "~ch:%s=%s", e.key, e.val)
-		}
-	}
-	// Certificate pinning — collect into a flat slice, sort by host,
-	// hash.  Avoids building an intermediate map that would be discarded
-	// on every cache-key computation.
-	cpLen := int(opts.certificate_pinning_hosts_len)
-	if cpLen > 0 && opts.certificate_pinning_hosts != nil {
-		cpSlice := unsafe.Slice(opts.certificate_pinning_hosts, cpLen)
-		type cpEntry struct {
-			host string
-			pins []string
-		}
-		entries := make([]cpEntry, cpLen)
-		for i := 0; i < cpLen; i++ {
-			entries[i].host = C.GoString(cpSlice[i].host)
-			pl := int(cpSlice[i].pins_len)
-			if pl > 0 && cpSlice[i].pins != nil {
-				pinSlice := unsafe.Slice(cpSlice[i].pins, pl)
-				entries[i].pins = make([]string, pl)
-				for j := 0; j < pl; j++ {
-					entries[i].pins[j] = C.GoString(pinSlice[j])
-				}
-			}
-		}
-		sort.SliceStable(entries, func(i, j int) bool { return entries[i].host < entries[j].host })
-		for _, e := range entries {
-			fmt.Fprintf(h, "^cp:%s=", e.host)
-			for _, p := range e.pins {
-				fmt.Fprintf(h, "%s,", p)
-			}
-		}
-	}
-	// Client certificates – hash the raw PEM bytes
-	ccLen := int(opts.client_certificates_len)
-	if ccLen > 0 && opts.client_certificates != nil {
-		ccSlice := unsafe.Slice(opts.client_certificates, ccLen)
-		for i := 0; i < ccLen; i++ {
-			if cpl := int(ccSlice[i].cert_pem_len); cpl > 0 && ccSlice[i].cert_pem != nil {
-				certBytes := C.GoBytes(unsafe.Pointer(ccSlice[i].cert_pem), C.int(cpl))
-				fmt.Fprintf(h, "|cc:%x", sha256.Sum256(certBytes))
-			}
-			if kpl := int(ccSlice[i].key_pem_len); kpl > 0 && ccSlice[i].key_pem != nil {
-				keyBytes := C.GoBytes(unsafe.Pointer(ccSlice[i].key_pem), C.int(kpl))
-				fmt.Fprintf(h, "|ck:%x", sha256.Sum256(keyBytes))
-			}
-		}
-	}
-	// Custom TLS client profile
-	if opts.custom_tls_client != nil {
-		ctc := opts.custom_tls_client
-		fmt.Fprintf(h, "|ja3=%s|cf=%d|rsl=%d|sid=%d|h3pp=%d|h3sgf=%d|ah=%d",
-			C.GoString(ctc.ja3_string),
-			uint32(ctc.connection_flow),
-			uint16(ctc.record_size_limit),
-			uint32(ctc.stream_id),
-			uint32(ctc.h3_priority_param),
-			int(ctc.h3_send_grease_frames),
-			int(ctc.allow_http),
-		)
-		// String arrays
-		hashStringArray(h, ctc.h2_settings_order, int(ctc.h2_settings_order_len), "|h2so=")
-		hashStringArray(h, ctc.h3_settings_order, int(ctc.h3_settings_order_len), "|h3so=")
-		hashStringArray(h, ctc.h3_pseudo_header_order, int(ctc.h3_pseudo_header_order_len), "|h3ph=")
-		hashStringArray(h, ctc.cert_compression_algos, int(ctc.cert_compression_algos_len), "|cca=")
-		hashStringArray(h, ctc.key_share_curves, int(ctc.key_share_curves_len), "|ksc=")
-		hashStringArray(h, ctc.alpn_protocols, int(ctc.alpn_protocols_len), "|alpn=")
-		hashStringArray(h, ctc.alps_protocols, int(ctc.alps_protocols_len), "|alps=")
-		hashStringArray(h, ctc.pseudo_header_order, int(ctc.pseudo_header_order_len), "|ph=")
-		hashStringArray(h, ctc.supported_delegated_credentials_algorithms, int(ctc.supported_delegated_credentials_algorithms_len), "|sdca=")
-		hashStringArray(h, ctc.supported_signature_algorithms, int(ctc.supported_signature_algorithms_len), "|ssa=")
-		hashStringArray(h, ctc.supported_versions, int(ctc.supported_versions_len), "|sv=")
-		// H2 settings key-value — sort by key for deterministic cache keys
-		if h2l := int(ctc.h2_settings_len); h2l > 0 {
-			if ctc.h2_settings_keys != nil && ctc.h2_settings_values != nil {
-				sl := unsafe.Slice(ctc.h2_settings_keys, h2l)
-				vl := unsafe.Slice(ctc.h2_settings_values, h2l)
-				type h2kv struct {
-					k string
-					v C.uint
-				}
-				pairs := make([]h2kv, h2l)
-				for i := 0; i < h2l; i++ {
-					pairs[i] = h2kv{C.GoString(sl[i]), vl[i]}
-				}
-				sort.Slice(pairs, func(i, j int) bool { return pairs[i].k < pairs[j].k })
-				for _, p := range pairs {
-					fmt.Fprintf(h, "|h2s:%s=%d", p.k, p.v)
-				}
-			}
-		}
-		// H3 settings key-value — sort by key for deterministic cache keys
-		if h3l := int(ctc.h3_settings_len); h3l > 0 {
-			if ctc.h3_settings_keys != nil && ctc.h3_settings_values != nil {
-				sl := unsafe.Slice(ctc.h3_settings_keys, h3l)
-				vl := unsafe.Slice(ctc.h3_settings_values, h3l)
-				type h3kv struct {
-					k string
-					v C.ulonglong
-				}
-				pairs := make([]h3kv, h3l)
-				for i := 0; i < h3l; i++ {
-					pairs[i] = h3kv{C.GoString(sl[i]), vl[i]}
-				}
-				sort.Slice(pairs, func(i, j int) bool { return pairs[i].k < pairs[j].k })
-				for _, p := range pairs {
-					fmt.Fprintf(h, "|h3s:%s=%d", p.k, p.v)
-				}
-			}
-		}
-		// ECH payloads
-		if epl := int(ctc.ech_candidate_payloads_len); epl > 0 && ctc.ech_candidate_payloads != nil {
-			epSlice := unsafe.Slice(ctc.ech_candidate_payloads, epl)
-			for i := 0; i < epl; i++ {
-				fmt.Fprintf(h, "|echp:%d", epSlice[i])
-			}
-		}
-		// ECH cipher suites — sort by kdfId+aeadId for deterministic cache keys
-		if ecl := int(ctc.ech_candidate_cipher_suites_len); ecl > 0 && ctc.ech_candidate_cipher_suites != nil {
-			ecSlice := unsafe.Slice(ctc.ech_candidate_cipher_suites, ecl)
-			type ecEntry struct {
-				kdfId  string
-				aeadId string
-			}
-			entries := make([]ecEntry, ecl)
-			for i := 0; i < ecl; i++ {
-				entries[i] = ecEntry{C.GoString(ecSlice[i].kdfId), C.GoString(ecSlice[i].aeadId)}
-			}
-			sort.Slice(entries, func(i, j int) bool {
-				if entries[i].kdfId != entries[j].kdfId {
-					return entries[i].kdfId < entries[j].kdfId
-				}
-				return entries[i].aeadId < entries[j].aeadId
-			})
-			for _, e := range entries {
-				fmt.Fprintf(h, "|echcs:%s,%s", e.kdfId, e.aeadId)
-			}
-		}
-		// Priority frames
-		if pfl := int(ctc.priority_frames_len); pfl > 0 && ctc.priority_frames != nil {
-			pfSlice := unsafe.Slice(ctc.priority_frames, pfl)
-			for i := 0; i < pfl; i++ {
-				fmt.Fprintf(h, "|pf:%d,%d,%d,%d", pfSlice[i].streamID,
-					pfSlice[i].priorityParam.streamDep,
-					int(pfSlice[i].priorityParam.exclusive),
-					pfSlice[i].priorityParam.weight)
-			}
-		}
-		// Header priority
-		if ctc.header_priority != nil {
-			hp := ctc.header_priority
-			fmt.Fprintf(h, "|hp:%d,%d,%d", hp.streamDep, int(hp.exclusive), hp.weight)
-		}
-	}
-	return fmt.Sprintf("%x", h.Sum(nil))
-}
-
 func hashStringArray(h hash.Hash, arr **C.char, length int, prefix string) {
 	if length > 0 && arr != nil {
 		slice := unsafe.Slice(arr, length)
@@ -1024,7 +784,6 @@ func hashStringArray(h hash.Hash, arr **C.char, length int, prefix string) {
 }
 
 // b2i converts a bool to 0/1 int for %%d format specifiers.
-// Keeps buildCacheKeyFromConfig byte-identical with buildCacheKey.
 func b2i(b bool) int {
 	if b {
 		return 1
@@ -1032,97 +791,6 @@ func b2i(b bool) int {
 	return 0
 }
 
-func getOrCreateClient(opts *C.RequestOptions) (tls_client.HttpClient, error) {
-	startEviction()
-
-	// Fast path: use Python's pre-computed hash to skip all CGO calls.
-	key := ""
-	if opts.cache_key_hash != nil {
-		key = C.GoString(opts.cache_key_hash)
-	}
-	if key == "" {
-		key = buildCacheKey(opts)
-	}
-
-	if entry, ok := clientPool.Load(key); ok {
-		if pe, ok := entry.(*poolEntry); ok {
-			pe.lastAccess.Store(time.Now().UnixNano())
-			return pe.client, nil
-		}
-	}
-
-	// Serialise construction so we never build two identical clients.
-	clientPoolMu.Lock()
-	defer clientPoolMu.Unlock()
-
-	// Double-check after acquiring the lock.
-	if entry, ok := clientPool.Load(key); ok {
-		if pe, ok := entry.(*poolEntry); ok {
-			pe.lastAccess.Store(time.Now().UnixNano())
-			return pe.client, nil
-		}
-	}
-
-	client, err := buildClient(opts)
-	if err != nil {
-		return nil, err
-	}
-
-	pe := &poolEntry{client: client}
-	pe.lastAccess.Store(time.Now().UnixNano())
-	clientPool.Store(key, pe)
-	return client, nil
-}
-
-func buildClient(opts *C.RequestOptions) (tls_client.HttpClient, error) {
-	// Convert C struct → requestConfig and delegate to buildClientFromConfig,
-	// eliminating the ~200-line duplication with the async path.
-	cfg := &requestConfig{
-		clientIdentifier:         C.GoString(opts.client_identifier),
-		timeoutSeconds:           int(opts.timeout_seconds),
-		timeoutMilliseconds:      int(opts.timeout_milliseconds),
-		followRedirects:          int(opts.follow_redirects) != 0,
-		insecureSkipVerify:       int(opts.insecure_skip_verify) != 0,
-		forceHttp1:               int(opts.force_http1) != 0,
-		withRandomTLSExtOrder:    int(opts.with_random_tls_extension_order) != 0,
-		withProtocolRacing:       int(opts.with_protocol_racing) != 0,
-		serverNameOverwrite:      C.GoString(opts.server_name_overwrite),
-		localAddress:             C.GoString(opts.local_address),
-		proxy:                    C.GoString(opts.proxy),
-		maxIdleConns:             int(opts.max_idle_connections),
-		maxIdleConnsPerHost:      int(opts.max_idle_connections_per_host),
-		maxConnsPerHost:          int(opts.max_connections_per_host),
-		maxResponseHeaderBytes:   int(opts.max_response_header_bytes),
-		writeBufferSize:          int(opts.write_buffer_size),
-		readBufferSize:           int(opts.read_buffer_size),
-		idleConnTimeoutSeconds:   int(opts.idle_conn_timeout_seconds),
-		disableKeepAlives:        int(opts.disable_keep_alives) != 0,
-		disableCompression:       int(opts.disable_compression) != 0,
-		allowEmptyCookies:        int(opts.allow_empty_cookies) != 0,
-		disableHTTP3:             int(opts.disable_http3) != 0,
-		disableIPv4:              int(opts.disable_ipv4) != 0,
-		disableIPv6:              int(opts.disable_ipv6) != 0,
-		tcpTTL:                   int(opts.tcp_ttl),
-		tcpWindowSize:            int(opts.tcp_window_size),
-		tcpWindowScale:           int(opts.tcp_window_scale),
-		tcpMSS:                   int(opts.tcp_mss),
-		withoutCookieJar:         int(opts.without_cookie_jar) != 0,
-		catchPanics:              int(opts.catch_panics) != 0,
-		withDebug:                int(opts.with_debug) != 0,
-		withDefaultBadPinHandler: int(opts.with_default_bad_pin_handler) != 0,
-		pseudoHeaderOrder:        cStrSlice(opts.pseudo_header_order, int(opts.pseudo_header_order_len)),
-		h3PseudoHeaderOrder:      cStrSlice(opts.h3_pseudo_header_order, int(opts.h3_pseudo_header_order_len)),
-		defaultHeaders:           cHeadersToHTTP(opts.default_headers, int(opts.default_headers_len)),
-		connectHeaders:           cHeadersToHTTP(opts.connect_headers, int(opts.connect_headers_len)),
-		certificatePinningHosts:  cPinsToMap(opts.certificate_pinning_hosts, int(opts.certificate_pinning_hosts_len)),
-		clientCertificates:       cClientCerts(opts.client_certificates, int(opts.client_certificates_len)),
-		customTLSClient:          opts.custom_tls_client,
-	}
-	return buildClientFromConfig(cfg)
-}
-
-// cHeadersToHTTP converts a C HttpHeader array to Go http.Header (map[string][]string).
-// Multiple entries with the same key are accumulated into a slice.
 func cHeadersToHTTP(headers *C.HttpHeader, length int) http.Header {
 	h := http.Header{}
 	slice := unsafe.Slice(headers, length)
@@ -1864,51 +1532,6 @@ func readBodyStreamToFileFromConfig(body io.Reader, cfg *requestConfig) ([]byte,
 // Exported C functions
 // ---------------------------------------------------------------------------
 
-// readBodyStreamToFile reads the response body in chunks and writes them to
-// the file specified by opts.stream_output_path.  Returns nil body bytes —
-// the payload lives exclusively on disk.
-func readBodyStreamToFile(body io.Reader, opts *C.RequestOptions) ([]byte, error) {
-	path := C.GoString(opts.stream_output_path)
-
-	f, err := os.OpenFile(path, os.O_APPEND|os.O_WRONLY|os.O_CREATE, 0o600)
-	if err != nil {
-		return nil, fmt.Errorf("stream: cannot open output file: %w", err)
-	}
-	defer f.Close()
-
-	blockSize := 8192 // default 8 KB
-	if bs := int(opts.stream_output_block_size); bs > 0 {
-		blockSize = bs
-	}
-	buf := make([]byte, blockSize)
-
-	for {
-		n, readErr := body.Read(buf)
-		if n > 0 {
-			if _, writeErr := f.Write(buf[:n]); writeErr != nil {
-				return nil, fmt.Errorf("stream: write error: %w", writeErr)
-			}
-		}
-		if readErr == io.EOF {
-			break
-		}
-		if readErr != nil {
-			return nil, fmt.Errorf("stream: read error: %w", readErr)
-		}
-	}
-
-	// Optional EOF marker – guard against NULL pointer.
-	var eof string
-	if opts.stream_output_eof_symbol != nil {
-		eof = C.GoString(opts.stream_output_eof_symbol)
-	}
-	if eof != "" {
-		f.Write([]byte(eof))
-	}
-
-	return nil, nil
-}
-
 // packResponseArena allocates a single combined HttpHeader array and a single
 // C string arena containing all header key+value and cookie name+value strings.
 // Every key/value pointer in the HttpHeader array points into the arena.
@@ -2012,24 +1635,27 @@ func packResponseArena(result *C.ResponseResult, respHeaders http.Header, respCo
 	}
 }
 
-//export ExecuteRequest
-func ExecuteRequest(opts *C.RequestOptions) *C.ResponseResult {
-	// Heap-allocate the result so the pointer remains valid after return.
+// newErrorResponse returns an owned C response containing only an error.
+func newErrorResponse(message string) *C.ResponseResult {
 	result := (*C.ResponseResult)(C.malloc(C.size_t(unsafe.Sizeof(C.ResponseResult{}))))
 	if result == nil {
 		return nil
 	}
 	*result = C.ResponseResult{}
+	result.err_msg = C.CString(message)
+	return result
+}
 
-	// Catch every panic inside Go and convert it into a C-accessible error
-	// string so the Python side never sees a hard crash.
+//export ExecuteRequest
+func ExecuteRequest(opts *C.RequestOptions) (result *C.ResponseResult) {
 	defer func() {
 		if r := recover(); r != nil {
-			// Free any previously allocated error message to prevent leaks
-			// (e.g. if a C.CString was already set before the panic).
+			if result == nil {
+				result = newErrorResponse(fmt.Sprintf("go panic: %v", r))
+				return
+			}
 			if result.err_msg != nil {
 				C.free(unsafe.Pointer(result.err_msg))
-				result.err_msg = nil
 			}
 			result.err_msg = C.CString(fmt.Sprintf("go panic: %v", r))
 			result.status_code = 0
@@ -2037,168 +1663,16 @@ func ExecuteRequest(opts *C.RequestOptions) *C.ResponseResult {
 	}()
 
 	if opts == nil {
-		result.err_msg = C.CString("RequestOptions pointer is nil")
-		return result
+		return newErrorResponse("RequestOptions pointer is nil")
 	}
-
-	client, err := getOrCreateClient(opts)
-	if err != nil {
-		result.err_msg = C.CString(fmt.Sprintf("failed to obtain client: %v", err))
-		return result
+	cfg := requestConfigFromOptions(opts, false)
+	if cfg == nil {
+		return newErrorResponse("failed to copy RequestOptions")
 	}
-
-	// ---- build http.Request ------------------------------------------------
-
-	method := C.GoString(opts.method)
-	urlStr := C.GoString(opts.url)
-
-	var bodyReader io.Reader
-	bodyLen := int(opts.body_len)
-	if bodyLen > 0 && opts.body != nil {
-		// Zero-copy: the []byte points directly into Python-kept-alive C memory.
-		bodyData := unsafe.Slice((*byte)(unsafe.Pointer(opts.body)), bodyLen)
-		bodyReader = bytes.NewReader(bodyData)
+	if cfg.customTLSClient != nil {
+		defer freeCustomTLSClient(cfg.customTLSClient)
 	}
-
-	req, err := http.NewRequest(method, urlStr, bodyReader)
-	if err != nil {
-		result.err_msg = C.CString(fmt.Sprintf("failed to create request: %v", err))
-		return result
-	}
-
-	// Override the Host header if explicitly provided (e.g. for sending
-	// requests through a proxy while spoofing a different Host).
-	if hostOverride := C.GoString(opts.request_host_override); hostOverride != "" {
-		req.Host = hostOverride
-	}
-
-	// ---- headers -----------------------------------------------------------
-
-	headersLen := int(opts.headers_len)
-	if headersLen > 0 && opts.headers != nil {
-		headers := http.Header{}
-
-		headerSlice := unsafe.Slice(opts.headers, headersLen)
-		for i := 0; i < headersLen; i++ {
-			key := C.GoString(headerSlice[i].key)
-			value := C.GoString(headerSlice[i].value)
-			headers[key] = []string{value}
-		}
-
-		orderLen := int(opts.header_order_len)
-		if orderLen > 0 && opts.header_order != nil {
-			orderSlice := unsafe.Slice(opts.header_order, orderLen)
-			var order []string
-			for i := 0; i < orderLen; i++ {
-				order = append(order, C.GoString(orderSlice[i]))
-			}
-			headers[http.HeaderOrderKey] = order
-		}
-
-		req.Header = headers
-	}
-
-	// Pseudo-header order is applied at transport creation time via the
-	// client profile (see buildClient).  No per‑request work needed here.
-
-	// ---- request cookies ---------------------------------------------------
-
-	// Attach per-request cookies directly to the request rather than
-	// injecting them into the shared client CookieJar (which would cause
-	// jar bloat and data races across concurrent requests).
-	if cookiesLen := int(opts.request_cookies_len); cookiesLen > 0 && opts.request_cookies != nil {
-		cookieSlice := unsafe.Slice(opts.request_cookies, cookiesLen)
-		for i := 0; i < cookiesLen; i++ {
-			req.AddCookie(&http.Cookie{
-				Name:  C.GoString(cookieSlice[i].key),
-				Value: C.GoString(cookieSlice[i].value),
-			})
-		}
-	}
-
-	// ---- execute -----------------------------------------------------------
-
-	resp, reqErr := client.Do(req)
-	if reqErr != nil {
-		result.err_msg = C.CString(fmt.Sprintf("request failed: %v", reqErr))
-		return result
-	}
-	// Use a closure so Body.Close() is called on the final value of resp.Body
-	// (which may be replaced by DecompressBodyByType below).
-	defer func() { resp.Body.Close() }()
-
-	// ---- read response body -----------------------------------------------
-
-	// Auto-decompress gzip/deflate/brotli encoded bodies (matches existing
-	// cffi_src behaviour).  Raw bytes are still returned — the Python side
-	// receives the decompressed payload.
-	// Skip manual decompression when DisableCompression is requested.
-	if int(opts.disable_compression) == 0 && !resp.Uncompressed {
-		ce := resp.Header.Get("Content-Encoding")
-		resp.Body = http.DecompressBodyByType(resp.Body, ce)
-	}
-
-	// Guard against NULL pointer from Python's ffi.NULL (cffi → C boundary).
-	var streamPath string
-	if opts.stream_output_path != nil {
-		streamPath = C.GoString(opts.stream_output_path)
-	}
-	var respBody []byte
-	var readErr error
-	var bodyDirectToC bool
-
-	if streamPath != "" {
-		// ---- streaming mode: write chunks to disk ------------------------
-		respBody, readErr = readBodyStreamToFile(resp.Body, opts)
-		// Body is empty when streaming — data went to the file.
-	} else if cBody, cLen, cErr := readBodyToCHeap(resp.Body, resp.ContentLength); cBody != nil {
-		// Fast path: body read directly into C heap — no Go intermediate.
-		result.body = cBody
-		result.body_len = C.int(cLen)
-		bodyDirectToC = true
-	} else if cErr != nil {
-		result.err_msg = C.CString(fmt.Sprintf("failed to read response body: %v", cErr))
-		return result
-	} else {
-		respBody, readErr = readAllPooled(resp.Body)
-	}
-	if !bodyDirectToC {
-		if readErr != nil {
-			result.err_msg = C.CString(fmt.Sprintf("failed to read response body: %v", readErr))
-			return result
-		}
-		result.body_len = C.int(len(respBody))
-		if len(respBody) > 0 {
-			cBody := C.malloc(C.size_t(len(respBody)))
-			if cBody == nil {
-				result.err_msg = C.CString("failed to allocate memory for response body")
-				return result
-			}
-			cSlice := unsafe.Slice((*byte)(cBody), len(respBody))
-			copy(cSlice, respBody)
-			result.body = (*C.char)(cBody)
-		}
-	}
-
-	// ---- populate C result ------------------------------------------------
-
-	result.status_code = C.int(resp.StatusCode)
-
-	// Final URL after redirects
-	if resp.Request != nil && resp.Request.URL != nil {
-		result.target_url = C.CString(resp.Request.URL.String())
-	}
-
-	// HTTP protocol version used
-	result.used_protocol = C.CString(resp.Proto)
-
-	// ---- response headers + cookies (arena-based, single C allocation) -----
-	packResponseArena(result, resp.Header, resp.Cookies())
-	if result.err_msg != nil {
-		return result
-	}
-
-	return result
+	return executeRequestFromConfig(cfg)
 }
 
 //export FreeResponse
@@ -2343,7 +1817,7 @@ func RequestAsync(opts *C.RequestOptions, requestID C.uintptr_t, cb unsafe.Point
 
 	// Step 1-2: Deep-copy all C data into Go heap immediately, on the calling thread.
 	// Python may free the original opts right after this function returns.
-	cfg := deepCopyRequestOptions(opts)
+	cfg := requestConfigFromOptions(opts, true)
 
 	// Step 3-4: Dispatch a goroutine to execute the HTTP request.
 	// The goroutine owns cfg and must clean up customTLSClient when done.

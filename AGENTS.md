@@ -8,7 +8,7 @@ areas during ordinary project work. Update them only through an explicit
 upstream-sync task:
 
 - root Go files, except `tcp_fingerprint.go`, `tcp_socket_unix.go`, and
-  `tcp_socket_windows.go`
+  `tcp_socket_windows.go`, and `tcp_socket_darwin_test.go`
 - `bandwidth/`, `profiles/`, `cffi_src/`, `cffi_dist/`, `example/`, and `tests/`
 
 When a local feature must touch an upstream-owned file, keep the change
@@ -22,8 +22,9 @@ explicitly asks otherwise:
 - `tls_client/`
 - `cffi_binding/`
 - `benchmarks/`
+- `python_tests/`
 - Python packaging files and `Readme.md`
-- the three `tcp_*` local extension files listed above
+- the four `tcp_*` local extension files listed above
 - `.github/workflows/build_workflow.yml`
 
 ## Upstream sync procedure
@@ -35,4 +36,3 @@ explicitly asks otherwise:
    points; do not hand-rewrite conflict-free upstream files.
 4. Run the checks documented in `UPSTREAM_SYNC.md`.
 5. Update only the sync commit/date and overlay list in `UPSTREAM_SYNC.md`.
-

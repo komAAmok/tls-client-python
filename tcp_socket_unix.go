@@ -4,6 +4,7 @@ package tls_client
 
 import (
 	"fmt"
+	"runtime"
 	"syscall"
 )
 
@@ -21,7 +22,15 @@ func setMSS(fd int, mss int) error {
 	if mss <= 0 {
 		return fmt.Errorf("mss value %d out of range", mss)
 	}
-	// TCP_MAXSEG = 2 on both Linux and macOS
+	// Darwin rejects TCP_MAXSEG from net.Dialer.Control because the socket is
+	// not connected yet (EINVAL). The kernel derives the effective MSS from
+	// the route MTU during connect, so this option is best-effort on macOS.
+	// Returning nil here prevents an optional fingerprint hint from aborting
+	// the entire request.
+	if runtime.GOOS == "darwin" {
+		return nil
+	}
+	// TCP_MAXSEG = 2 on supported non-Darwin Unix systems.
 	const tcpMaxSeg = 0x2
 	return syscall.SetsockoptInt(fd, syscall.IPPROTO_TCP, tcpMaxSeg, mss)
 }

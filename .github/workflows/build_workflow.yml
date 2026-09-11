@@ -6,6 +6,10 @@ on:
     paths:
       - 'cffi_binding/**'
       - 'tls_client/**'
+      - 'tcp_*.go'
+      - 'go.mod'
+      - 'go.sum'
+      - 'profiles/**'
     tags:
       - 'v*'
   workflow_dispatch:
@@ -99,6 +103,7 @@ jobs:
           GOARCH: ${{ matrix.goarch }}
         run: |
           mkdir -p ../tls_client/bin
+          find ../tls_client/bin -maxdepth 1 -type f -name 'tls-client-*' -delete
           # 🌟 极客优化：加入 -gcflags、-asmflags 全深度擦除路径元数据，并在 -ldflags 中擦除 -buildid=
           go build -buildmode=c-shared \
                    -buildvcs=false \
@@ -136,6 +141,7 @@ jobs:
         run: |
           python -m pip install --upgrade pip build
           python -m build --wheel -C--build-option=--plat-name=${{ matrix.plat }}
+          python -c "import glob,zipfile; w=glob.glob('dist/*.whl')[-1]; n=[x for x in zipfile.ZipFile(w).namelist() if x.startswith('tls_client/bin/tls-client-')]; assert len(n)==1, 'wheel must contain exactly one native binary: %r' % n"
 
       - name: Upload Platform Wheel Artifact
         uses: actions/upload-artifact@v4
@@ -190,6 +196,7 @@ jobs:
           CC: i686-w64-mingw32-gcc
         run: |
           mkdir -p ../tls_client/bin
+          find ../tls_client/bin -maxdepth 1 -type f -name 'tls-client-*' -delete
           # 🌟 极客优化：加入全深度擦除路径元数据与 buildid
           go build -buildmode=c-shared \
                    -buildvcs=false \
@@ -209,6 +216,7 @@ jobs:
         run: |
           python -m pip install --upgrade pip build
           python -m build --wheel -C--build-option=--plat-name=win32
+          python -c "import glob,zipfile; w=glob.glob('dist/*.whl')[-1]; n=[x for x in zipfile.ZipFile(w).namelist() if x.startswith('tls_client/bin/tls-client-')]; assert len(n)==1, 'wheel must contain exactly one native binary: %r' % n"
 
       - name: Upload Artifact
         uses: actions/upload-artifact@v4
@@ -234,18 +242,21 @@ jobs:
         include:
           - goarch: arm
             goarm: "7"
+            ext: .so
             compiler_pkg: gcc-arm-linux-gnueabihf
             cc: arm-linux-gnueabihf-gcc
             strip_cmd: arm-linux-gnueabihf-strip
             plat: manylinux2014_armv7l
           - goarch: arm64
             goarm: ""
+            ext: .so
             compiler_pkg: gcc-aarch64-linux-gnu
             cc: aarch64-linux-gnu-gcc
             strip_cmd: aarch64-linux-gnu-strip
             plat: manylinux2014_aarch64
           - goarch: "386"
             goarm: ""
+            ext: .so
             compiler_pkg: gcc-multilib
             cc: gcc
             strip_cmd: strip
@@ -287,6 +298,7 @@ jobs:
           CC: ${{ matrix.cc }}
         run: |
           mkdir -p ../tls_client/bin
+          find ../tls_client/bin -maxdepth 1 -type f -name 'tls-client-*' -delete
           # 🌟 极客优化：全深度擦除路径元数据与 buildid
           go build -buildmode=c-shared \
                    -buildvcs=false \
@@ -307,6 +319,7 @@ jobs:
         run: |
           python -m pip install --upgrade pip build
           python -m build --wheel -C--build-option=--plat-name=${{ matrix.plat }}
+          python -c "import glob,zipfile; w=glob.glob('dist/*.whl')[-1]; n=[x for x in zipfile.ZipFile(w).namelist() if x.startswith('tls_client/bin/tls-client-')]; assert len(n)==1, 'wheel must contain exactly one native binary: %r' % n"
 
       - name: Upload Artifact
         uses: actions/upload-artifact@v4
@@ -346,6 +359,7 @@ jobs:
           GOARCH: amd64
         run: |
           mkdir -p ../tls_client/bin
+          find ../tls_client/bin -maxdepth 1 -type f -name 'tls-client-*' -delete
           # 🌟 极客优化：全深度擦除路径元数据与 buildid
           go build -buildmode=c-shared \
                    -buildvcs=false \
@@ -365,6 +379,7 @@ jobs:
       - name: Build Wheel
         run: |
           python3 -m build --wheel -C--build-option=--plat-name=musllinux_1_1_x86_64
+          python3 -c "import glob,zipfile; w=glob.glob('dist/*.whl')[-1]; n=[x for x in zipfile.ZipFile(w).namelist() if x.startswith('tls_client/bin/tls-client-')]; assert len(n)==1, 'wheel must contain exactly one native binary: %r' % n"
 
       - name: Upload Artifact
         uses: actions/upload-artifact@v4
@@ -400,6 +415,7 @@ jobs:
         run: |
           mkdir -p dist
           mkdir -p tls_client/bin
+          find tls_client/bin -maxdepth 1 -type f -name 'tls-client-*' -delete
 
       # 下载所有的平台特定的 .whl 轮子文件和裸二进制文件
       - name: Download All Artifacts

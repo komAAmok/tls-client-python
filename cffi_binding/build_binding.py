@@ -254,7 +254,8 @@ def build_go_library(
         "-buildmode=c-shared",
         "-buildvcs=false",
         "-trimpath",
-        "-ldflags=-s -w",
+        "-tags=netgo,osusergo",
+        "-ldflags=-s -w -buildid=",
         "-o", str(outpath),
         ".",
     ]
