@@ -221,12 +221,12 @@ type poolEntry struct {
 }
 
 var (
-	clientPool        sync.Map
-	clientPoolMu      sync.Mutex
-	poolTTLNs         atomic.Int64 // pool entry idle timeout (nanoseconds); default 5 min
+	clientPool         sync.Map
+	clientPoolMu       sync.Mutex
+	poolTTLNs          atomic.Int64 // pool entry idle timeout (nanoseconds); default 5 min
 	poolScanIntervalNs atomic.Int64 // eviction scan interval (nanoseconds); default 60 s
-	evictionStopCh    chan struct{}
-	evictionOnce      sync.Once
+	evictionStopCh     chan struct{}
+	evictionOnce       sync.Once
 
 	// Eviction metrics — updated atomically by the eviction goroutine.
 	totalEvictions    atomic.Int64 // cumulative entries evicted since process start
@@ -437,10 +437,10 @@ type requestConfig struct {
 	withDefaultBadPinHandler bool
 	requestCookies           []*http.Cookie
 	clientCertificates       []tls.Certificate
-	clientCertPEMs           [][]byte // raw cert PEM for cache-key parity with buildCacheKey
-	clientKeyPEMs            [][]byte // raw key PEM for cache-key parity with buildCacheKey
+	clientCertPEMs           [][]byte           // raw cert PEM for cache-key parity with buildCacheKey
+	clientKeyPEMs            [][]byte           // raw key PEM for cache-key parity with buildCacheKey
 	customTLSClient          *C.CustomTlsClient // deep-copied to C heap; freed after use
-	cacheKeyHash             string            // pre-computed by Python to skip CGO in buildCacheKey
+	cacheKeyHash             string             // pre-computed by Python to skip CGO in buildCacheKey
 }
 
 // deepCopyRequestOptions converts a C RequestOptions pointer into a
@@ -449,41 +449,41 @@ type requestConfig struct {
 // C opts immediately after this function returns.
 func deepCopyRequestOptions(opts *C.RequestOptions) (cfg *requestConfig) {
 	cfg = &requestConfig{
-		method:                 C.GoString(opts.method),
-		url:                    C.GoString(opts.url),
-		proxy:                  C.GoString(opts.proxy),
-		clientIdentifier:       C.GoString(opts.client_identifier),
-		timeoutSeconds:         int(opts.timeout_seconds),
-		timeoutMilliseconds:    int(opts.timeout_milliseconds),
-		followRedirects:        int(opts.follow_redirects) != 0,
-		insecureSkipVerify:     int(opts.insecure_skip_verify) != 0,
-		forceHttp1:             int(opts.force_http1) != 0,
-		withRandomTLSExtOrder:  int(opts.with_random_tls_extension_order) != 0,
-		withProtocolRacing:     int(opts.with_protocol_racing) != 0,
-		serverNameOverwrite:    C.GoString(opts.server_name_overwrite),
-		requestHostOverride:    C.GoString(opts.request_host_override),
-		localAddress:           C.GoString(opts.local_address),
-		maxIdleConns:           int(opts.max_idle_connections),
-		maxIdleConnsPerHost:    int(opts.max_idle_connections_per_host),
-		maxConnsPerHost:        int(opts.max_connections_per_host),
-		maxResponseHeaderBytes: int(opts.max_response_header_bytes),
-		writeBufferSize:        int(opts.write_buffer_size),
-		readBufferSize:         int(opts.read_buffer_size),
-		idleConnTimeoutSeconds: int(opts.idle_conn_timeout_seconds),
-		disableKeepAlives:      int(opts.disable_keep_alives) != 0,
-		disableCompression:     int(opts.disable_compression) != 0,
-		allowEmptyCookies:      int(opts.allow_empty_cookies) != 0,
-		disableHTTP3:           int(opts.disable_http3) != 0,
-		disableIPv4:            int(opts.disable_ipv4) != 0,
-		disableIPv6:            int(opts.disable_ipv6) != 0,
-		tcpTTL:                 int(opts.tcp_ttl),
-		tcpWindowSize:          int(opts.tcp_window_size),
-		tcpWindowScale:         int(opts.tcp_window_scale),
-		tcpMSS:                 int(opts.tcp_mss),
-		withoutCookieJar:       int(opts.without_cookie_jar) != 0,
-		catchPanics:            int(opts.catch_panics) != 0,
-		withDebug:              int(opts.with_debug) != 0,
-		streamOutputBlockSize:  int(opts.stream_output_block_size),
+		method:                   C.GoString(opts.method),
+		url:                      C.GoString(opts.url),
+		proxy:                    C.GoString(opts.proxy),
+		clientIdentifier:         C.GoString(opts.client_identifier),
+		timeoutSeconds:           int(opts.timeout_seconds),
+		timeoutMilliseconds:      int(opts.timeout_milliseconds),
+		followRedirects:          int(opts.follow_redirects) != 0,
+		insecureSkipVerify:       int(opts.insecure_skip_verify) != 0,
+		forceHttp1:               int(opts.force_http1) != 0,
+		withRandomTLSExtOrder:    int(opts.with_random_tls_extension_order) != 0,
+		withProtocolRacing:       int(opts.with_protocol_racing) != 0,
+		serverNameOverwrite:      C.GoString(opts.server_name_overwrite),
+		requestHostOverride:      C.GoString(opts.request_host_override),
+		localAddress:             C.GoString(opts.local_address),
+		maxIdleConns:             int(opts.max_idle_connections),
+		maxIdleConnsPerHost:      int(opts.max_idle_connections_per_host),
+		maxConnsPerHost:          int(opts.max_connections_per_host),
+		maxResponseHeaderBytes:   int(opts.max_response_header_bytes),
+		writeBufferSize:          int(opts.write_buffer_size),
+		readBufferSize:           int(opts.read_buffer_size),
+		idleConnTimeoutSeconds:   int(opts.idle_conn_timeout_seconds),
+		disableKeepAlives:        int(opts.disable_keep_alives) != 0,
+		disableCompression:       int(opts.disable_compression) != 0,
+		allowEmptyCookies:        int(opts.allow_empty_cookies) != 0,
+		disableHTTP3:             int(opts.disable_http3) != 0,
+		disableIPv4:              int(opts.disable_ipv4) != 0,
+		disableIPv6:              int(opts.disable_ipv6) != 0,
+		tcpTTL:                   int(opts.tcp_ttl),
+		tcpWindowSize:            int(opts.tcp_window_size),
+		tcpWindowScale:           int(opts.tcp_window_scale),
+		tcpMSS:                   int(opts.tcp_mss),
+		withoutCookieJar:         int(opts.without_cookie_jar) != 0,
+		catchPanics:              int(opts.catch_panics) != 0,
+		withDebug:                int(opts.with_debug) != 0,
+		streamOutputBlockSize:    int(opts.stream_output_block_size),
 		withDefaultBadPinHandler: int(opts.with_default_bad_pin_handler) != 0,
 	}
 
@@ -1227,7 +1227,7 @@ func buildCustomProfileFromC(ctc *C.CustomTlsClient) (profiles.ClientProfile, er
 		ja3Str, supportedSigAlgs, supportedDelCredAlgs,
 		supportedVersions, keyShareCurves, alpnProtocols,
 		alpsProtocols, echCipherSuites, echPayloads,
-		certCompressionAlgos, uint16(ctc.record_size_limit),
+		certCompressionAlgos, uint16(ctc.record_size_limit), "",
 	)
 	if err != nil {
 		var zero profiles.ClientProfile

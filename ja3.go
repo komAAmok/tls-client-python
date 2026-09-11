@@ -6,15 +6,35 @@ import (
 	"strconv"
 	"strings"
 
+	"github.com/bogdanfinn/tls-client/profiles"
 	tls "github.com/bogdanfinn/utls"
 )
+
+// extensionTrustAnchors is the trust_anchors extension Chrome 144 and later
+// send. utls has no constant for it.
+// https://source.chromium.org/search?q=TLSEXT_TYPE_trust_anchors
+const extensionTrustAnchors uint16 = 0xca34
 
 type CandidateCipherSuites struct {
 	KdfId  string
 	AeadId string
 }
 
-func GetSpecFactoryFromJa3String(ja3String string, supportedSignatureAlgorithms, supportedDelegatedCredentialsAlgorithms, supportedVersions, keyShareCurves, supportedProtocolsALPN, supportedProtocolsALPS []string, echCandidateCipherSuites []CandidateCipherSuites, candidatePayloads []uint16, certCompressionAlgorithms []string, recordSizeLimit uint16) (func() (tls.ClientHelloSpec, error), error) {
+func GetSpecFactoryFromJa3String(ja3String string, supportedSignatureAlgorithms, supportedDelegatedCredentialsAlgorithms, supportedVersions, keyShareCurves, supportedProtocolsALPN, supportedProtocolsALPS []string, echCandidateCipherSuites []CandidateCipherSuites, candidatePayloads []uint16, certCompressionAlgorithms []string, recordSizeLimit uint16, trustAnchorsPayload string) (func() (tls.ClientHelloSpec, error), error) {
+	// The anchor order is drawn once here rather than inside the factory, because
+	// Chromium keeps one order for the life of a process and the factory runs per
+	// ClientHello.
+	var trustAnchors []byte
+
+	if trustAnchorsPayload != "" {
+		var err error
+
+		trustAnchors, err = profiles.BuildTrustAnchorsPayload(trustAnchorsPayload)
+		if err != nil {
+			return nil, fmt.Errorf("can not build the trust anchors extension: %w", err)
+		}
+	}
+
 	return func() (tls.ClientHelloSpec, error) {
 		var mappedSignatureAlgorithms []tls.SignatureScheme
 
@@ -113,11 +133,11 @@ func GetSpecFactoryFromJa3String(ja3String string, supportedSignatureAlgorithms,
 			}
 		}
 
-		return stringToSpec(ja3String, mappedSignatureAlgorithms, mappedDelegatedCredentialsAlgorithms, mappedTlsVersions, mappedKeyShares, mappedHpkeSymmetricCipherSuites, candidatePayloads, supportedProtocolsALPN, supportedProtocolsALPS, mappedCertCompressionAlgorithms, recordSizeLimit)
+		return stringToSpec(ja3String, mappedSignatureAlgorithms, mappedDelegatedCredentialsAlgorithms, mappedTlsVersions, mappedKeyShares, mappedHpkeSymmetricCipherSuites, candidatePayloads, supportedProtocolsALPN, supportedProtocolsALPS, mappedCertCompressionAlgorithms, recordSizeLimit, trustAnchors)
 	}, nil
 }
 
-func stringToSpec(ja3 string, signatureAlgorithms []tls.SignatureScheme, delegatedCredentialsAlgorithms []tls.SignatureScheme, tlsVersions []uint16, keyShares []tls.KeyShare, hpkeSymmetricCipherSuites []tls.HPKESymmetricCipherSuite, candidatePayloads []uint16, supportedProtocolsALPN, supportedProtocolsALPS []string, certCompressionAlgorithms []tls.CertCompressionAlgo, recordSizeLimit uint16) (tls.ClientHelloSpec, error) {
+func stringToSpec(ja3 string, signatureAlgorithms []tls.SignatureScheme, delegatedCredentialsAlgorithms []tls.SignatureScheme, tlsVersions []uint16, keyShares []tls.KeyShare, hpkeSymmetricCipherSuites []tls.HPKESymmetricCipherSuite, candidatePayloads []uint16, supportedProtocolsALPN, supportedProtocolsALPS []string, certCompressionAlgorithms []tls.CertCompressionAlgo, recordSizeLimit uint16, trustAnchors []byte) (tls.ClientHelloSpec, error) {
 	extMap := getExtensionBaseMap()
 	ja3StringParts := strings.Split(ja3, ",")
 
@@ -190,6 +210,10 @@ func stringToSpec(ja3 string, signatureAlgorithms []tls.SignatureScheme, delegat
 		SupportedProtocols: supportedProtocolsALPS,
 	}
 
+	if len(trustAnchors) > 0 {
+		extMap[extensionTrustAnchors] = &tls.GenericExtension{Id: extensionTrustAnchors, Data: trustAnchors}
+	}
+
 	extMap[tls.ExtensionRecordSizeLimit] = &tls.FakeRecordSizeLimitExtension{
 		Limit: recordSizeLimit,
 	}
@@ -209,6 +233,10 @@ func stringToSpec(ja3 string, signatureAlgorithms []tls.SignatureScheme, delegat
 
 		te, ok := extMap[uint16(eId)]
 		if !ok {
+			if uint16(eId) == extensionTrustAnchors {
+				return tls.ClientHelloSpec{}, fmt.Errorf("the ja3 string contains the trust_anchors extension (%d) but no trustAnchorsPayload was provided. Copy the data field of \"Unknown extension 51764\" from the browser fingerprint, or pass \"0000\" for an empty anchor list", extensionTrustAnchors)
+			}
+
 			return tls.ClientHelloSpec{}, fmt.Errorf("unknown extension with id %s provided", e)
 		}
 		exts = append(exts, te)

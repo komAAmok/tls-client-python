@@ -75,6 +75,7 @@ type RequestInput struct {
 	FollowRedirects             bool                `json:"followRedirects"`
 	ForceHttp1                  bool                `json:"forceHttp1"`
 	DisableHttp3                bool                `json:"disableHttp3"`
+	DisableSessionTickets       bool                `json:"disableSessionTickets"`
 	WithProtocolRacing          bool                `json:"withProtocolRacing"`
 	InsecureSkipVerify          bool                `json:"insecureSkipVerify"`
 	IsByteRequest               bool                `json:"isByteRequest"`
@@ -102,6 +103,7 @@ type CustomTlsClient struct {
 	HeaderPriority                          *PriorityParam        `json:"headerPriority"`
 	CertCompressionAlgos                    []string              `json:"certCompressionAlgos"`
 	Ja3String                               string                `json:"ja3String"`
+	TrustAnchorsPayload                     string                `json:"trustAnchorsPayload"`
 	KeyShareCurves                          []string              `json:"keyShareCurves"`
 	ALPNProtocols                           []string              `json:"alpnProtocols"`
 	ALPSProtocols                           []string              `json:"alpsProtocols"`

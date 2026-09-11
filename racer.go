@@ -28,12 +28,20 @@ type protocolRacer struct {
 	badPinHandlerFunc   BadPinHandlerFunc
 	bandwidthTracker    bandwidth.BandwidthTracker
 
+	// dropTransport forgets the transport cached for an address so the next
+	// attempt builds one from a fresh handshake. It is the round tripper's own
+	// eviction, handed over because a raced request returns from RoundTrip
+	// before the branch that would otherwise do it.
+	dropTransport func(addr string, stale http.RoundTripper)
+
 	// HTTP/3 specific settings
 	http3Settings          map[uint64]uint64
 	http3SettingsOrder     []uint64
 	http3PriorityParam     uint32
 	http3PseudoHeaderOrder []string
 	http3SendGreaseFrames  bool
+
+	proxyURL string
 }
 
 func newProtocolRacer(
@@ -44,6 +52,7 @@ func newProtocolRacer(
 	settings map[http2.SettingID]uint32,
 	cachedTransports map[string]http.RoundTripper,
 	cachedTransportsLck *sync.Mutex,
+	dropTransport func(addr string, stale http.RoundTripper),
 	certificatePinner CertificatePinner,
 	badPinHandlerFunc BadPinHandlerFunc,
 	bandwidthTracker bandwidth.BandwidthTracker,
@@ -52,6 +61,7 @@ func newProtocolRacer(
 	http3PriorityParam uint32,
 	http3PseudoHeaderOrder []string,
 	http3SendGreaseFrames bool,
+	proxyURL string,
 ) *protocolRacer {
 	return &protocolRacer{
 		protocolCache:          make(map[string]string),
@@ -62,6 +72,7 @@ func newProtocolRacer(
 		settings:               settings,
 		cachedTransports:       cachedTransports,
 		cachedTransportsLck:    cachedTransportsLck,
+		dropTransport:          dropTransport,
 		certificatePinner:      certificatePinner,
 		badPinHandlerFunc:      badPinHandlerFunc,
 		bandwidthTracker:       bandwidthTracker,
@@ -70,6 +81,7 @@ func newProtocolRacer(
 		http3PriorityParam:     http3PriorityParam,
 		http3PseudoHeaderOrder: http3PseudoHeaderOrder,
 		http3SendGreaseFrames:  http3SendGreaseFrames,
+		proxyURL:               proxyURL,
 	}
 }
 
@@ -100,7 +112,7 @@ func (pr *protocolRacer) tryUseCachedProtocol(req *http.Request, addr string, ge
 		return nil, true // Cached protocol failed, proceed to racing
 	}
 
-	resp, err := transport.RoundTrip(req)
+	resp, err := pr.roundTrip(transport, req, addr)
 	if err == nil {
 		return resp, false // Success!
 	}
@@ -184,7 +196,7 @@ func (pr *protocolRacer) attemptHTTP2(req *http.Request, addr string, getTranspo
 	h2Transport := pr.cachedTransports[addr]
 	pr.cachedTransportsLck.Unlock()
 
-	resp, err := h2Transport.RoundTrip(req)
+	resp, err := pr.roundTrip(h2Transport, req, addr)
 	resultCh <- racingResult{protocol: "h2", response: resp, err: err}
 }
 
@@ -215,6 +227,26 @@ func (pr *protocolRacer) waitForRaceWinner(ctx context.Context, addr string, res
 	return nil, errors.New("http3 racing: both protocols failed to connect")
 }
 
+// roundTrip sends the request over transport and, when the dial underneath
+// reports that the server has moved to a protocol this transport cannot speak,
+// forgets the transport so the next attempt builds one that fits.
+//
+// Clearing the protocol cache alone does not recover from that: the race it
+// falls back to reaches for the same cached transport and fails on the same
+// mismatch, for every request from then on.
+//
+// addr is the dial address rather than the transport's cache key, because only
+// the transport stored under that key dials through the round tripper. The
+// HTTP/3 transport brings its own dialer and never reports this.
+func (pr *protocolRacer) roundTrip(transport http.RoundTripper, req *http.Request, addr string) (*http.Response, error) {
+	resp, err := transport.RoundTrip(req)
+	if err != nil && errors.Is(err, errProtocolChanged) && pr.dropTransport != nil {
+		pr.dropTransport(addr, transport)
+	}
+
+	return resp, err
+}
+
 func (pr *protocolRacer) getTransportKey(protocol, addr string) string {
 	if protocol == "h3" {
 		return addr + ":h3"
@@ -234,8 +266,13 @@ func (pr *protocolRacer) cacheWinningProtocol(addr, protocol string) {
 	pr.protocolCacheMu.Unlock()
 
 	if protocol == "h3" {
+		h3Transport, err := buildHTTP3Transport(pr.getHTTP3Config())
+		if err != nil {
+			// Never cache a nil transport, the next request would panic on it.
+			return
+		}
+
 		pr.cachedTransportsLck.Lock()
-		h3Transport, _ := buildHTTP3Transport(pr.getHTTP3Config())
 		pr.cachedTransports[addr+":h3"] = h3Transport
 		pr.cachedTransportsLck.Unlock()
 	}
@@ -259,6 +296,7 @@ func (pr *protocolRacer) getHTTP3Config() *http3Config {
 		http3PriorityParam:     pr.http3PriorityParam,
 		http3PseudoHeaderOrder: pr.http3PseudoHeaderOrder,
 		http3SendGreaseFrames:  pr.http3SendGreaseFrames,
+		proxyURL:               pr.proxyURL,
 	}
 }
 

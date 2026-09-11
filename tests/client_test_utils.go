@@ -1,11 +1,29 @@
 package tests
 
 import (
+	tls_client "github.com/bogdanfinn/tls-client"
 	"github.com/bogdanfinn/tls-client/profiles"
 	tls "github.com/bogdanfinn/utls"
 )
 
 type TlsApiResponse struct {
+	IP          string `json:"ip"`
+	HTTPVersion string `json:"http_version"`
+	TLS         struct {
+		Ja3        string `json:"ja3"`
+		Ja3Hash    string `json:"ja3_hash"`
+		Ja4        string `json:"ja4"`
+		Ja4R       string `json:"ja4_r"`
+		Extensions []struct {
+			Name                string   `json:"name"`
+			Data                string   `json:"data,omitempty"`
+			SignatureAlgorithms []string `json:"signature_algorithms,omitempty"`
+		} `json:"extensions"`
+	} `json:"tls"`
+	HTTP2 struct {
+		AkamaiFingerprint     string `json:"akamai_fingerprint"`
+		AkamaiFingerprintHash string `json:"akamai_fingerprint_hash"`
+	} `json:"http2"`
 	UserAgent  string `json:"user_agent"`
 	Ja3Hash    string `json:"ja3_hash"`
 	Ja3Text    string `json:"ja3_text"`
@@ -33,9 +51,14 @@ const (
 
 	ja3String             = "ja3String"
 	ja3Hash               = "ja3Hash"
+	ja4String             = "ja4String"
+	ja4Hash               = "ja4Hash"
 	akamaiFingerprint     = "akamaiFingerprint"
 	akamaiFingerprintHash = "akamaiFingerprintHash"
 )
+
+// Only tests that call the self-signed peet endpoint use this option.
+var skipPeetCertVerify = tls_client.WithInsecureSkipVerify()
 
 var clientFingerprints = map[string]map[string]map[string]string{
 	chrome: {

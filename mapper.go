@@ -48,6 +48,14 @@ var signatureAlgorithms = map[string]tls.SignatureScheme{
 	"Ed25519":                tls.Ed25519,
 	"SHA224_RSA":             tls.SHA224_RSA,
 	"SHA224_ECDSA":           tls.SHA224_ECDSA,
+	// Chrome 150 and later advertise the ML-DSA codepoints, and Chrome 152 puts a
+	// GREASE value first. utls replaces the GREASE placeholder with a value drawn
+	// from the connection's seed, so a custom client gets a new one per connection
+	// just like the built in profiles.
+	"MLDSA44": tls.MLDSA44,
+	"MLDSA65": tls.MLDSA65,
+	"MLDSA87": tls.MLDSA87,
+	"GREASE":  tls.SignatureScheme(tls.GREASE_PLACEHOLDER),
 }
 
 var delegatedCredentialsAlgorithms = map[string]tls.SignatureScheme{

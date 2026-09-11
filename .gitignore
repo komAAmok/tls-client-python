@@ -1,4 +1,4 @@
-.idea
+﻿.idea
 example/Example
 venv
 cffi_dist/example_typescript/node_modules
@@ -7,11 +7,19 @@ cffi_dist/example_typescript/package-lock.json
 cffi_dist/example_node/package-lock.json
 cffi_dist/example_node/node_modules
 /cffi_dist/dist/
+cffi_dist/example_csharp/bin/
+cffi_dist/example_csharp/obj/
+mise.local.toml
+
 # Python build artifacts
 /build/
 /dist/
 *.egg-info/
 __pycache__/
 *.pyc
-# NOTE: tls_client/bin/*.so, *.dylib, *.dll are NOT gitignored –
+
+# Local test/build caches
+/.cache/
+
+# NOTE: tls_client/bin/*.so, *.dylib, *.dll are NOT gitignored —
 # they are distributed with the PyPI package.

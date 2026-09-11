@@ -4,10 +4,10 @@ go 1.24.1
 
 require (
 	github.com/bdandy/go-socks4 v1.2.3
-	github.com/bogdanfinn/fhttp v0.6.8
-	github.com/bogdanfinn/quic-go-utls v1.0.9-utls
-	github.com/bogdanfinn/utls v1.7.7-barnius
-	github.com/bogdanfinn/websocket v1.5.5-barnius
+	github.com/bogdanfinn/fhttp v0.6.9
+	github.com/bogdanfinn/quic-go-utls v1.0.10-utls
+	github.com/bogdanfinn/utls v1.7.8-barnius
+	github.com/bogdanfinn/websocket v1.5.6-barnius
 	github.com/google/uuid v1.6.0
 	github.com/stretchr/testify v1.11.1
 	github.com/tam7t/hpkp v0.0.0-20160821193359-2b70b4024ed5
@@ -17,6 +17,7 @@ require (
 require (
 	github.com/andybalholm/brotli v1.2.0 // indirect
 	github.com/bdandy/go-errors v1.2.2 // indirect
+	github.com/cloudflare/circl v1.6.2 // indirect
 	github.com/davecgh/go-spew v1.1.1 // indirect
 	github.com/klauspost/compress v1.18.2 // indirect
 	github.com/kr/text v0.2.0 // indirect
@@ -28,10 +29,10 @@ require (
 	gopkg.in/yaml.v3 v3.0.1 // indirect
 )
 
-// replace github.com/bogdanfinn/utls => ../utls
+//replace github.com/bogdanfinn/utls => ../utls
 
-// replace github.com/bogdanfinn/quic-go-utls => ../quic-go-utls
+//replace github.com/bogdanfinn/quic-go-utls => ../quic-go-utls
 
-// replace github.com/bogdanfinn/websocket => ../websocket
+//replace github.com/bogdanfinn/websocket => ../websocket
 
-// replace github.com/bogdanfinn/fhttp => ../fhttp
+//replace github.com/bogdanfinn/fhttp => ../fhttp
