@@ -1,4 +1,5 @@
 import json
+import inspect
 import unittest
 
 import tls_client
@@ -35,6 +36,17 @@ class _FakeNativeSession(object):
 
 
 class RequestsCompatibilityTests(unittest.TestCase):
+    def test_public_session_signature_exposes_tls_options(self):
+        names = set(inspect.signature(tls_client.Session).parameters)
+        self.assertIn("client_identifier", names)
+        self.assertIn("force_http1", names)
+        self.assertIn("tcp_mss", names)
+        self.assertIn("custom_tls_client", names)
+
+    def test_unsupported_client_identifier_fails_fast(self):
+        with self.assertRaises(ValueError):
+            tls_client.Session(client_identifier="chrome_999", _native_session=_FakeNativeSession())
+
     def test_prepares_standard_requests_arguments_and_response(self):
         native = _FakeNativeSession(
             [_NativeResponse(headers={"X-Test": ["one"]}, content=b'{"ok": true}')]

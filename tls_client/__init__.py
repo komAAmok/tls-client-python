@@ -8,7 +8,12 @@ directory.  A ``TLS_CLIENT_LIB`` environment variable may be used to
 override automatic discovery.
 """
 
-from tls_client._core import AsyncSession, ClientIdentifiers, clear_client_pool
+from tls_client._core import (
+    AsyncSession,
+    ClientIdentifiers,
+    SUPPORTED_CLIENT_IDENTIFIERS,
+    clear_client_pool,
+)
 from tls_client._core import Request as TLSRequest
 from tls_client._core import Response as NativeResponse
 from tls_client._core import Session as NativeSession
@@ -42,6 +47,7 @@ __all__ = [
     "NativeResponse",
     "TLSRequest",
     "ClientIdentifiers",
+    "SUPPORTED_CLIENT_IDENTIFIERS",
     "clear_client_pool",
     "request",
     "get",

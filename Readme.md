@@ -153,7 +153,11 @@ The correct binary is automatically selected at runtime. Override via `TLS_CLIEN
 
 ---
 
-## 🎭 Supported Browser Profiles — 79 Identifiers
+## 🎭 Supported Browser Profiles
+
+The complete, runtime-validated list is exported as
+`tls_client.SUPPORTED_CLIENT_IDENTIFIERS`. It is also used for IDE/type
+checking through `ClientIdentifiers`.
 
 ### 🌐 Chrome — 24 Profiles
 
@@ -170,6 +174,8 @@ The correct binary is automatically selected at runtime. Override via `TLS_CLIEN
 | `chrome_133` · `chrome_133_PSK` | Chrome 133 (standard & PSK) |
 | `chrome_144` · `chrome_144_PSK` | Chrome 144 (standard & PSK) |
 | `chrome_146` · `chrome_146_PSK` | Chrome 146 — **default** (standard & PSK) |
+| `chrome_150` · `chrome_150_PSK` | Chrome 150 (standard & PSK) |
+| `chrome_152` · `chrome_152_PSK` | Chrome 152 (standard & PSK) |
 
 ### 🦊 Firefox — 16 Profiles
 
@@ -233,6 +239,37 @@ The correct binary is automatically selected at runtime. Override via `TLS_CLIEN
 ---
 
 ## 🔧 Advanced Usage
+
+### Full TLS controls at the top-level `Session`
+
+`tls_client.Session` is Requests-compatible, but its public constructor keeps
+the complete native TLS signature. IDE completion and `inspect.signature()`
+therefore expose fingerprint, protocol, socket, proxy, certificate, cookie,
+pool, and debug controls instead of showing only Requests arguments:
+
+```python
+import inspect
+import tls_client
+
+print(inspect.signature(tls_client.Session))
+session = tls_client.Session(
+    client_identifier="chrome_152",
+    force_http1=True,
+    disable_http3=True,
+    random_tls_extension_order=False,
+    tcp_mss=1460,
+    tcp_ttl=64,
+    max_connections_per_host=32,
+    with_debug=True,
+)
+```
+
+The same TLS keyword names are accepted by Requests-style calls (`get`,
+`post`, `request`, and `execute_request`) for per-request overrides.
+
+Unknown browser/fingerprint identifiers fail immediately with `ValueError`.
+Use `SUPPORTED_CLIENT_IDENTIFIERS` to validate user input before creating a
+session.
 
 ### Custom TLS Client (Full Control)
 

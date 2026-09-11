@@ -273,6 +273,10 @@ DEFAULT_HEADERS: Dict[str, Dict[str, str]] = {
     # ── Chrome 146  ───────────────────────────────────────────────────────
     "chrome_146": _chrome_headers("146", zstd=True),
     "chrome_146_PSK": _chrome_psk("146", zstd=True),
+    "chrome_150": _chrome_headers("150", zstd=True),
+    "chrome_150_PSK": _chrome_psk("150", zstd=True),
+    "chrome_152": _chrome_headers("152", zstd=True),
+    "chrome_152_PSK": _chrome_psk("152", zstd=True),
     # ── Brave 146  ────────────────────────────────────────────────────────
     "brave_146": _brave_headers("146"),
     "brave_146_PSK": _brave_headers("146"),

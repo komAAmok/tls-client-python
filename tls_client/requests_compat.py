@@ -3,6 +3,7 @@
 from __future__ import absolute_import
 
 import io
+import inspect
 import json as jsonlib
 import math
 import time
@@ -17,7 +18,7 @@ from tls_client.auth import HTTPBasicAuth
 from tls_client.cookies import RequestsCookieJar, cookie_header, extract_cookies, merge_cookies
 from tls_client.hooks import default_hooks, dispatch_hook, merge_hooks
 from tls_client.structures import CaseInsensitiveDict
-from tls_client._core import Session as NativeSession
+from tls_client._core import Session as NativeSession, SUPPORTED_CLIENT_IDENTIFIERS
 from tls_client._core import _load_client_certificates, _resolve_proxy_url
 
 
@@ -43,6 +44,11 @@ _TLS_REQUEST_OPTIONS = {
     "with_default_bad_pin_handler", "with_protocol_racing", "without_cookie_jar",
     "write_buffer_size",
 }
+
+# Keep this list in sync with the native Session signature so both the
+# requests-compatible facade and direct TLS users can discover every control.
+_TLS_SESSION_OPTIONS = set(name for name in inspect.signature(NativeSession).parameters)
+_TLS_REQUEST_OPTIONS.update(_TLS_SESSION_OPTIONS)
 
 
 def _merge_url_params(url, params):
@@ -393,6 +399,9 @@ def _encoding_from_headers(headers):
 
 class Session(object):
     def __init__(self, **options):
+        requested_identifier = options.get("client_identifier", "chrome_120")
+        if requested_identifier not in SUPPORTED_CLIENT_IDENTIFIERS:
+            raise ValueError("unsupported client_identifier %r" % requested_identifier)
         native_session = options.pop("_native_session", None)
         initial_headers = options.pop("headers", None)
         initial_cookies = options.pop("cookies", None)
@@ -404,6 +413,9 @@ class Session(object):
         initial_verify = options.pop("verify", True)
         initial_cert = options.pop("cert", None)
         initial_stream = options.pop("stream", False)
+        initial_hooks = options.pop("hooks", None)
+        initial_max_redirects = options.pop("max_redirects", 30)
+        initial_trust_env = options.pop("trust_env", True)
         default_timeout = options.pop("timeout", 30)
 
         self.headers = CaseInsensitiveDict(initial_headers or {})
@@ -415,9 +427,9 @@ class Session(object):
         self.proxies = dict(initial_proxies or {})
         if initial_proxy:
             self.proxies.update({"http": initial_proxy, "https": initial_proxy})
-        self.hooks = default_hooks()
+        self.hooks = merge_hooks(initial_hooks, None) if initial_hooks else default_hooks()
         self.stream, self.verify, self.cert = initial_stream, initial_verify, initial_cert
-        self.max_redirects, self.trust_env = 30, True
+        self.max_redirects, self.trust_env = initial_max_redirects, initial_trust_env
         self._default_timeout = default_timeout
 
         if native_session is None:
@@ -638,3 +650,17 @@ def patch(url, data=None, **kwargs):
 
 def delete(url, **kwargs):
     return request("DELETE", url, **kwargs)
+
+
+# ``Session`` intentionally keeps a ``**options`` implementation so Requests
+# attributes can be normalised before constructing the native client.  Expose
+# the complete native keyword signature to inspect(), IDEs and ``help()`` so
+# TLS controls are discoverable at the public top level as well.
+_session_signature = inspect.signature(NativeSession)
+_session_parameters = list(_session_signature.parameters.values())
+_session_parameters.extend([
+    inspect.Parameter("hooks", inspect.Parameter.KEYWORD_ONLY, default=None),
+    inspect.Parameter("max_redirects", inspect.Parameter.KEYWORD_ONLY, default=30),
+    inspect.Parameter("trust_env", inspect.Parameter.KEYWORD_ONLY, default=True),
+])
+Session.__signature__ = _session_signature.replace(parameters=_session_parameters)

@@ -70,6 +70,8 @@ ClientIdentifiers: TypeAlias = Literal[
     "chrome_133", "chrome_133_PSK",
     "chrome_144", "chrome_144_PSK",
     "chrome_146", "chrome_146_PSK",
+    "chrome_150", "chrome_150_PSK",
+    "chrome_152", "chrome_152_PSK",
         # ── Brave ──
     "brave_146", "brave_146_PSK",
         # ── Safari ──
@@ -107,6 +109,11 @@ ClientIdentifiers: TypeAlias = Literal[
     "okhttp4_android_10", "okhttp4_android_11",
     "okhttp4_android_12", "okhttp4_android_13",
 ]
+
+# Runtime counterpart of ``ClientIdentifiers``.  Keeping this derived from
+# the header/profile table lets callers fail fast instead of silently sending
+# a request with an unknown fingerprint.
+SUPPORTED_CLIENT_IDENTIFIERS = frozenset(DEFAULT_HEADERS)
 
 
 # ---------------------------------------------------------------------------
@@ -1675,6 +1682,8 @@ class Session:
 
     @client_identifier.setter
     def client_identifier(self, value: str) -> None:
+        if value not in SUPPORTED_CLIENT_IDENTIFIERS:
+            raise ValueError("unsupported client_identifier %r" % value)
         self._set_default("client_identifier", value)
 
     @property
@@ -2243,6 +2252,11 @@ class Session:
         # 启用调试日志输出 / Enable debug log output
         with_debug: bool = False,
     ) -> None:
+        if client_identifier not in SUPPORTED_CLIENT_IDENTIFIERS:
+            raise ValueError(
+                "unsupported client_identifier %r; supported values: %s"
+                % (client_identifier, ", ".join(sorted(SUPPORTED_CLIENT_IDENTIFIERS)))
+            )
         self._defaults_lock = threading.RLock()
         self._closed = False
         self._defaults_version = 0
@@ -2460,6 +2474,9 @@ class Session:
 
         Execute a single HTTP request through the Go engine.
         """
+        selected_identifier = client_identifier or self.client_identifier
+        if selected_identifier not in SUPPORTED_CLIENT_IDENTIFIERS:
+            raise ValueError("unsupported client_identifier %r" % selected_identifier)
         if self._closed:
             raise RuntimeError("Session is closed")
         ffi, lib = _get_ffi()
@@ -3115,6 +3132,8 @@ class AsyncSession:
         # 启用调试日志输出 / Enable debug log output
         with_debug: bool = False,
     ) -> None:
+        if client_identifier not in SUPPORTED_CLIENT_IDENTIFIERS:
+            raise ValueError("unsupported client_identifier %r" % client_identifier)
         self._session = Session(
             client_identifier=client_identifier,
             force_http1=force_http1,
@@ -3611,6 +3630,9 @@ class AsyncSession:
 
         Execute a single HTTP request through the Go engine (async).
         """
+        selected_identifier = client_identifier or self._session.client_identifier
+        if selected_identifier not in SUPPORTED_CLIENT_IDENTIFIERS:
+            raise ValueError("unsupported client_identifier %r" % selected_identifier)
         # Remap user-facing names → defaults-dict keys where they differ.
         # timeout → timeout_seconds
         # verify → insecure_skip_verify (inverted: True→0, False→1)
