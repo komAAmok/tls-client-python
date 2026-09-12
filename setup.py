@@ -16,7 +16,7 @@ class BinaryDistribution(Distribution):
 setup(
     distclass=BinaryDistribution,
     name="tls-client-python",
-    version="1.16.0",
+    version="1.16.0.1",
     description="High-performance CFFI binding for bogdanfinn/tls-client",
     long_description=open("Readme.md", "r", encoding="utf-8").read(),
     long_description_content_type="text/markdown",
