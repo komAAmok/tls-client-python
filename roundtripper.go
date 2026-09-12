@@ -455,6 +455,13 @@ func (rt *roundTripper) dialTLSWithSetup(ctx context.Context, network, addr stri
 		}
 
 		t2.Priorities = rt.priorities
+		if rt.transportOptions != nil {
+			if rt.transportOptions.H2MaxDataFrameSize > 0 {
+				t2.MaxDataFrameSize = rt.transportOptions.H2MaxDataFrameSize
+			}
+			t2.PrefacePingIdleMs = rt.transportOptions.H2PrefacePingIdleMs
+			t2.HPACKIndexingPolicy = rt.transportOptions.H2HPACKIndexingPolicy
+		}
 
 		t2.PushHandler = &http2.DefaultPushHandler{}
 		rt.cachedTransports[addr] = &t2

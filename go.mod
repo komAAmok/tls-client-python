@@ -36,3 +36,7 @@ require (
 //replace github.com/bogdanfinn/websocket => ../websocket
 
 //replace github.com/bogdanfinn/fhttp => ../fhttp
+
+// Patched in-repo: HPACK indexing policy, MaxDataFrameSize, preface ping.
+// See UPSTREAM_SYNC.md (third_party/fhttp overlay points).
+replace github.com/bogdanfinn/fhttp => ./third_party/fhttp

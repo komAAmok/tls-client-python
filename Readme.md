@@ -380,6 +380,21 @@ session = Session(
 )
 ```
 
+### Engine-Level HTTP/2 Realism (ABI 2.1)
+
+```python
+session = Session(
+    hpack_indexing_policy="chrome",   # Chromium HPACK indexing behaviour
+    h2_max_data_frame_size=14000,     # cap each DATA frame payload
+    preface_ping_idle_ms=10000,       # PING before reuse after >=10s idle
+    cookie_crumb=True,                # one Cookie field per cookie-pair
+)
+```
+
+`cookie_crumb` splits the `Cookie` header into one field per cookie-pair on
+the wire (Chromium "crumble") — observable as multiple `cookie:` fields by
+HTTP/2 servers.
+
 ### Lite Build (No QUIC — Smaller Binary)
 
 Set `TLS_CLIENT_VARIANT=lite` to load the `-lite` shared library (built

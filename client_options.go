@@ -37,6 +37,15 @@ type TransportOptions struct {
 	ReadBufferSize         int   // If zero, a default (currently 4KB) is used.
 	DisableKeepAlives      bool
 	DisableCompression     bool
+	// H2MaxDataFrameSize caps the payload of each HTTP/2 DATA frame
+	// (0 = engine default). Local overlay: fingerprint realism.
+	H2MaxDataFrameSize int
+	// H2PrefacePingIdleMs emits a PING before a request on an idle H2
+	// connection (0 = disabled). Local overlay: fingerprint realism.
+	H2PrefacePingIdleMs int
+	// H2HPACKIndexingPolicy selects the HPACK indexing behaviour ("chrome").
+	// Empty = default. Local overlay: fingerprint realism.
+	H2HPACKIndexingPolicy string
 }
 
 type (

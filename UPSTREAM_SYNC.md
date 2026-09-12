@@ -28,7 +28,17 @@ must be preserved when resolving future upstream conflicts:
 - `cffi_binding/main.go`: ABI 2 — `GetAbiVersion` / `GetBuildVariant`
   exports, appended RequestOptions fields (disable_session_tickets,
   tls_keylog_path, root_ca_pem+len) and CustomTlsClient field
-  (trust_anchors_payload), cache-key format version 3.
+  (trust_anchors_payload), cache-key format version 3 (ABI 2.1: version 4
+  adds h2_max_data_frame_size / preface_ping_idle_ms /
+  hpack_indexing_policy; cookie_crumb is per-request and not keyed).
+- `third_party/fhttp/` (vendored `github.com/bogdanfinn/fhttp` v0.6.9,
+  `go.mod` replace): three engine-level realism patches —
+  (1) `hpack.Encoder.SetIndexingDecision` + `hpack.IndexingChrome`
+  (never index authorization/cookie/set-cookie/content-length/age),
+  (2) `Transport.MaxDataFrameSize` DATA-frame payload cap,
+  (3) `Transport.PrefacePingIdleMs` Chromium-style PING on idle H2
+  connections; plus `Transport.H2*` fields in `client_options.go`
+  (TransportOptions) and their wiring in `roundtripper.go`.
 - `cffi_src/factory.go`, `cffi_src/types.go`: TCP/IP fingerprint fields and the
   local cookie-jar construction behavior.
 - `example/main.go`: retained legacy local example; upstream split examples

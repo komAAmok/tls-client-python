@@ -32,11 +32,15 @@ _FULL = {
     "client_certificates": None, "custom_tls_client": None,
     "disable_session_tickets": 1, "tls_keylog_path": "C:/temp/kl.txt",
     "root_ca_pem": _TEST_PEM,
+    "h2_max_data_frame_size": 14000, "preface_ping_idle_ms": 10000,
+    "hpack_indexing_policy": "chrome",
 }
 
 _MINIMAL = dict(
     _FULL,
     disable_session_tickets=0, tls_keylog_path=None, root_ca_pem=None,
+    h2_max_data_frame_size=0, preface_ping_idle_ms=0,
+    hpack_indexing_policy=None,
     pseudo_header_order=None,
     custom_tls_client={
         "ja3_string": "771,4865-4866-4867,0-23-65281,29-23-24,0",
@@ -50,13 +54,13 @@ class CacheKeyParityTests(unittest.TestCase):
     def test_full_vector(self):
         self.assertEqual(
             _compute_cache_key_hash(_FULL),
-            "bf5ac027cf64b216687556c8097a5065d387d3677c39b70378e4fdefd1f775ab",
+            "672f67e5996cafe5167bbb50b2c32f76181e19f564fda270e91b67306ac474bc",
         )
 
     def test_minimal_vector(self):
         self.assertEqual(
             _compute_cache_key_hash(_MINIMAL),
-            "a348d911a59390a093a8946a2ff4c17b8877892cb2d86e1cb00e798f031231c2",
+            "c5fcb1ed64fbde71a681052e916ccf25e004ef3b537770a44948232da582be5f",
         )
 
     def test_abi2_fields_participate(self):

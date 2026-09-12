@@ -151,6 +151,11 @@ typedef struct {
     const char* tls_keylog_path;
     const char* root_ca_pem;
     int   root_ca_pem_len;
+    // ── ABI 2.1 additions (engine-level HTTP/2 realism knobs) ──
+    int   h2_max_data_frame_size;
+    int   preface_ping_idle_ms;
+    const char* hpack_indexing_policy;
+    int   cookie_crumb;
 } RequestOptions;
 
 typedef struct {
@@ -199,6 +204,7 @@ import (
 	"net"
 	"os"
 	"sort"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -457,6 +463,11 @@ type requestConfig struct {
 	disableSessionTickets bool
 	tlsKeylogPath         string
 	rootCAPEM             []byte
+
+	// ABI 2.1 additions (engine-level HTTP/2 realism knobs)
+	h2MaxDataFrameSize int
+	prefacePingIdleMs  int
+	hpackIndexingPol   string
 }
 
 // requestConfigFromOptions converts C request options to the shared Go form.
@@ -610,6 +621,21 @@ func requestConfigFromOptions(opts *C.RequestOptions, copyBody bool) (cfg *reque
 	cfg.tlsKeylogPath = C.GoString(opts.tls_keylog_path)
 	if opts.root_ca_pem != nil && opts.root_ca_pem_len > 0 {
 		cfg.rootCAPEM = C.GoBytes(unsafe.Pointer(opts.root_ca_pem), opts.root_ca_pem_len)
+	}
+	cfg.h2MaxDataFrameSize = int(opts.h2_max_data_frame_size)
+	cfg.prefacePingIdleMs = int(opts.preface_ping_idle_ms)
+	cfg.hpackIndexingPol = C.GoString(opts.hpack_indexing_policy)
+
+	// Cookie crumble: Chromium splits the Cookie header into one field per
+	// cookie-pair on the wire. Per-request opt-in; not part of the client
+	// cache key.
+	if int(opts.cookie_crumb) != 0 && cfg.headers != nil {
+		if cv, ok := cfg.headers["Cookie"]; ok && len(cv) == 1 {
+			pairs := strings.Split(cv[0], "; ")
+			if len(pairs) > 1 {
+				cfg.headers["Cookie"] = pairs
+			}
+		}
 	}
 
 	return cfg
@@ -1057,6 +1083,11 @@ func buildCacheKeyFromConfig(cfg *requestConfig) string {
 	} else {
 		fmt.Fprint(h, "|rc:")
 	}
+	// ABI 2.1 / format-version 4: engine-level HTTP/2 realism knobs.
+	// cookie_crumb is per-request wire behaviour and intentionally NOT part
+	// of the client cache key.
+	fmt.Fprintf(h, "|mdf=%d|pp=%d|hip=%s",
+		cfg.h2MaxDataFrameSize, cfg.prefacePingIdleMs, cfg.hpackIndexingPol)
 	if len(cfg.pseudoHeaderOrder) > 0 {
 		for _, s := range cfg.pseudoHeaderOrder {
 			fmt.Fprintf(h, ":%s", s)
@@ -1391,6 +1422,9 @@ func buildClientFromConfig(cfg *requestConfig) (tls_client.HttpClient, error) {
 			fmt.Fprint(os.Stderr, "[tls-client] root_ca_pem contained no usable certificates\n")
 		}
 	}
+	transportOpts.H2MaxDataFrameSize = cfg.h2MaxDataFrameSize
+	transportOpts.H2PrefacePingIdleMs = cfg.prefacePingIdleMs
+	transportOpts.H2HPACKIndexingPolicy = cfg.hpackIndexingPol
 	// Default idle connection timeout of 30s — prevents unbounded
 	// connection-pool growth when the caller does not set it explicitly.
 	if cfg.idleConnTimeoutSeconds > 0 {

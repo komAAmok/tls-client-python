@@ -745,6 +745,9 @@ _INT_REQUEST_KEYS = frozenset((
     "tcp_window_scale",
     "tcp_mss",
     "disable_session_tickets",
+    "h2_max_data_frame_size",
+    "preface_ping_idle_ms",
+    "cookie_crumb",
 ))
 
 
@@ -809,6 +812,10 @@ SYNC_REQUEST_DEFAULT_KEYS = (
     "disable_session_tickets",
     "tls_keylog_path",
     "root_ca_pem",
+    "h2_max_data_frame_size",
+    "preface_ping_idle_ms",
+    "hpack_indexing_policy",
+    "cookie_crumb",
 )
 
 
@@ -857,6 +864,10 @@ ASYNC_REQUEST_DEFAULT_KEYS = (
     "disable_session_tickets",
     "tls_keylog_path",
     "root_ca_pem",
+    "h2_max_data_frame_size",
+    "preface_ping_idle_ms",
+    "hpack_indexing_policy",
+    "cookie_crumb",
 )
 
 
@@ -1010,6 +1021,10 @@ typedef struct {
     const char* tls_keylog_path;
     const char* root_ca_pem;
     int   root_ca_pem_len;
+    int   h2_max_data_frame_size;
+    int   preface_ping_idle_ms;
+    const char* hpack_indexing_policy;
+    int   cookie_crumb;
 } RequestOptions;
 
 typedef struct {
@@ -1617,6 +1632,13 @@ def _compute_cache_key_hash(r: dict) -> str:
         update(("|rc:" + hashlib.sha256(rc).hexdigest()).encode("utf-8"))
     else:
         update(b"|rc:")
+    # ABI 2.1 / format-version 4: engine-level HTTP/2 realism knobs.
+    # cookie_crumb is per-request wire behaviour and NOT part of the key.
+    update(("|mdf=%d|pp=%d|hip=%s" % (
+        r.get("h2_max_data_frame_size") or 0,
+        r.get("preface_ping_idle_ms") or 0,
+        r.get("hpack_indexing_policy") or "",
+    )).encode("utf-8"))
 
     # ── Pseudo-header orders ──────────────────────────────────────────
     ph = r["pseudo_header_order"]
@@ -2451,6 +2473,14 @@ class Session:
         tls_keylog_path: Optional[str] = None,
         # 自定义 CA PEM 内容 / Custom CA PEM bytes for TLS verification (ABI 2)
         root_ca_pem: Optional[bytes] = None,
+        # HTTP/2 DATA 帧上限 (ABI 2.1) / Cap per-DATA-frame payload
+        h2_max_data_frame_size: int = 0,
+        # 空闲 H2 连接 PING 阈值毫秒 (ABI 2.1) / Preface-ping idle threshold ms
+        preface_ping_idle_ms: int = 0,
+        # HPACK 索引策略 ("chrome") (ABI 2.1) / HPACK indexing policy
+        hpack_indexing_policy: str = "",
+        # Cookie 按对拆分 (ABI 2.1) / Split Cookie header per cookie-pair
+        cookie_crumb: bool = False,
         # 指纹预设名 / Fingerprint preset name (tls_client.fingerprints)
         fingerprint: Optional[str] = None,
     ) -> None:
@@ -2520,6 +2550,10 @@ class Session:
             "disable_session_tickets": 1 if disable_session_tickets else 0,
             "tls_keylog_path": tls_keylog_path,
             "root_ca_pem": root_ca_pem,
+            "h2_max_data_frame_size": h2_max_data_frame_size,
+            "preface_ping_idle_ms": preface_ping_idle_ms,
+            "hpack_indexing_policy": hpack_indexing_policy,
+            "cookie_crumb": 1 if cookie_crumb else 0,
         }
         # True once the caller overrides the profile's default header block
         # (via the default_headers/headers property or constructor kwargs);
@@ -2688,6 +2722,14 @@ class Session:
         tls_keylog_path: Optional[str] = None,
         # 覆盖自定义 CA PEM (ABI 2) / Override custom CA PEM bytes
         root_ca_pem: Optional[bytes] = None,
+        # 覆盖 HTTP/2 DATA 帧上限 (ABI 2.1) / Override DATA frame cap
+        h2_max_data_frame_size: Optional[int] = None,
+        # 覆盖空闲 PING 阈值 (ABI 2.1) / Override preface-ping threshold
+        preface_ping_idle_ms: Optional[int] = None,
+        # 覆盖 HPACK 索引策略 (ABI 2.1) / Override HPACK indexing policy
+        hpack_indexing_policy: Optional[str] = None,
+        # 覆盖 Cookie 拆分 (ABI 2.1) / Override cookie crumble
+        cookie_crumb: Optional[bool] = None,
         **kwargs: Any,
     ) -> Response:
         """通过 Go 引擎执行单次 HTTP 请求。
@@ -2771,6 +2813,12 @@ class Session:
             ),
             "tls_keylog_path": _val("tls_keylog_path", tls_keylog_path),
             "root_ca_pem": _val("root_ca_pem", root_ca_pem),
+            "h2_max_data_frame_size": _val(
+                "h2_max_data_frame_size", h2_max_data_frame_size
+            ),
+            "preface_ping_idle_ms": _val("preface_ping_idle_ms", preface_ping_idle_ms),
+            "hpack_indexing_policy": _val("hpack_indexing_policy", hpack_indexing_policy),
+            "cookie_crumb": _val("cookie_crumb", cookie_crumb, True),
             "tcp_ttl": _val("tcp_ttl", tcp_ttl),
             "tcp_window_size": _val("tcp_window_size", tcp_window_size),
             "tcp_window_scale": _val("tcp_window_scale", tcp_window_scale),
@@ -2941,6 +2989,13 @@ class Session:
             keep_alive.append(rc_ptr)
             opts.root_ca_pem = rc_ptr
             opts.root_ca_pem_len = len(resolved["root_ca_pem"])
+        opts.h2_max_data_frame_size = resolved["h2_max_data_frame_size"]
+        opts.preface_ping_idle_ms = resolved["preface_ping_idle_ms"]
+        if resolved["hpack_indexing_policy"]:
+            c_hip = _c_string(ffi, resolved["hpack_indexing_policy"])
+            keep_alive.append(c_hip)
+            opts.hpack_indexing_policy = c_hip
+        opts.cookie_crumb = resolved["cookie_crumb"]
 
         opts.timeout_seconds = resolved["timeout_seconds"]
         opts.timeout_milliseconds = resolved["timeout_milliseconds"]
@@ -3684,6 +3739,10 @@ class AsyncSession:
             "disable_session_tickets": _val("disable_session_tickets", True),
             "tls_keylog_path": _val("tls_keylog_path"),
             "root_ca_pem": _val("root_ca_pem"),
+            "h2_max_data_frame_size": _val("h2_max_data_frame_size"),
+            "preface_ping_idle_ms": _val("preface_ping_idle_ms"),
+            "hpack_indexing_policy": _val("hpack_indexing_policy"),
+            "cookie_crumb": _val("cookie_crumb", True),
             "tcp_ttl": _val("tcp_ttl"),
             "tcp_window_size": _val("tcp_window_size"),
             "tcp_window_scale": _val("tcp_window_scale"),
@@ -3745,6 +3804,13 @@ class AsyncSession:
             keep_alive.append(rc_ptr)
             opts.root_ca_pem = rc_ptr
             opts.root_ca_pem_len = len(resolved["root_ca_pem"])
+        opts.h2_max_data_frame_size = resolved["h2_max_data_frame_size"]
+        opts.preface_ping_idle_ms = resolved["preface_ping_idle_ms"]
+        if resolved["hpack_indexing_policy"]:
+            c_hip = _c_string(ffi, resolved["hpack_indexing_policy"])
+            keep_alive.append(c_hip)
+            opts.hpack_indexing_policy = c_hip
+        opts.cookie_crumb = resolved["cookie_crumb"]
 
         opts.timeout_seconds = resolved["timeout_seconds"]
         opts.timeout_milliseconds = resolved["timeout_milliseconds"]
@@ -4032,6 +4098,14 @@ class AsyncSession:
         tls_keylog_path: Optional[str] = None,
         # 覆盖自定义 CA PEM (ABI 2) / Override custom CA PEM bytes
         root_ca_pem: Optional[bytes] = None,
+        # 覆盖 HTTP/2 DATA 帧上限 (ABI 2.1) / Override DATA frame cap
+        h2_max_data_frame_size: Optional[int] = None,
+        # 覆盖空闲 PING 阈值 (ABI 2.1) / Override preface-ping threshold
+        preface_ping_idle_ms: Optional[int] = None,
+        # 覆盖 HPACK 索引策略 (ABI 2.1) / Override HPACK indexing policy
+        hpack_indexing_policy: Optional[str] = None,
+        # 覆盖 Cookie 拆分 (ABI 2.1) / Override cookie crumble
+        cookie_crumb: Optional[bool] = None,
         tcp_ttl: Optional[int] = None,
         tcp_window_size: Optional[int] = None,
         tcp_window_scale: Optional[int] = None,
@@ -4089,6 +4163,10 @@ class AsyncSession:
             disable_session_tickets=disable_session_tickets,
             tls_keylog_path=tls_keylog_path,
             root_ca_pem=root_ca_pem,
+            h2_max_data_frame_size=h2_max_data_frame_size,
+            preface_ping_idle_ms=preface_ping_idle_ms,
+            hpack_indexing_policy=hpack_indexing_policy,
+            cookie_crumb=cookie_crumb,
             **kwargs,
         )
 

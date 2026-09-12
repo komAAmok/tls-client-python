@@ -32,8 +32,11 @@ func TestCacheKeyParityWithPython(t *testing.T) {
 		disableSessionTickets: true,
 		tlsKeylogPath:         "C:/temp/kl.txt",
 		rootCAPEM:             []byte(testPEM),
+		h2MaxDataFrameSize:    14000,
+		prefacePingIdleMs:     10000,
+		hpackIndexingPol:      "chrome",
 	}
-	const wantFull = "bf5ac027cf64b216687556c8097a5065d387d3677c39b70378e4fdefd1f775ab"
+	const wantFull = "672f67e5996cafe5167bbb50b2c32f76181e19f564fda270e91b67306ac474bc"
 	if got := buildCacheKeyFromConfig(full); got != wantFull {
 		t.Fatalf("full vector mismatch:\n got  %s\n want %s", got, wantFull)
 	}
@@ -45,7 +48,7 @@ func TestCacheKeyParityWithPython(t *testing.T) {
 		withRandomTLSExtOrder: true,
 		customTLSClient:       ctc,
 	}
-	const wantMinimal = "a348d911a59390a093a8946a2ff4c17b8877892cb2d86e1cb00e798f031231c2"
+	const wantMinimal = "c5fcb1ed64fbde71a681052e916ccf25e004ef3b537770a44948232da582be5f"
 	if got := buildCacheKeyFromConfig(minimal); got != wantMinimal {
 		t.Fatalf("minimal vector mismatch:\n got  %s\n want %s", got, wantMinimal)
 	}
