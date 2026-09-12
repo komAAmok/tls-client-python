@@ -7,13 +7,13 @@ import inspect
 import json as jsonlib
 import math
 import time
-import uuid
 from datetime import timedelta
 from http.client import responses as reason_phrases
 from urllib.parse import urlencode, urljoin, urlsplit, urlunsplit
 from urllib.request import getproxies
 
 from tls_client import exceptions
+from tls_client import _multipart_boundary
 from tls_client.auth import HTTPBasicAuth
 from tls_client.cookies import RequestsCookieJar, cookie_header, extract_cookies, merge_cookies
 from tls_client.hooks import default_hooks, dispatch_hook, merge_hooks
@@ -76,8 +76,8 @@ def _body_bytes(value):
     )
 
 
-def _multipart(data, files):
-    boundary = uuid.uuid4().hex
+def _multipart(data, files, browser="chrome"):
+    boundary = _multipart_boundary.boundary(browser)
     chunks = []
 
     def add(value):
@@ -382,9 +382,14 @@ class TLSClientAdapter(BaseAdapter):
         return response
 
     def close(self):
-        if not self._closed:
-            self._closed = True
-            self.native_session.close()
+        # The Go client pool is process-global and TTL-evicted; individual
+        # sessions do not own pool entries.  Calling ClearClientPool() here
+        # would evict the clients pooled for every other concurrent session
+        # — and the top-level request() helpers close a session on every
+        # call, which used to nuke the whole pool under load.  Call
+        # NativeSession.clear_client_pool() explicitly when a global
+        # teardown is really intended.
+        self._closed = True
 
 
 def _encoding_from_headers(headers):
@@ -477,7 +482,8 @@ class Session(object):
 
     def request(self, method, url, params=None, data=None, headers=None, cookies=None,
                 files=None, auth=None, timeout=None, allow_redirects=True, proxies=None,
-                hooks=None, stream=None, verify=None, cert=None, json=None, **kwargs):
+                hooks=None, stream=None, verify=None, cert=None, json=None,
+                context=None, **kwargs):
         body = kwargs.pop("body", None)
         if body is not None and data is None:
             data = body
@@ -497,6 +503,8 @@ class Session(object):
         send_options.update(allow_redirects=allow_redirects,
                             timeout=self._default_timeout if timeout is None else timeout)
         send_options.update(tls_options)
+        if context is not None:
+            send_options["context"] = context
         return self.send(prepared, **send_options)
 
     def send(self, request, **kwargs):

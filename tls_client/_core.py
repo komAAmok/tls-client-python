@@ -722,6 +722,48 @@ def _copy_snapshot_value(value: Any) -> Any:
     return value
 
 
+# Integer-typed request fields.  cffi raises TypeError when ``None`` or a
+# str is assigned to any of these C int fields, but the requests-compatible
+# API allows e.g. ``session.timeout = None`` (a common way to write "no
+# explicit timeout").  Values are normalised right after the per-request
+# dict is resolved and BEFORE the cache-key hash is computed: the Go engine
+# renders these fields with ``%d``, so ``None``→0 and ``True``→1 must be
+# applied on the Python side too or the pre-computed hash diverges from
+# Go's buildCacheKey and silently poisons the client pool.
+_INT_REQUEST_KEYS = frozenset((
+    "timeout_seconds",
+    "timeout_milliseconds",
+    "max_idle_connections",
+    "max_idle_connections_per_host",
+    "max_connections_per_host",
+    "max_response_header_bytes",
+    "write_buffer_size",
+    "read_buffer_size",
+    "idle_conn_timeout_seconds",
+    "tcp_ttl",
+    "tcp_window_size",
+    "tcp_window_scale",
+    "tcp_mss",
+    "disable_session_tickets",
+))
+
+
+def _normalize_int_fields(resolved: Dict[str, Any]) -> None:
+    """Coerce None→0 and bool→int for the C int fields of *resolved*.
+
+    0 means "unset" to the Go engine (e.g. timeout_seconds=0 falls back to
+    the engine default), which is the closest safe mapping for the requests
+    idiom ``timeout=None``.  Other invalid types (str, float) are left
+    untouched so cffi still raises its strict TypeError.
+    """
+    for key in _INT_REQUEST_KEYS:
+        value = resolved.get(key)
+        if value is None:
+            resolved[key] = 0
+        elif isinstance(value, bool):
+            resolved[key] = int(value)
+
+
 SYNC_REQUEST_DEFAULT_KEYS = (
     "proxy",
     "pseudo_header_order",
@@ -764,6 +806,9 @@ SYNC_REQUEST_DEFAULT_KEYS = (
     "with_debug",
     "request_host_override",
     "request_cookies",
+    "disable_session_tickets",
+    "tls_keylog_path",
+    "root_ca_pem",
 )
 
 
@@ -809,6 +854,9 @@ ASYNC_REQUEST_DEFAULT_KEYS = (
     "request_cookies",
     "catch_panics",
     "with_debug",
+    "disable_session_tickets",
+    "tls_keylog_path",
+    "root_ca_pem",
 )
 
 
@@ -894,6 +942,7 @@ typedef struct {
     unsigned int   h3_priority_param;
     int   h3_send_grease_frames;
     int   allow_http;
+    const char* trust_anchors_payload;
 } CustomTlsClient;
 
 typedef struct {
@@ -957,6 +1006,10 @@ typedef struct {
     int   client_certificates_len;
     CustomTlsClient* custom_tls_client;
     const char* cache_key_hash;
+    int   disable_session_tickets;
+    const char* tls_keylog_path;
+    const char* root_ca_pem;
+    int   root_ca_pem_len;
 } RequestOptions;
 
 typedef struct {
@@ -979,6 +1032,9 @@ void           ClearClientPool(void);
 
 void           SetPoolTTL(int seconds);
 void           SetPoolScanInterval(int seconds);
+int            GetAbiVersion(void);
+char*          GetBuildVariant(void);
+char*          ResolveECHConfig(char* host);
 
 typedef void (*async_callback_fn)(uintptr_t request_id, ResponseResult* response);
 int            RequestAsync(RequestOptions* opts, uintptr_t request_id, async_callback_fn cb);
@@ -1051,6 +1107,8 @@ def _find_library() -> str:
     搜索顺序：
     1. 读取 ``TLS_CLIENT_LIB`` 环境变量（显式用户覆盖）。
     2. 寻找包目录内 ``tls_client/bin/`` 下的带架构后缀文件（如 tls-client-windows-amd64.dll）。
+       ``TLS_CLIENT_VARIANT=lite`` 环境变量选择无 QUIC/HTTP-3 的轻量变体
+       （文件名追加 ``-lite``，如 tls-client-windows-amd64-lite.dll）。
     3. 寻找同级开发目录 ``dist/`` 下的文件。
     """
     # 1. 环境变量显式覆盖
@@ -1067,7 +1125,12 @@ def _find_library() -> str:
     here = Path(__file__).resolve().parent
 
     # 2. 寻找包目录 bin/ 下的多系统共享动态库
-    bundled = here / "bin" / name
+    variant = os.environ.get("TLS_CLIENT_VARIANT", "").strip().lower()
+    if variant and variant not in ("full", ""):
+        stem, ext = name.rsplit(".", 1)
+        bundled = here / "bin" / f"{stem}-{variant}.{ext}"
+    else:
+        bundled = here / "bin" / name
     if bundled.exists():
         return str(bundled)
 
@@ -1112,14 +1175,34 @@ def _load_ffi():
 _ffi = None
 _lib = None
 _ffi_lock = threading.Lock()
+_abi_version = 1  # 1 = legacy pre-rebuild library; 2 = GetAbiVersion() export present
+_build_variant = "full"  # "full" | "lite" (lite = built without QUIC/HTTP-3)
+
+# Features that need the rebuilt (ABI >= 2) shared library.
+_ABI2_FEATURES = ("disable_session_tickets", "tls_keylog_path", "root_ca_pem")
+
+
+def _require_abi2() -> None:
+    if _abi_version < 2:
+        raise RuntimeError(
+            "disable_session_tickets / tls_keylog_path / root_ca_pem and the "
+            "custom_tls_client 'trust_anchors_payload' field require a native "
+            "tls-client library with ABI >= 2 — rebuild the shared libraries "
+            "from current source (see UPSTREAM_SYNC.md)."
+        )
 
 
 def _get_ffi():
-    global _ffi, _lib
+    global _ffi, _lib, _abi_version, _build_variant
     if _ffi is None:
         with _ffi_lock:
             if _ffi is None:
                 _ffi, _lib = _load_ffi()
+                # Legacy libraries predate the export; treat them as ABI 1.
+                _abi_version = int(getattr(_lib, "GetAbiVersion", lambda: 1)())
+                variant_fn = getattr(_lib, "GetBuildVariant", None)
+                if variant_fn is not None:
+                    _build_variant = _ffi.string(variant_fn()).decode("ascii", "replace")
     return _ffi, _lib
 
 
@@ -1168,6 +1251,82 @@ def _build_headers(ffi, headers: Optional[Dict[str, str]], keep_alive: list):
         arr[i].value = cv
 
     return arr, n
+
+
+def _identifier_browser(identifier: str) -> str:
+    """Map a client identifier to its browser family (context headers)."""
+    if identifier.startswith("firefox"):
+        return "firefox"
+    return "chrome"  # chrome/brave/opera/mms/... share Chromium behaviour
+
+
+def _apply_request_context(session, headers, header_order, context, identifier,
+                           user_headers=None):
+    """Merge an opt-in ``RequestContext`` into the request headers.
+
+    Also selects the navigation/XHR header-order template recorded by a
+    fingerprint preset (when the caller did not pass an explicit
+    ``header_order``).  *user_headers* are the request-level headers —
+    they always win over context-derived values, while values inherited
+    from the profile defaults are overridden to stay context-coherent.
+    """
+    from tls_client import context as _ctx_mod
+
+    browser = _identifier_browser(identifier)
+    user_keys = {key.casefold() for key in (user_headers or {})}
+    merged = _ctx_mod.apply_context(headers, context, browser=browser,
+                                    user_keys=user_keys)
+    if header_order is None:
+        if context.dest in ("document", "iframe"):
+            template = getattr(session, "_fingerprint_header_order", None)
+        else:
+            template = getattr(session, "_fingerprint_header_order_xhr", None)
+        if template:
+            header_order = list(template)
+    return merged, header_order
+
+
+def _merge_default_headers(
+    default_headers: Optional[Dict[str, str]],
+    request_headers: Optional[Dict[str, str]],
+    header_order: Optional[List[str]],
+) -> Tuple[Optional[Dict[str, str]], Optional[List[str]]]:
+    """Fold the profile default header block into the per-request headers.
+
+    The Go engine assigns ``req.Header = cfg.headers`` wholesale whenever
+    per-request headers are present, so a request carrying e.g. only
+    ``{"X-Mark": "1"}`` would otherwise go out with NO User-Agent or any
+    other profile header at all (Go's "Go-http-client/1.1" default) —
+    the client-level default_headers are silently dropped.  Merging per
+    key with a case-insensitive match lets a request header override the
+    profile value without emitting duplicate headers.
+
+    A deterministic wire order is derived for the merged map: Go
+    randomises HTTP/1.1 header order when no HeaderOrderKey is set, and
+    a randomized order is itself a fingerprinting signal.
+    """
+    if not default_headers:
+        return request_headers, header_order
+
+    merged = dict(default_headers)
+    folded: Dict[str, str] = {}
+    for key in merged:
+        folded.setdefault(key.casefold(), key)
+    for key, value in (request_headers or {}).items():
+        existing = folded.get(key.casefold())
+        if existing is not None:
+            merged[existing] = value
+        else:
+            merged[key] = value
+            folded[key.casefold()] = key
+
+    if header_order:
+        order = list(header_order)
+        listed = {key.casefold() for key in order}
+        order.extend(key for key in merged if key.casefold() not in listed)
+    else:
+        order = list(merged.keys())
+    return merged, order
 
 
 def _build_string_array(ffi, items: Optional[List[str]], keep_alive: list):
@@ -1386,6 +1545,15 @@ def _build_custom_tls_client(ffi, cfg: Optional[Dict[str, Any]], keep_alive: lis
         chp.weight = hp.get("weight", 0)
         ctc.header_priority = chp
 
+    # Trust anchors payload (ABI 2) — encoded ROIDs for the
+    # draft-ietf-tls-trust-anchor-ids extension (Chrome 152+).
+    ta = cfg.get("trust_anchors_payload")
+    if ta:
+        _require_abi2()
+        c_ta = _c_string(ffi, ta)
+        keep_alive.append(c_ta)
+        ctc.trust_anchors_payload = c_ta
+
     return ctc
 
 
@@ -1441,6 +1609,15 @@ def _compute_cache_key_hash(r: dict) -> str:
     )
     update(main.encode("utf-8"))
 
+    # ── ABI 2 / format-version 3 additions — mirror buildCacheKeyFromConfig
+    update(("|%d|%s" % (1 if r.get("disable_session_tickets") else 0,
+                        r.get("tls_keylog_path") or "")).encode("utf-8"))
+    rc = r.get("root_ca_pem")
+    if rc:
+        update(("|rc:" + hashlib.sha256(rc).hexdigest()).encode("utf-8"))
+    else:
+        update(b"|rc:")
+
     # ── Pseudo-header orders ──────────────────────────────────────────
     ph = r["pseudo_header_order"]
     if ph:
@@ -1490,6 +1667,7 @@ def _compute_cache_key_hash(r: dict) -> str:
         update(f"|h3pp={ctc.get('h3_priority_param', 0)}".encode("utf-8"))
         update(f"|h3sgf={1 if ctc.get('h3_send_grease_frames') else 0}".encode("utf-8"))
         update(f"|ah={1 if ctc.get('allow_http') else 0}".encode("utf-8"))
+        update(f"|ta={ctc.get('trust_anchors_payload') or ''}".encode("utf-8"))
 
         str_arrays = {
             "h2_settings_order": "|h2so=", "h3_settings_order": "|h3so=",
@@ -1684,7 +1862,21 @@ class Session:
     def client_identifier(self, value: str) -> None:
         if value not in SUPPORTED_CLIENT_IDENTIFIERS:
             raise ValueError("unsupported client_identifier %r" % value)
-        self._set_default("client_identifier", value)
+        with self._defaults_lock:
+            previous = self.defaults.get("client_identifier")
+            self.defaults["client_identifier"] = value
+            self._defaults_version += 1
+            self._selected_snapshot_cache.clear()
+            # Keep the default header block in sync with the fingerprint:
+            # User-Agent / sec-ch-ua / Accept belong to the same browser
+            # profile as the TLS fingerprint.  Switching the identifier
+            # while keeping the old headers produces a detectable mismatch
+            # (TLS handshake says Safari, User-Agent says Chrome).  Once
+            # the caller customises headers explicitly, auto-sync stops.
+            if value != previous and not self._headers_customized:
+                self.defaults["default_headers"] = _clone_default_value(
+                    DEFAULT_HEADERS.get(value)
+                )
 
     @property
     def force_http1(self) -> bool:
@@ -1836,6 +2028,7 @@ class Session:
 
     @default_headers.setter
     def default_headers(self, value: Optional[Dict[str, str]]) -> None:
+        self._headers_customized = True
         self._set_default("default_headers", value)
 
     @property
@@ -1845,6 +2038,7 @@ class Session:
 
     @headers.setter
     def headers(self, value: Optional[Dict[str, str]]) -> None:
+        self._headers_customized = True
         self._set_default("default_headers", value)
 
     @property
@@ -2251,6 +2445,14 @@ class Session:
         catch_panics: bool = True,
         # 启用调试日志输出 / Enable debug log output
         with_debug: bool = False,
+        # 禁用 TLS session tickets / Disable TLS session tickets (ABI 2)
+        disable_session_tickets: bool = False,
+        # TLS keylog 文件路径（Wireshark 指纹调试）/ TLS keylog path (ABI 2)
+        tls_keylog_path: Optional[str] = None,
+        # 自定义 CA PEM 内容 / Custom CA PEM bytes for TLS verification (ABI 2)
+        root_ca_pem: Optional[bytes] = None,
+        # 指纹预设名 / Fingerprint preset name (tls_client.fingerprints)
+        fingerprint: Optional[str] = None,
     ) -> None:
         if client_identifier not in SUPPORTED_CLIENT_IDENTIFIERS:
             raise ValueError(
@@ -2315,7 +2517,19 @@ class Session:
             "tcp_mss": tcp_mss,
             "catch_panics": 1 if catch_panics else 0,
             "with_debug": 1 if with_debug else 0,
+            "disable_session_tickets": 1 if disable_session_tickets else 0,
+            "tls_keylog_path": tls_keylog_path,
+            "root_ca_pem": root_ca_pem,
         }
+        # True once the caller overrides the profile's default header block
+        # (via the default_headers/headers property or constructor kwargs);
+        # while False, switching client_identifier also switches the
+        # default headers so TLS fingerprint and headers stay consistent.
+        self._headers_customized = default_headers is not None or headers is not None
+        if fingerprint is not None:
+            from tls_client.fingerprints import apply as _apply_fingerprint
+
+            _apply_fingerprint(self, fingerprint)
 
     def stream_to_file(
         self,
@@ -2468,6 +2682,12 @@ class Session:
         catch_panics: Optional[bool] = None,
         # 覆盖调试日志 / Override debug logging
         with_debug: Optional[bool] = None,
+        # 覆盖 TLS session tickets 禁用 (ABI 2) / Override session-ticket disabling
+        disable_session_tickets: Optional[bool] = None,
+        # 覆盖 TLS keylog 路径 (ABI 2) / Override TLS keylog path
+        tls_keylog_path: Optional[str] = None,
+        # 覆盖自定义 CA PEM (ABI 2) / Override custom CA PEM bytes
+        root_ca_pem: Optional[bytes] = None,
         **kwargs: Any,
     ) -> Response:
         """通过 Go 引擎执行单次 HTTP 请求。
@@ -2480,6 +2700,7 @@ class Session:
         if self._closed:
             raise RuntimeError("Session is closed")
         ffi, lib = _get_ffi()
+        context = kwargs.pop("context", None)
         defaults = self._snapshot_selected_defaults(SYNC_REQUEST_DEFAULT_KEYS)
 
         effective_proxy = _resolve_proxy_url(
@@ -2545,6 +2766,11 @@ class Session:
             ),
             "catch_panics": _val("catch_panics", catch_panics, True),
             "with_debug": _val("with_debug", with_debug, True),
+            "disable_session_tickets": _val(
+                "disable_session_tickets", disable_session_tickets, True
+            ),
+            "tls_keylog_path": _val("tls_keylog_path", tls_keylog_path),
+            "root_ca_pem": _val("root_ca_pem", root_ca_pem),
             "tcp_ttl": _val("tcp_ttl", tcp_ttl),
             "tcp_window_size": _val("tcp_window_size", tcp_window_size),
             "tcp_window_scale": _val("tcp_window_scale", tcp_window_scale),
@@ -2554,14 +2780,51 @@ class Session:
             resolved["insecure_skip_verify"] = 0 if verify else 1
         else:
             resolved["insecure_skip_verify"] = _val("insecure_skip_verify", None, True)
+        _normalize_int_fields(resolved)
+        if _build_variant == "lite":
+            # Lite builds exclude QUIC entirely; force the flag so requests
+            # fail fast instead of reaching the engine's H3 error path.
+            resolved["disable_http3"] = 1
+
+        # ABI 2 features need the rebuilt shared library.
+        if (resolved["disable_session_tickets"] or resolved["tls_keylog_path"]
+                or resolved["root_ca_pem"]):
+            _require_abi2()
+
+        # Per-request client_identifier override: pair the request with the
+        # profile's default headers unless the caller manages headers
+        # explicitly (per-request default_headers kwarg or a customised
+        # session header block).  Prevents a Safari TLS fingerprint from
+        # going out with the session profile's Chrome User-Agent.  Applied
+        # before the cache-key hash so the key reflects the actual headers.
+        if (
+            default_headers is None
+            and not self._headers_customized
+            and resolved["client_identifier"] != defaults.get("client_identifier")
+        ):
+            resolved["default_headers"] = _clone_default_value(
+                DEFAULT_HEADERS.get(resolved["client_identifier"])
+            )
 
         keep_alive: list = []
 
+        # Fold the profile default headers into the per-request headers
+        # (see _merge_default_headers — Go drops client-level defaults
+        # whenever request headers are present).
+        merged_headers, merged_order = _merge_default_headers(
+            resolved["default_headers"], headers, header_order
+        )
+        if context is not None:
+            merged_headers, merged_order = _apply_request_context(
+                self, merged_headers, merged_order, context,
+                resolved["client_identifier"], headers,
+            )
+
         # ---- build C HttpHeader array -------------------------------------
-        hdr_ptr, hdr_len = _build_headers(ffi, headers, keep_alive)
+        hdr_ptr, hdr_len = _build_headers(ffi, merged_headers, keep_alive)
 
         # ---- build header_order array -------------------------------------
-        ho_ptr, ho_len = _build_string_array(ffi, header_order, keep_alive)
+        ho_ptr, ho_len = _build_string_array(ffi, merged_order, keep_alive)
 
         # ---- build pseudo_header_order array ------------------------------
         ph_ptr, ph_len = _build_string_array(
@@ -2666,6 +2929,18 @@ class Session:
         opts.client_certificates_len = cc_len
         opts.custom_tls_client = ctc_ptr
         opts.cache_key_hash = c_ck
+
+        # ABI 2 fields
+        opts.disable_session_tickets = resolved["disable_session_tickets"]
+        if resolved["tls_keylog_path"]:
+            c_keylog = _c_string(ffi, resolved["tls_keylog_path"])
+            keep_alive.append(c_keylog)
+            opts.tls_keylog_path = c_keylog
+        if resolved["root_ca_pem"]:
+            rc_ptr = ffi.from_buffer(resolved["root_ca_pem"])
+            keep_alive.append(rc_ptr)
+            opts.root_ca_pem = rc_ptr
+            opts.root_ca_pem_len = len(resolved["root_ca_pem"])
 
         opts.timeout_seconds = resolved["timeout_seconds"]
         opts.timeout_milliseconds = resolved["timeout_milliseconds"]
@@ -2875,6 +3150,96 @@ def _next_request_id() -> int:
         return _request_counter
 
 
+def _apply_future_state(future: "asyncio.Future", is_exc: bool, value: Any) -> None:
+    """Apply set_result/set_exception to *future* on its own loop thread.
+
+    Guarded with done() so racing completions (user cancellation, the
+    zombie timer, AsyncSession.close(), and the Go callback firing after
+    any of them) never raise InvalidStateError inside a loop callback —
+    under high concurrency those races are routine, and an unguarded
+    InvalidStateError would spam the loop's exception handler.
+    """
+    if future.done():
+        return
+    try:
+        if is_exc:
+            future.set_exception(value)
+        else:
+            future.set_result(value)
+    except asyncio.InvalidStateError:
+        pass  # cancelled/resolved between the done() check and now
+
+
+def _apply_future_exception(future: "asyncio.Future", exc: BaseException) -> None:
+    """Fail *future* with *exc* from a possibly non-loop thread."""
+    try:
+        future.get_loop().call_soon_threadsafe(
+            _apply_future_state, future, True, exc
+        )
+    except RuntimeError:
+        pass  # event loop already closed — graceful shutdown
+
+
+def _drop_pending_request(request_id: int) -> Optional[tuple]:
+    """Pop a pending request entry and cancel its defensive timer.
+
+    Returns the popped entry (or None if the callback already resolved it).
+    Safe to call from any thread.
+    """
+    with _pending_lock:
+        entry = _pending_requests.pop(request_id, None)
+    if entry is not None:
+        _future, _keep_alive, timeout_handle, _owner = entry
+        if timeout_handle is not None:
+            timeout_handle.cancel()
+    return entry
+
+
+def _defensive_timeout_seconds(timeout_seconds: Any, timeout_milliseconds: Any) -> float:
+    """Bound for the async zombie-cleanup timer.
+
+    Mirrors the Go engine's timeout fallback: timeout_milliseconds > 0
+    wins, else timeout_seconds > 0, else the engine default (30 s — Go
+    maps 0 to tls_client.DefaultTimeoutSeconds, NOT to "no timeout").
+    The defensive timer is 2× the Go timeout + 2 s grace, clamped to
+    [60, 600] seconds.
+    """
+    if timeout_milliseconds and timeout_milliseconds > 0:
+        go_timeout = timeout_milliseconds / 1000.0
+    elif timeout_seconds and timeout_seconds > 0:
+        go_timeout = float(timeout_seconds)
+    else:
+        go_timeout = 30.0
+    return max(60.0, min(go_timeout * 2.0 + 2.0, 600.0))
+
+
+def _on_zombie_timeout(request_id: int, safe_timeout: float) -> None:
+    """Defensive cleanup when the Go goroutine never fires the callback.
+
+    Runs on the event loop thread.  If the callback already completed the
+    request, the entry is gone and this is a no-op.  Otherwise the entry
+    (future + keep_alive C pointers) would leak forever, so it is dropped
+    and the future is failed with a TimeoutError.  Releasing keep_alive is
+    safe here even if the goroutine is still hung: RequestAsync deep-copies
+    all C data into the Go heap before returning, so the goroutine never
+    reads the Python-owned buffers again.
+    """
+    with _pending_lock:
+        entry = _pending_requests.pop(request_id, None)
+    if entry is None:
+        return  # already resolved via callback
+    future, _keep_alive, timeout_handle, _owner = entry
+    if timeout_handle is not None:
+        timeout_handle.cancel()
+    _apply_future_exception(
+        future,
+        asyncio.TimeoutError(
+            f"Async request {request_id} did not complete within "
+            f"{safe_timeout:.0f}s — Go goroutine may be hung"
+        ),
+    )
+
+
 def _resolve_async_response(ffi, future, raw_gc):
     """Unpack C response and resolve future ON THE EVENT LOOP THREAD.
 
@@ -2949,9 +3314,8 @@ def _make_async_callback(ffi, lib):
 
             # Handle NULL result synchronously (no C memory to manage).
             if raw_res == ffi.NULL:
-                future.get_loop().call_soon_threadsafe(
-                    future.set_exception,
-                    RuntimeError("Go engine returned NULL")
+                _apply_future_exception(
+                    future, RuntimeError("Go engine returned NULL")
                 )
                 return
 
@@ -3131,6 +3495,14 @@ class AsyncSession:
         catch_panics: bool = True,
         # 启用调试日志输出 / Enable debug log output
         with_debug: bool = False,
+        # 禁用 TLS session tickets / Disable TLS session tickets (ABI 2)
+        disable_session_tickets: bool = False,
+        # TLS keylog 文件路径 / TLS keylog path (ABI 2)
+        tls_keylog_path: Optional[str] = None,
+        # 自定义 CA PEM 内容 / Custom CA PEM bytes (ABI 2)
+        root_ca_pem: Optional[bytes] = None,
+        # 指纹预设名 / Fingerprint preset name (tls_client.fingerprints)
+        fingerprint: Optional[str] = None,
     ) -> None:
         if client_identifier not in SUPPORTED_CLIENT_IDENTIFIERS:
             raise ValueError("unsupported client_identifier %r" % client_identifier)
@@ -3183,6 +3555,10 @@ class AsyncSession:
             stream=stream,
             catch_panics=catch_panics,
             with_debug=with_debug,
+            disable_session_tickets=disable_session_tickets,
+            tls_keylog_path=tls_keylog_path,
+            root_ca_pem=root_ca_pem,
+            fingerprint=fingerprint,
         )
 
     # -- attribute delegation → underlying Session ------------------------
@@ -3234,16 +3610,11 @@ class AsyncSession:
         opts.method = c_method
         opts.url = c_url
 
-        # Headers
+        # Headers (built after the defaults are resolved — see the
+        # _merge_default_headers call below)
         headers = kwargs.pop("headers", None)
-        hdr_ptr, hdr_len = _build_headers(ffi, headers, keep_alive)
-        opts.headers = hdr_ptr
-        opts.headers_len = hdr_len
-
         header_order = kwargs.pop("header_order", None)
-        ho_ptr, ho_len = _build_string_array(ffi, header_order, keep_alive)
-        opts.header_order = ho_ptr
-        opts.header_order_len = ho_len
+        context = kwargs.pop("context", None)
 
         # Body (zero-copy — ffi.from_buffer avoids copying Python bytes to C heap)
         body = kwargs.pop("body", None)
@@ -3254,6 +3625,8 @@ class AsyncSession:
             opts.body_len = len(body)
 
         # Overrides (use defaults from the session, overridden by kwargs)
+        explicit_default_headers = kwargs.get("default_headers")
+
         def _val(name: str, as_bool: bool = False):
             if name == "proxy":
                 kwargs.pop(name, None)
@@ -3308,17 +3681,70 @@ class AsyncSession:
             ),
             "catch_panics": _val("catch_panics", True),
             "with_debug": _val("with_debug", True),
+            "disable_session_tickets": _val("disable_session_tickets", True),
+            "tls_keylog_path": _val("tls_keylog_path"),
+            "root_ca_pem": _val("root_ca_pem"),
             "tcp_ttl": _val("tcp_ttl"),
             "tcp_window_size": _val("tcp_window_size"),
             "tcp_window_scale": _val("tcp_window_scale"),
             "tcp_mss": _val("tcp_mss"),
         }
+        _normalize_int_fields(resolved)
+        if _build_variant == "lite":
+            resolved["disable_http3"] = 1
+
+        # ABI 2 features need the rebuilt shared library.
+        if (resolved["disable_session_tickets"] or resolved["tls_keylog_path"]
+                or resolved["root_ca_pem"]):
+            _require_abi2()
+
+        # Per-request client_identifier override: pair the request with the
+        # profile's default headers unless the caller manages headers
+        # explicitly (see the sync path in Session.execute_request).
+        if (
+            explicit_default_headers is None
+            and not self._session._headers_customized
+            and resolved["client_identifier"] != self._session.defaults.get("client_identifier")
+        ):
+            resolved["default_headers"] = _clone_default_value(
+                DEFAULT_HEADERS.get(resolved["client_identifier"])
+            )
+
+        # Fold the profile default headers into the per-request headers
+        # (see _merge_default_headers — Go drops client-level defaults
+        # whenever request headers are present).
+        merged_headers, merged_order = _merge_default_headers(
+            resolved["default_headers"], headers, header_order
+        )
+        if context is not None:
+            merged_headers, merged_order = _apply_request_context(
+                self._session, merged_headers, merged_order, context,
+                resolved["client_identifier"], headers,
+            )
+        hdr_ptr, hdr_len = _build_headers(ffi, merged_headers, keep_alive)
+        opts.headers = hdr_ptr
+        opts.headers_len = hdr_len
+        ho_ptr, ho_len = _build_string_array(ffi, merged_order, keep_alive)
+        opts.header_order = ho_ptr
+        opts.header_order_len = ho_len
 
         ck_hash = _compute_cache_key_hash(resolved)
         c_ck = _c_string(ffi, ck_hash)
         if c_ck != ffi.NULL:
             keep_alive.append(c_ck)
         opts.cache_key_hash = c_ck
+
+        # ABI 2 fields
+        opts.disable_session_tickets = resolved["disable_session_tickets"]
+        if resolved["tls_keylog_path"]:
+            c_keylog = _c_string(ffi, resolved["tls_keylog_path"])
+            keep_alive.append(c_keylog)
+            opts.tls_keylog_path = c_keylog
+        if resolved["root_ca_pem"]:
+            rc_ptr = ffi.from_buffer(resolved["root_ca_pem"])
+            keep_alive.append(rc_ptr)
+            opts.root_ca_pem = rc_ptr
+            opts.root_ca_pem_len = len(resolved["root_ca_pem"])
 
         opts.timeout_seconds = resolved["timeout_seconds"]
         opts.timeout_milliseconds = resolved["timeout_milliseconds"]
@@ -3420,44 +3846,22 @@ class AsyncSession:
         opts.stream_output_eof_symbol = stream_eof
 
         # ── Register Future with defensive timeout ────────────────────────
-        # Go's RequestAsync has its own timeout (timeout_seconds / timeout_milliseconds),
-        # but if the Go goroutine hangs indefinitely (network partition, OS bug),
-        # the _pending_requests entry would leak the Future + keep_alive forever.
+        # Go's RequestAsync has its own timeout (timeout_seconds / timeout_milliseconds,
+        # falling back to the engine default when both are 0), but if the Go
+        # goroutine hangs indefinitely (network partition, OS bug), the
+        # _pending_requests entry would leak the Future + keep_alive forever.
         # A defensive timeout (2× Go timeout + 10 s grace, clamped [60, 600] s)
         # cleans up zombie entries so the Python process does not accumulate
         # leaked memory under high-concurrency workloads.
-        go_timeout = float(opts.timeout_seconds) if opts.timeout_seconds > 0 else 30.0
-        if opts.timeout_milliseconds > 0:
-            go_timeout = float(opts.timeout_milliseconds) / 1000.0
-        safe_timeout = max(60.0, min(go_timeout * 2.0 + 2.0, 600.0))
-
-        def _on_zombie_timeout(rid: int) -> None:
-            # Safe: by this point the Go goroutine has either completed
-            # (callback fired) or is hung.  If completed, _pending_requests
-            # already popped and we return early.  If hung, the goroutine
-            # owns its own body copy (deepCopyRequestOptions copies via
-            # C.GoBytes — Bug #5 fix), so releasing keep_alive is safe.
-            with _pending_lock:
-                entry = _pending_requests.pop(rid, None)
-            if entry is None:
-                return  # already resolved via callback
-            fut, _ka, _, _owner = entry
-            if not fut.done():
-                try:
-                    fut.get_loop().call_soon_threadsafe(
-                        fut.set_exception,
-                        asyncio.TimeoutError(
-                            f"Async request {rid} did not complete within "
-                            f"{safe_timeout:.0f}s — Go goroutine may be hung"
-                        ),
-                    )
-                except RuntimeError:
-                    # Event loop closed — nothing can be done (graceful shutdown).
-                    pass
+        safe_timeout = _defensive_timeout_seconds(
+            resolved["timeout_seconds"], resolved["timeout_milliseconds"]
+        )
 
         request_id = _next_request_id()
         future: asyncio.Future = loop.create_future()
-        timeout_handle = loop.call_later(safe_timeout, _on_zombie_timeout, request_id)
+        timeout_handle = loop.call_later(
+            safe_timeout, _on_zombie_timeout, request_id, safe_timeout
+        )
 
         with _pending_lock:
             # Store keep_alive alongside the Future – the goroutine reads
@@ -3467,18 +3871,20 @@ class AsyncSession:
 
         # Step 1-2: Call RequestAsync — Go deep-copies, dispatches goroutine,
         # returns immediately.  Python can free keep_alive memory after return.
-        ret = lib.RequestAsync(opts, request_id, callback)
+        try:
+            ret = lib.RequestAsync(opts, request_id, callback)
+        except BaseException:
+            # cffi-level failure before Go took ownership — drop the entry
+            # and its defensive timer so nothing leaks.
+            _drop_pending_request(request_id)
+            raise
 
         if ret != 0:
             # RequestAsync returned an error — clean up the pending entry
             # and cancel the defensive zombie timeout.  keep_alive is
             # already safe to release because RequestAsync deep-copies
             # before returning.
-            with _pending_lock:
-                entry = _pending_requests.pop(request_id, None)
-                if entry is not None:
-                    _, _, th, _ = entry
-                    th.cancel()
+            _drop_pending_request(request_id)
             raise RuntimeError("RequestAsync failed — opts or callback is nil")
 
         # Await the Future — event loop is free to run other tasks
@@ -3620,6 +4026,12 @@ class AsyncSession:
         catch_panics: Optional[bool] = None,
         # 覆盖调试日志 / Override debug logging
         with_debug: Optional[bool] = None,
+        # 覆盖 TLS session tickets 禁用 (ABI 2) / Override session-ticket disabling
+        disable_session_tickets: Optional[bool] = None,
+        # 覆盖 TLS keylog 路径 (ABI 2) / Override TLS keylog path
+        tls_keylog_path: Optional[str] = None,
+        # 覆盖自定义 CA PEM (ABI 2) / Override custom CA PEM bytes
+        root_ca_pem: Optional[bytes] = None,
         tcp_ttl: Optional[int] = None,
         tcp_window_size: Optional[int] = None,
         tcp_window_scale: Optional[int] = None,
@@ -3674,6 +4086,9 @@ class AsyncSession:
             tcp_mss=tcp_mss,
             catch_panics=catch_panics,
             with_debug=with_debug,
+            disable_session_tickets=disable_session_tickets,
+            tls_keylog_path=tls_keylog_path,
+            root_ca_pem=root_ca_pem,
             **kwargs,
         )
 
@@ -3790,13 +4205,9 @@ class AsyncSession:
             if timeout_handle is not None:
                 timeout_handle.cancel()
             if future is not None and not future.done():
-                try:
-                    future.get_loop().call_soon_threadsafe(
-                        future.set_exception,
-                        RuntimeError("AsyncSession is closed"),
-                    )
-                except RuntimeError:
-                    pass
+                _apply_future_exception(
+                    future, RuntimeError("AsyncSession is closed")
+                )
         _, lib = _get_ffi()
         lib.ClearClientPool()
 

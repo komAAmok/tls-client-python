@@ -28,6 +28,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
+        variant: [full, lite]
         include:
           - runner: ubuntu-latest
             goos: linux
@@ -108,16 +109,16 @@ jobs:
           go build -buildmode=c-shared \
                    -buildvcs=false \
                    -trimpath \
-                   -tags="netgo osusergo" \
+                   -tags="netgo osusergo${{ matrix.variant == 'lite' && ' tls_lite' || '' }}" \
                    -gcflags="all=-trimpath=${{ github.workspace }}" \
                    -asmflags="all=-trimpath=${{ github.workspace }}" \
                    -ldflags="-s -w -buildid= -extldflags '-Wl,-s'" \
-                   -o "../tls_client/bin/tls-client-${{ matrix.goos }}-${{ matrix.goarch }}${{ matrix.ext }}" .
+                   -o "../tls_client/bin/tls-client-${{ matrix.goos }}-${{ matrix.goarch }}${{ matrix.variant == 'lite' && '-lite' || '' }}${{ matrix.ext }}" .
 
       - name: Strip Binary Safely
         shell: bash
         run: |
-          TARGET="tls_client/bin/tls-client-${{ matrix.goos }}-${{ matrix.goarch }}${{ matrix.ext }}"
+          TARGET="tls_client/bin/tls-client-${{ matrix.goos }}-${{ matrix.goarch }}${{ matrix.variant == 'lite' && '-lite' || '' }}${{ matrix.ext }}"
           if [ "${{ matrix.goos }}" = "darwin" ]; then
             strip -x "$TARGET" || true
           else
@@ -129,7 +130,7 @@ jobs:
         if: matrix.goos != 'darwin'
         shell: bash
         run: |
-          TARGET="tls_client/bin/tls-client-${{ matrix.goos }}-${{ matrix.goarch }}${{ matrix.ext }}"
+          TARGET="tls_client/bin/tls-client-${{ matrix.goos }}-${{ matrix.goarch }}${{ matrix.variant == 'lite' && '-lite' || '' }}${{ matrix.ext }}"
           if [ "${{ matrix.goos }}" = "linux" ]; then
             upx --ultra-brute --shlib "$TARGET" || true
           else
@@ -146,21 +147,25 @@ jobs:
       - name: Upload Platform Wheel Artifact
         uses: actions/upload-artifact@v4
         with:
-          name: wheel-${{ matrix.goos }}-${{ matrix.goarch }}
+          name: wheel-${{ matrix.goos }}-${{ matrix.goarch }}-${{ matrix.variant }}
           path: dist/*.whl
 
       - name: Upload Raw Binary Artifact
         uses: actions/upload-artifact@v4
         with:
-          name: bin-${{ matrix.goos }}-${{ matrix.goarch }}
-          path: tls_client/bin/tls-client-${{ matrix.goos }}-${{ matrix.goarch }}${{ matrix.ext }}
+          name: bin-${{ matrix.goos }}-${{ matrix.goarch }}-${{ matrix.variant }}
+          path: tls_client/bin/tls-client-${{ matrix.goos }}-${{ matrix.goarch }}${{ matrix.variant == 'lite' && '-lite' || '' }}${{ matrix.ext }}
 
   # -----------------------------------------------------------------------
   # 2. Cross-compile and Pack Windows 32-bit (386) on Linux
   # -----------------------------------------------------------------------
   build-windows-386-cross:
-    name: Cross Windows-386
+    name: Cross Windows-386 (${{ matrix.variant }})
     runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        variant: [full, lite]
     steps:
       - name: Checkout Code
         uses: actions/checkout@v4
@@ -201,16 +206,16 @@ jobs:
           go build -buildmode=c-shared \
                    -buildvcs=false \
                    -trimpath \
-                   -tags="netgo osusergo" \
+                   -tags="netgo osusergo${{ matrix.variant == 'lite' && ' tls_lite' || '' }}" \
                    -gcflags="all=-trimpath=${{ github.workspace }}" \
                    -asmflags="all=-trimpath=${{ github.workspace }}" \
                    -ldflags="-s -w -buildid= -extldflags '-Wl,-s'" \
-                   -o "../tls_client/bin/tls-client-windows-386.dll" .
+                   -o "../tls_client/bin/tls-client-windows-386${{ matrix.variant == 'lite' && '-lite' || '' }}.dll" .
 
       - name: Strip & Compress
         run: |
-          i686-w64-mingw32-strip --strip-unneeded tls_client/bin/tls-client-windows-386.dll || true
-          upx --ultra-brute tls_client/bin/tls-client-windows-386.dll || true # 🌟 开启 --ultra-brute
+          i686-w64-mingw32-strip --strip-unneeded tls_client/bin/tls-client-windows-386${{ matrix.variant == 'lite' && '-lite' || '' }}.dll || true
+          upx --ultra-brute tls_client/bin/tls-client-windows-386${{ matrix.variant == 'lite' && '-lite' || '' }}.dll || true # 🌟 开启 --ultra-brute
 
       - name: Build Wheel
         run: |
@@ -221,14 +226,14 @@ jobs:
       - name: Upload Artifact
         uses: actions/upload-artifact@v4
         with:
-          name: wheel-windows-386
+          name: wheel-windows-386-${{ matrix.variant }}
           path: dist/*.whl
 
       - name: Upload Raw Binary Artifact
         uses: actions/upload-artifact@v4
         with:
-          name: bin-windows-386
-          path: tls_client/bin/tls-client-windows-386.dll
+          name: bin-windows-386-${{ matrix.variant }}
+          path: tls_client/bin/tls-client-windows-386${{ matrix.variant == 'lite' && '-lite' || '' }}.dll
 
   # -----------------------------------------------------------------------
   # 3. Cross-compile and Pack Linux ARM & 386 (glibc based)
@@ -239,6 +244,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
+        variant: [full, lite]
         include:
           - goarch: arm
             goarm: "7"
@@ -303,17 +309,17 @@ jobs:
           go build -buildmode=c-shared \
                    -buildvcs=false \
                    -trimpath \
-                   -tags="netgo osusergo" \
+                   -tags="netgo osusergo${{ matrix.variant == 'lite' && ' tls_lite' || '' }}" \
                    -gcflags="all=-trimpath=${{ github.workspace }}" \
                    -asmflags="all=-trimpath=${{ github.workspace }}" \
                    -ldflags="-s -w -buildid= -extldflags '-Wl,-s'" \
-                   -o "../tls_client/bin/tls-client-linux-${{ matrix.goarch }}${{ matrix.ext }}" .
+                   -o "../tls_client/bin/tls-client-linux-${{ matrix.goarch }}${{ matrix.variant == 'lite' && '-lite' || '' }}${{ matrix.ext }}" .
 
       # 🌟 优化：对 Linux 跨平台 ELF 动态库追加 --shlib 与 --ultra-brute 压缩参数
       - name: Strip & Compress
         run: |
-          ${{ matrix.strip_cmd }} -R .comment -R .note.GNU-stack --strip-unneeded tls_client/bin/tls-client-linux-${{ matrix.goarch }}${{ matrix.ext }} || true
-          upx --ultra-brute --shlib tls_client/bin/tls-client-linux-${{ matrix.goarch }}${{ matrix.ext }} || true
+          ${{ matrix.strip_cmd }} -R .comment -R .note.GNU-stack --strip-unneeded tls_client/bin/tls-client-linux-${{ matrix.goarch }}${{ matrix.variant == 'lite' && '-lite' || '' }}${{ matrix.ext }} || true
+          upx --ultra-brute --shlib tls_client/bin/tls-client-linux-${{ matrix.goarch }}${{ matrix.variant == 'lite' && '-lite' || '' }}${{ matrix.ext }} || true
 
       - name: Build Wheel
         run: |
@@ -324,21 +330,25 @@ jobs:
       - name: Upload Artifact
         uses: actions/upload-artifact@v4
         with:
-          name: wheel-linux-${{ matrix.goarch }}
+          name: wheel-linux-${{ matrix.goarch }}-${{ matrix.variant }}
           path: dist/*.whl
 
       - name: Upload Raw Binary Artifact
         uses: actions/upload-artifact@v4
         with:
-          name: bin-linux-${{ matrix.goarch }}
-          path: tls_client/bin/tls-client-linux-${{ matrix.goarch }}${{ matrix.ext }}
+          name: bin-linux-${{ matrix.goarch }}-${{ matrix.variant }}
+          path: tls_client/bin/tls-client-linux-${{ matrix.goarch }}${{ matrix.variant == 'lite' && '-lite' || '' }}${{ matrix.ext }}
 
   # -----------------------------------------------------------------------
   # 4. Native-compile and Pack for Alpine Linux (musl libc based)
   # -----------------------------------------------------------------------
   build-alpine:
-    name: Build Alpine-amd64 (musl)
+    name: Build Alpine-amd64 (musl, ${{ matrix.variant }})
     runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        variant: [full, lite]
     container:
       image: golang:1.24-alpine
     steps:
@@ -366,17 +376,17 @@ jobs:
           go build -buildmode=c-shared \
                    -buildvcs=false \
                    -trimpath \
-                   -tags="netgo osusergo musl" \
+                   -tags="netgo osusergo musl${{ matrix.variant == 'lite' && ' tls_lite' || '' }}" \
                    -gcflags="all=-trimpath=${{ github.workspace }}" \
                    -asmflags="all=-trimpath=${{ github.workspace }}" \
                    -ldflags="-s -w -buildid= -extldflags '-Wl,-s'" \
-                   -o "../tls_client/bin/tls-client-linux-amd64-musl.so" .
+                   -o "../tls_client/bin/tls-client-linux-amd64-musl${{ matrix.variant == 'lite' && '-lite' || '' }}.so" .
 
       # 🌟 优化：对 Alpine 本地 ELF 动态库追加 --shlib 与 --ultra-brute 压缩参数
       - name: Strip & Compress
         run: |
-          strip -R .comment -R .note.GNU-stack --strip-unneeded tls_client/bin/tls-client-linux-amd64-musl.so || true
-          upx --ultra-brute --shlib tls_client/bin/tls-client-linux-amd64-musl.so || true
+          strip -R .comment -R .note.GNU-stack --strip-unneeded tls_client/bin/tls-client-linux-amd64-musl${{ matrix.variant == 'lite' && '-lite' || '' }}.so || true
+          upx --ultra-brute --shlib tls_client/bin/tls-client-linux-amd64-musl${{ matrix.variant == 'lite' && '-lite' || '' }}.so || true
 
       - name: Build Wheel
         run: |
@@ -386,14 +396,14 @@ jobs:
       - name: Upload Artifact
         uses: actions/upload-artifact@v4
         with:
-          name: wheel-alpine-amd64
+          name: wheel-alpine-amd64-${{ matrix.variant }}
           path: dist/*.whl
 
       - name: Upload Raw Binary Artifact
         uses: actions/upload-artifact@v4
         with:
-          name: bin-alpine-amd64
-          path: tls_client/bin/tls-client-linux-amd64-musl.so
+          name: bin-alpine-amd64-${{ matrix.variant }}
+          path: tls_client/bin/tls-client-linux-amd64-musl${{ matrix.variant == 'lite' && '-lite' || '' }}.so
 
   # -----------------------------------------------------------------------
   # 5. Build Source Distribution & Publish All Wheels to PyPI

@@ -187,25 +187,24 @@ func TestGetPoolStats(t *testing.T) {
 		clientPool.Store("entry-"+string(rune('a'+i)), pe)
 	}
 
-	var stats C.PoolStats
-	GetPoolStats(&stats)
+	var stats = readPoolStatsForTest()
 
-	if v := int64(stats.total_evictions); v != 42 {
+	if v := stats.totalEvictions; v != 42 {
 		t.Errorf("total_evictions = %d, want 42", v)
 	}
-	if v := int64(stats.last_eviction_count); v != 7 {
+	if v := stats.lastEvictionCount; v != 7 {
 		t.Errorf("last_eviction_count = %d, want 7", v)
 	}
-	if v := int64(stats.last_eviction_time); v != 1700000000000000000 {
+	if v := stats.lastEvictionTime; v != 1700000000000000000 {
 		t.Errorf("last_eviction_time = %d, want 1700000000000000000", v)
 	}
-	if v := int64(stats.pool_entry_count); v != 3 {
+	if v := stats.entryCount; v != 3 {
 		t.Errorf("pool_entry_count = %d, want 3", v)
 	}
-	if v := int64(stats.pool_ttl_seconds); v != 120 {
+	if v := stats.ttlSeconds; v != 120 {
 		t.Errorf("pool_ttl_seconds = %d, want 120", v)
 	}
-	if v := int64(stats.pool_scan_interval_seconds); v != 30 {
+	if v := stats.scanInterval; v != 30 {
 		t.Errorf("pool_scan_interval_seconds = %d, want 30", v)
 	}
 

@@ -35,6 +35,10 @@ For a deep dive, see [this excellent article on TLS fingerprinting](https://http
 | 🔄 **sync/Async** | `Session`  +  `AsyncSession` |
 | 🛡️ **Panic-proof** | All Go panics caught and surfaced as Python exceptions |
 | ⚙️ **Custom TLS** | Full 26-field custom TLS client configuration |
+| 🎯 **Fingerprint Presets** | Coherent per-OS bundles: identifier + headers + header order + pseudo-header order (`tls_client.fingerprints`) |
+| 🧭 **Request Contexts** | Browser-coherent `Sec-Fetch-*`, Client Hints and RFC 9218 `Priority` headers (`RequestContext`) |
+| 🔏 **Trust Anchors / ECH** | Chrome 152 `0xCA34` trust anchors and automatic ECH config resolution over DoH |
+| 🪶 **Lite Variant** | QUIC-free build (`TLS_CLIENT_VARIANT=lite`) for a smaller binary |
 
 > **macOS TCP fingerprinting:** macOS derives TCP MSS during `connect` and
 > rejects `TCP_MAXSEG` in the pre-connect socket hook. The MSS hint is therefore
@@ -309,6 +313,78 @@ session = Session(
     }]
 )
 ```
+
+### Fingerprint Presets (Coherent Browser Bundles)
+
+A preset bundles the engine TLS profile, per-OS coherent headers, and
+HTTP/2 & HTTP/3 pseudo-header ordering in one line:
+
+```python
+from tls_client import Session
+from tls_client.fingerprints import apply, list_presets
+
+session = Session()
+apply(session, "chrome_152_windows")   # or firefox_148_linux, chrome_152_ios, ...
+session.get("https://tls.peet.ws/api/all")
+```
+
+Or directly: `Session(fingerprint="chrome_152_windows")`. Custom presets are
+plain JSON with optional `based_on` inheritance:
+
+```python
+from tls_client.fingerprints import load_preset_file
+load_preset_file("my_chrome.json")     # {"name": ..., "based_on": "chrome_152_windows", ...}
+```
+
+### Request Contexts (Sec-Fetch-*, Client Hints, Priority)
+
+Describe *how* the request was initiated and the coherent header set is
+derived (opt-in — without `context=` nothing changes):
+
+```python
+from tls_client.context import RequestContext
+
+session.get(url, context=RequestContext.navigation(url, referrer=page_url))
+session.post(api, context=RequestContext.xhr(api))
+session.get(img, context=RequestContext.image(img))
+```
+
+### Trust Anchors (Chrome 152+, ABI 2) and ECH
+
+```python
+session = Session(custom_tls_client={
+    "ja3_string": "...",
+    "trust_anchors_payload": "0009080102030405060708",  # hex of the 0xCA34 payload
+})
+
+# Automatic ECH resolution over DoH (RFC 9460), cached per host:
+from tls_client import ech
+payload = ech.resolve("tls.peet.ws")
+session = Session(custom_tls_client={
+    "ja3_string": "...",
+    "ech_candidate_payloads": ech.to_candidate_payloads(payload),
+})
+```
+
+> `TLS_CLIENT_DOH_ENDPOINT` overrides the DoH server
+> (e.g. `https://dns.alidns.com/resolve`) — useful on networks where
+> `cloudflare-dns.com` is unreachable.
+
+### TLS Debugging (Keylog) and Custom CA (ABI 2)
+
+```python
+session = Session(
+    tls_keylog_path="keylog.txt",      # Wireshark TLS secrets
+    root_ca_pem=open("corp-ca.pem", "rb").read(),
+    disable_session_tickets=True,
+)
+```
+
+### Lite Build (No QUIC — Smaller Binary)
+
+Set `TLS_CLIENT_VARIANT=lite` to load the `-lite` shared library (built
+without QUIC/HTTP-3; ~15-20% smaller uncompressed, more after UPX).
+`disable_http3` is forced automatically in this variant.
 
 ### Stream Response to Disk
 

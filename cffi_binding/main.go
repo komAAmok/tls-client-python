@@ -82,6 +82,7 @@ typedef struct {
     unsigned int   h3_priority_param;
     int   h3_send_grease_frames;
     int   allow_http;
+    const char* trust_anchors_payload;
 } CustomTlsClient;
 
 typedef struct {
@@ -145,6 +146,11 @@ typedef struct {
     int   client_certificates_len;
     CustomTlsClient* custom_tls_client;
     const char* cache_key_hash;
+    // ── ABI 2 additions (append-only; consumers must call GetAbiVersion) ──
+    int   disable_session_tickets;
+    const char* tls_keylog_path;
+    const char* root_ca_pem;
+    int   root_ca_pem_len;
 } RequestOptions;
 
 typedef struct {
@@ -186,6 +192,7 @@ import "C"
 import (
 	"bytes"
 	"crypto/sha256"
+	"crypto/x509"
 	"fmt"
 	"hash"
 	"io"
@@ -445,6 +452,11 @@ type requestConfig struct {
 	clientKeyPEMs            [][]byte           // raw key PEM for cache-key parity with buildCacheKey
 	customTLSClient          *C.CustomTlsClient // deep-copied to C heap; freed after use
 	cacheKeyHash             string             // pre-computed by Python to skip CGO in buildCacheKey
+
+	// ABI 2 additions
+	disableSessionTickets bool
+	tlsKeylogPath         string
+	rootCAPEM             []byte
 }
 
 // requestConfigFromOptions converts C request options to the shared Go form.
@@ -592,6 +604,14 @@ func requestConfigFromOptions(opts *C.RequestOptions, copyBody bool) (cfg *reque
 		cfg.cacheKeyHash = C.GoString(opts.cache_key_hash)
 	}
 
+	// ABI 2 additions — always deep-copy the CA PEM (small, and the async
+	// goroutine must not depend on Python-owned memory).
+	cfg.disableSessionTickets = int(opts.disable_session_tickets) != 0
+	cfg.tlsKeylogPath = C.GoString(opts.tls_keylog_path)
+	if opts.root_ca_pem != nil && opts.root_ca_pem_len > 0 {
+		cfg.rootCAPEM = C.GoBytes(unsafe.Pointer(opts.root_ca_pem), opts.root_ca_pem_len)
+	}
+
 	return cfg
 }
 
@@ -628,6 +648,7 @@ func deepCopyCustomTLSClient(src *C.CustomTlsClient) (dst *C.CustomTlsClient) {
 	dst.supported_delegated_credentials_algorithms = nil
 	dst.supported_signature_algorithms = nil
 	dst.supported_versions = nil
+	dst.trust_anchors_payload = nil
 
 	// Panic recovery: if any C.malloc or cStrDup panics partway through
 	// the deep copy, we must free the partially-allocated struct to prevent
@@ -654,6 +675,7 @@ func deepCopyCustomTLSClient(src *C.CustomTlsClient) (dst *C.CustomTlsClient) {
 	dst.supported_delegated_credentials_algorithms = cStrArrDup(src.supported_delegated_credentials_algorithms, int(src.supported_delegated_credentials_algorithms_len))
 	dst.supported_signature_algorithms = cStrArrDup(src.supported_signature_algorithms, int(src.supported_signature_algorithms_len))
 	dst.supported_versions = cStrArrDup(src.supported_versions, int(src.supported_versions_len))
+	dst.trust_anchors_payload = cStrDup(src.trust_anchors_payload)
 
 	// H2 settings keys
 	dst.h2_settings_keys = cStrArrDup(src.h2_settings_keys, int(src.h2_settings_len))
@@ -757,6 +779,7 @@ func freeCustomTLSClient(ctc *C.CustomTlsClient) {
 	C.free(unsafe.Pointer(ctc.ech_candidate_cipher_suites))
 	C.free(unsafe.Pointer(ctc.priority_frames))
 	C.free(unsafe.Pointer(ctc.header_priority))
+	C.free(unsafe.Pointer(ctc.trust_anchors_payload))
 	C.free(unsafe.Pointer(ctc))
 }
 
@@ -895,7 +918,8 @@ func buildCustomProfileFromC(ctc *C.CustomTlsClient) (profiles.ClientProfile, er
 		ja3Str, supportedSigAlgs, supportedDelCredAlgs,
 		supportedVersions, keyShareCurves, alpnProtocols,
 		alpsProtocols, echCipherSuites, echPayloads,
-		certCompressionAlgos, uint16(ctc.record_size_limit), "",
+		certCompressionAlgos, uint16(ctc.record_size_limit),
+		C.GoString(ctc.trust_anchors_payload),
 	)
 	if err != nil {
 		var zero profiles.ClientProfile
@@ -1025,6 +1049,14 @@ func buildCacheKeyFromConfig(cfg *requestConfig) string {
 		cfg.timeoutSeconds, cfg.timeoutMilliseconds,
 		cfg.tcpTTL, cfg.tcpWindowSize, cfg.tcpWindowScale, cfg.tcpMSS,
 	)
+	// ABI 2 / format-version 3 additions. Python's _compute_cache_key_hash
+	// must mirror these byte-for-byte (see test_cache_key_parity.py).
+	fmt.Fprintf(h, "|%d|%s", b2i(cfg.disableSessionTickets), cfg.tlsKeylogPath)
+	if len(cfg.rootCAPEM) > 0 {
+		fmt.Fprintf(h, "|rc:%x", sha256.Sum256(cfg.rootCAPEM))
+	} else {
+		fmt.Fprint(h, "|rc:")
+	}
 	if len(cfg.pseudoHeaderOrder) > 0 {
 		for _, s := range cfg.pseudoHeaderOrder {
 			fmt.Fprintf(h, ":%s", s)
@@ -1082,7 +1114,7 @@ func buildCacheKeyFromConfig(cfg *requestConfig) string {
 	// Hash custom TLS client configuration (mirrors buildCacheKey)
 	if cfg.customTLSClient != nil {
 		ctc := cfg.customTLSClient
-		fmt.Fprintf(h, "|ja3=%s|cf=%d|rsl=%d|sid=%d|h3pp=%d|h3sgf=%d|ah=%d",
+		fmt.Fprintf(h, "|ja3=%s|cf=%d|rsl=%d|sid=%d|h3pp=%d|h3sgf=%d|ah=%d|ta=%s",
 			C.GoString(ctc.ja3_string),
 			uint32(ctc.connection_flow),
 			uint16(ctc.record_size_limit),
@@ -1090,6 +1122,7 @@ func buildCacheKeyFromConfig(cfg *requestConfig) string {
 			uint32(ctc.h3_priority_param),
 			int(ctc.h3_send_grease_frames),
 			int(ctc.allow_http),
+			C.GoString(ctc.trust_anchors_payload),
 		)
 		hashStringArray(h, ctc.h2_settings_order, int(ctc.h2_settings_order_len), "|h2so=")
 		hashStringArray(h, ctc.h3_settings_order, int(ctc.h3_settings_order_len), "|h3so=")
@@ -1306,6 +1339,9 @@ func buildClientFromConfig(cfg *requestConfig) (tls_client.HttpClient, error) {
 	if cfg.catchPanics {
 		options = append(options, tls_client.WithCatchPanics())
 	}
+	if cfg.disableSessionTickets {
+		options = append(options, tls_client.WithDisableSessionTickets())
+	}
 	if cfg.withDebug {
 		options = append(options, tls_client.WithDebug())
 	}
@@ -1335,6 +1371,25 @@ func buildClientFromConfig(cfg *requestConfig) (tls_client.HttpClient, error) {
 	}
 	if len(cfg.clientCertificates) > 0 {
 		transportOpts.Certificates = cfg.clientCertificates
+	}
+	// ABI 2: TLS keylog (Wireshark fingerprint debugging) and custom CA pool.
+	if cfg.tlsKeylogPath != "" {
+		// Unbuffered *os.File: keylog lines are tiny and only useful if they
+		// reach disk without an explicit flush hook on the pooled client.
+		f, err := os.OpenFile(cfg.tlsKeylogPath, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o600)
+		if err == nil {
+			transportOpts.KeyLogWriter = f
+		} else if cfg.withDebug {
+			fmt.Fprintf(os.Stderr, "[tls-client] keylog open failed: %v\n", err)
+		}
+	}
+	if len(cfg.rootCAPEM) > 0 {
+		pool := x509.NewCertPool()
+		if pool.AppendCertsFromPEM(cfg.rootCAPEM) {
+			transportOpts.RootCAs = pool
+		} else if cfg.withDebug {
+			fmt.Fprint(os.Stderr, "[tls-client] root_ca_pem contained no usable certificates\n")
+		}
 	}
 	// Default idle connection timeout of 30s — prevents unbounded
 	// connection-pool growth when the caller does not set it explicitly.
@@ -1795,6 +1850,19 @@ func SetPoolScanInterval(seconds C.int) {
 	poolScanIntervalNs.Store(int64(time.Duration(seconds) * time.Second))
 }
 
+//export GetBuildVariant
+func GetBuildVariant() *C.char {
+	return C.CString(tls_client.BuildVariant)
+}
+
+//export GetAbiVersion
+func GetAbiVersion() C.int {
+	// ABI 2: RequestOptions gained disable_session_tickets / tls_keylog_path /
+	// root_ca_pem(+len) and CustomTlsClient gained trust_anchors_payload.
+	// Append-only struct evolution; consumers must verify via this export.
+	return 2
+}
+
 //export RequestAsync
 func RequestAsync(opts *C.RequestOptions, requestID C.uintptr_t, cb unsafe.Pointer) C.int {
 	if opts == nil || cb == nil {
@@ -1867,3 +1935,45 @@ func RequestAsync(opts *C.RequestOptions, requestID C.uintptr_t, cb unsafe.Point
 }
 
 func main() {}
+
+// ---------------------------------------------------------------------------
+// Test-support bridge — Go test files cannot use cgo directly ("use of cgo
+// in test not supported"), so the C-touching helpers used by
+// cachekey_parity_test.go and pool_test.go live here.
+// ---------------------------------------------------------------------------
+
+// poolStatsView mirrors C.PoolStats in plain Go for test assertions.
+type poolStatsView struct {
+	totalEvictions    int64
+	lastEvictionCount int64
+	lastEvictionTime  int64
+	entryCount        int64
+	ttlSeconds        int64
+	scanInterval      int64
+}
+
+func readPoolStatsForTest() poolStatsView {
+	var stats C.PoolStats
+	GetPoolStats(&stats)
+	return poolStatsView{
+		totalEvictions:    int64(stats.total_evictions),
+		lastEvictionCount: int64(stats.last_eviction_count),
+		lastEvictionTime:  int64(stats.last_eviction_time),
+		entryCount:        int64(stats.pool_entry_count),
+		ttlSeconds:        int64(stats.pool_ttl_seconds),
+		scanInterval:      int64(stats.pool_scan_interval_seconds),
+	}
+}
+
+func newCustomTlsClientForTest(ja3, trustAnchors string, connectionFlow uint32) (dst *C.CustomTlsClient, cleanup func()) {
+	ctc := (*C.CustomTlsClient)(C.malloc(C.size_t(unsafe.Sizeof(C.CustomTlsClient{}))))
+	*ctc = C.CustomTlsClient{}
+	ctc.ja3_string = C.CString(ja3)
+	ctc.trust_anchors_payload = C.CString(trustAnchors)
+	ctc.connection_flow = C.uint(connectionFlow)
+	return ctc, func() {
+		C.free(unsafe.Pointer(ctc.ja3_string))
+		C.free(unsafe.Pointer(ctc.trust_anchors_payload))
+		C.free(unsafe.Pointer(ctc))
+	}
+}
