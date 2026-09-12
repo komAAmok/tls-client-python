@@ -37,10 +37,30 @@ func MergeTcpFingerprint(auto, override *profiles.TcpFingerprint) *profiles.TcpF
 	if override.MSS != nil {
 		out.MSS = intPtrCopy(override.MSS)
 	}
+	if override.DontFragment != nil {
+		out.DontFragment = boolPtrCopy(override.DontFragment)
+	}
+	if override.TOS != nil {
+		out.TOS = intPtrCopy(override.TOS)
+	}
+	if override.NoDelay != nil {
+		out.NoDelay = boolPtrCopy(override.NoDelay)
+	}
+	if override.WindowClamp != nil {
+		out.WindowClamp = intPtrCopy(override.WindowClamp)
+	}
+	if override.IPIDMode != "" {
+		out.IPIDMode = override.IPIDMode
+	}
 	return &out
 }
 
 func intPtrCopy(v *int) *int {
+	c := *v
+	return &c
+}
+
+func boolPtrCopy(v *bool) *bool {
 	c := *v
 	return &c
 }
@@ -93,8 +113,26 @@ func applySocketOptions(fd int, fp *profiles.TcpFingerprint) error {
 			errs = append(errs, fmt.Errorf("WindowScale(%d): %w", *fp.WindowScale, err))
 		}
 	}
+	if fp.WindowClamp != nil {
+		if err := setWindowClamp(fd, *fp.WindowClamp); err != nil {
+			errs = append(errs, fmt.Errorf("WindowClamp(%d): %w", *fp.WindowClamp, err))
+		}
+	}
+	if fp.TOS != nil {
+		if err := setTOS(fd, *fp.TOS); err != nil {
+			errs = append(errs, fmt.Errorf("TOS(%d): %w", *fp.TOS, err))
+		}
+	}
+	if fp.DontFragment != nil {
+		if err := setDontFragment(fd, *fp.DontFragment); err != nil {
+			errs = append(errs, fmt.Errorf("DontFragment(%t): %w", *fp.DontFragment, err))
+		}
+	}
+	if fp.NoDelay != nil {
+		if err := setNoDelay(fd, *fp.NoDelay); err != nil {
+			errs = append(errs, fmt.Errorf("NoDelay(%t): %w", *fp.NoDelay, err))
+		}
+	}
 
 	return errors.Join(errs...)
 }
-
-

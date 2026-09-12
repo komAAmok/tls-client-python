@@ -46,6 +46,10 @@ type TransportOptions struct {
 	// H2HPACKIndexingPolicy selects the HPACK indexing behaviour ("chrome").
 	// Empty = default. Local overlay: fingerprint realism.
 	H2HPACKIndexingPolicy string
+	// H2DisablePriorityFrames suppresses RFC 7540 PRIORITY frames and the
+	// HEADERS PRIORITY flag.  Chromium stopped sending PRIORITY frames in
+	// Chrome 120 and Safari never sends them.  Local overlay: realism.
+	H2DisablePriorityFrames bool
 }
 
 type (
@@ -96,6 +100,8 @@ type httpClientConfig struct {
 	followRedirects             bool
 	insecureSkipVerify          bool
 	withRandomTlsExtensionOrder bool
+	extensionPermuteMode        ExtensionPermuteMode
+	extensionPermutePrefix      int
 	forceHttp1                  bool
 	disableHttp3                bool
 	disableSessionTickets       bool
@@ -234,7 +240,33 @@ func WithCustomRedirectFunc(redirectFunc func(req *http.Request, via []*http.Req
 func WithRandomTLSExtensionOrder() HttpClientOption {
 	return func(config *httpClientConfig) {
 		config.withRandomTlsExtensionOrder = true
+		config.extensionPermuteMode = PermuteChrome
 	}
+}
+
+// WithExtensionPermuteMode selects a precise extension-order policy.
+//
+// PermuteOff sends the captured order unchanged; PermuteChrome matches
+// Chromium (fresh order per handshake, GREASE/padding/pre_shared_key pinned);
+// PermuteAll also shuffles padding; PermutePrefix shuffles only the first
+// `prefix` extensions.  It supersedes WithRandomTLSExtensionOrder.
+func WithExtensionPermuteMode(mode ExtensionPermuteMode, prefix int) HttpClientOption {
+	return func(config *httpClientConfig) {
+		config.extensionPermuteMode = mode
+		config.extensionPermutePrefix = prefix
+		config.withRandomTlsExtensionOrder = mode != PermuteOff
+	}
+}
+
+// extensionPermuteConfig resolves the configured extension-order policy.
+// WithRandomTLSExtensionOrder alone (no explicit mode) maps to PermuteChrome,
+// which is the Chromium behaviour that option was always meant to model.
+func (c *httpClientConfig) extensionPermuteConfig() extensionPermuteConfig {
+	mode := c.extensionPermuteMode
+	if mode == PermuteOff && c.withRandomTlsExtensionOrder {
+		mode = PermuteChrome
+	}
+	return extensionPermuteConfig{mode: mode, prefix: c.extensionPermutePrefix}
 }
 
 // WithCertificatePinning enables SSL Pinning for the client and will throw an error if the SSL Pin is not matched.

@@ -748,6 +748,26 @@ _INT_REQUEST_KEYS = frozenset((
     "h2_max_data_frame_size",
     "preface_ping_idle_ms",
     "cookie_crumb",
+    # ABI 3 — deep fingerprint controls
+    "extension_permute_mode",
+    "extension_permute_prefix",
+    "h2_disable_priority_frames",
+    "header_order_by_dest",
+    "tcp_dont_fragment",
+    "tcp_tos",
+    "tcp_no_delay",
+    "tcp_window_clamp",
+))
+
+# ABI 3 tri-state TCP fields.  Unlike the plain int fields above (where 0
+# means "unset"), these use -1 as the "leave the profile default alone"
+# sentinel, mirroring Go's ``cfg.tcpX >= 0`` guards.  A bare ``None`` must
+# therefore become -1, never 0 — 0 is a *meaningful* value (DF cleared,
+# TOS 0 / CS0, Nagle off).
+_TRISTATE_REQUEST_KEYS = frozenset((
+    "tcp_dont_fragment",
+    "tcp_tos",
+    "tcp_no_delay",
 ))
 
 
@@ -758,11 +778,14 @@ def _normalize_int_fields(resolved: Dict[str, Any]) -> None:
     the engine default), which is the closest safe mapping for the requests
     idiom ``timeout=None``.  Other invalid types (str, float) are left
     untouched so cffi still raises its strict TypeError.
+
+    ABI 3 tri-state fields (``_TRISTATE_REQUEST_KEYS``) instead map None→-1
+    because 0 is a meaningful value for them; see ``_TRISTATE_REQUEST_KEYS``.
     """
     for key in _INT_REQUEST_KEYS:
         value = resolved.get(key)
         if value is None:
-            resolved[key] = 0
+            resolved[key] = -1 if key in _TRISTATE_REQUEST_KEYS else 0
         elif isinstance(value, bool):
             resolved[key] = int(value)
 
@@ -816,6 +839,17 @@ SYNC_REQUEST_DEFAULT_KEYS = (
     "preface_ping_idle_ms",
     "hpack_indexing_policy",
     "cookie_crumb",
+    # ABI 3 — deep fingerprint controls
+    "extension_permute_mode",
+    "extension_permute_prefix",
+    "h2_disable_priority_frames",
+    "header_order_by_dest",
+    "header_order_dest",
+    "tcp_dont_fragment",
+    "tcp_tos",
+    "tcp_no_delay",
+    "tcp_window_clamp",
+    "tcp_ip_id_mode",
 )
 
 
@@ -868,6 +902,17 @@ ASYNC_REQUEST_DEFAULT_KEYS = (
     "preface_ping_idle_ms",
     "hpack_indexing_policy",
     "cookie_crumb",
+    # ABI 3 — deep fingerprint controls
+    "extension_permute_mode",
+    "extension_permute_prefix",
+    "h2_disable_priority_frames",
+    "header_order_by_dest",
+    "header_order_dest",
+    "tcp_dont_fragment",
+    "tcp_tos",
+    "tcp_no_delay",
+    "tcp_window_clamp",
+    "tcp_ip_id_mode",
 )
 
 
@@ -1025,6 +1070,16 @@ typedef struct {
     int   preface_ping_idle_ms;
     const char* hpack_indexing_policy;
     int   cookie_crumb;
+    int   extension_permute_mode;
+    int   extension_permute_prefix;
+    int   h2_disable_priority_frames;
+    int   header_order_by_dest;
+    const char* header_order_dest;
+    int   tcp_dont_fragment;
+    int   tcp_tos;
+    int   tcp_no_delay;
+    int   tcp_window_clamp;
+    const char* tcp_ip_id_mode;
 } RequestOptions;
 
 typedef struct {
@@ -1122,9 +1177,13 @@ def _find_library() -> str:
     搜索顺序：
     1. 读取 ``TLS_CLIENT_LIB`` 环境变量（显式用户覆盖）。
     2. 寻找包目录内 ``tls_client/bin/`` 下的带架构后缀文件（如 tls-client-windows-amd64.dll）。
-       ``TLS_CLIENT_VARIANT=lite`` 环境变量选择无 QUIC/HTTP-3 的轻量变体
-       （文件名追加 ``-lite``，如 tls-client-windows-amd64-lite.dll）。
+       ``TLS_CLIENT_VARIANT`` 环境变量选择编译变体（``full`` / ``lite`` /
+       ``nano``），文件名相应地追加 ``-lite`` / ``-nano`` 后缀。
     3. 寻找同级开发目录 ``dist/`` 下的文件。
+
+    变体缺失时的回退顺序为 nano → lite → full：一个配置了
+    ``TLS_CLIENT_VARIANT=nano`` 但只发布了 full 二进制包的部署仍能加载，
+    而不是在导入期直接崩溃。
     """
     # 1. 环境变量显式覆盖
     env_lib = os.environ.get("TLS_CLIENT_LIB")
@@ -1138,30 +1197,42 @@ def _find_library() -> str:
 
     name = _shared_lib_name()
     here = Path(__file__).resolve().parent
+    stem, ext = name.rsplit(".", 1)
 
-    # 2. 寻找包目录 bin/ 下的多系统共享动态库
+    # 2. 寻找包目录 bin/ 下的多系统共享动态库。
+    #    候选列表按请求的变体优先，随后逐级回退到功能更全的构建。
     variant = os.environ.get("TLS_CLIENT_VARIANT", "").strip().lower()
-    if variant and variant not in ("full", ""):
-        stem, ext = name.rsplit(".", 1)
-        bundled = here / "bin" / f"{stem}-{variant}.{ext}"
-    else:
-        bundled = here / "bin" / name
-    if bundled.exists():
-        return str(bundled)
+    if variant not in ("full", "lite", "nano"):
+        variant = "full"
+    fallbacks = {
+        "full": ["full"],
+        "lite": ["lite", "full"],
+        "nano": ["nano", "lite", "full"],
+    }[variant]
 
-    # 3. 本地开发调试路径
-    dev = here / "dist" / name
-    if dev.exists():
-        return str(dev)
+    candidates = []
+    for tier in fallbacks:
+        filename = name if tier == "full" else f"{stem}-{tier}.{ext}"
+        candidates.append(here / "bin" / filename)
+    for tier in fallbacks:
+        filename = name if tier == "full" else f"{stem}-{tier}.{ext}"
+        candidates.append(here / "dist" / filename)
+
+    for candidate in candidates:
+        if candidate.exists():
+            return str(candidate)
 
     parts = [
         f"Cannot locate shared library '{name}' inside the package.",
         "",
-        f"  Searched:  {bundled}",
-        f"             {dev}",
-        "",
-        "  Set the 'TLS_CLIENT_LIB' environment variable to point directly to your binary."
+        "  Searched:",
     ]
+    parts.extend(f"    {c}" for c in candidates)
+    parts.extend([
+        "",
+        "  Set the 'TLS_CLIENT_LIB' environment variable to point directly to your binary.",
+        "  Build variants are selected with 'TLS_CLIENT_VARIANT' (full | lite | nano).",
+    ])
     raise FileNotFoundError("\n".join(parts))
 
 
@@ -1193,10 +1264,6 @@ _ffi_lock = threading.Lock()
 _abi_version = 1  # 1 = legacy pre-rebuild library; 2 = GetAbiVersion() export present
 _build_variant = "full"  # "full" | "lite" (lite = built without QUIC/HTTP-3)
 
-# Features that need the rebuilt (ABI >= 2) shared library.
-_ABI2_FEATURES = ("disable_session_tickets", "tls_keylog_path", "root_ca_pem")
-
-
 def _require_abi2() -> None:
     if _abi_version < 2:
         raise RuntimeError(
@@ -1205,6 +1272,62 @@ def _require_abi2() -> None:
             "tls-client library with ABI >= 2 — rebuild the shared libraries "
             "from current source (see UPSTREAM_SYNC.md)."
         )
+
+
+# Fields introduced by ABI 3 together with their "feature disabled" value.
+# Dropping a field back to its sentinel keeps the Python-side cache key in
+# sync with what Go will actually receive.
+_ABI3_REQUEST_FIELDS = {
+    "extension_permute_mode": 0,
+    "extension_permute_prefix": 0,
+    "h2_disable_priority_frames": 0,
+    "header_order_by_dest": 0,
+    "header_order_dest": "",
+    "tcp_dont_fragment": -1,
+    "tcp_tos": -1,
+    "tcp_no_delay": -1,
+    "tcp_window_clamp": 0,
+    "tcp_ip_id_mode": "",
+}
+
+_abi3_warned = False
+
+
+def _degrade_abi3_fields(resolved: Dict[str, Any]) -> bool:
+    """Reset ABI 3 fields to their sentinels when the library predates ABI 3.
+
+    Returns True when a degradation actually happened.  A one-time warning is
+    emitted so the operator knows the requested refinements were dropped rather
+    than silently ignored.  On an ABI >= 3 library this is a cheap no-op.
+    """
+    global _abi3_warned
+
+    if _abi_version >= 3:
+        return False
+
+    requested = [
+        key for key, sentinel in _ABI3_REQUEST_FIELDS.items()
+        if resolved.get(key) not in (None, sentinel)
+    ]
+    if not requested:
+        return False
+
+    for key, sentinel in _ABI3_REQUEST_FIELDS.items():
+        resolved[key] = sentinel
+
+    if not _abi3_warned:
+        _abi3_warned = True
+        import warnings
+
+        warnings.warn(
+            "the loaded tls-client library predates ABI 3; the following "
+            "deep-fingerprint controls were dropped: %s. Rebuild the shared "
+            "libraries from current source to enable them (see "
+            "UPSTREAM_SYNC.md)." % ", ".join(sorted(requested)),
+            RuntimeWarning,
+            stacklevel=3,
+        )
+    return True
 
 
 def _get_ffi():
@@ -1269,10 +1392,21 @@ def _build_headers(ffi, headers: Optional[Dict[str, str]], keep_alive: list):
 
 
 def _identifier_browser(identifier: str) -> str:
-    """Map a client identifier to its browser family (context headers)."""
-    if identifier.startswith("firefox"):
+    """Map a client identifier to its browser family (context headers).
+
+    Mirrors Go's ``browserFamilyForIdentifier`` in cffi_binding/main.go so a
+    request's context headers do not depend on which engine side built them.
+    An unrecognised identifier yields "" — callers must treat that as
+    "unknown, apply no browser-specific context" rather than assuming Chrome.
+    """
+    lower = (identifier or "").lower()
+    if lower.startswith(("chrome", "cloudscraper", "brave", "opera")):
+        return "chrome"
+    if lower.startswith("firefox"):
         return "firefox"
-    return "chrome"  # chrome/brave/opera/mms/... share Chromium behaviour
+    if lower.startswith("safari"):
+        return "safari"
+    return ""
 
 
 def _apply_request_context(session, headers, header_order, context, identifier,
@@ -1569,6 +1703,11 @@ def _build_custom_tls_client(ffi, cfg: Optional[Dict[str, Any]], keep_alive: lis
         keep_alive.append(c_ta)
         ctc.trust_anchors_payload = c_ta
 
+    # Per-handshake extension permutation lives on RequestOptions
+    # (extension_permute_mode / extension_permute_prefix), NOT here: the
+    # permutation is a per-request transport policy, while a CustomTlsClient
+    # describes a reusable ClientHello shape.  Set it via the Session kwargs.
+
     return ctc
 
 
@@ -1586,13 +1725,26 @@ def _build_custom_tls_client(ffi, cfg: Optional[Dict[str, Any]], keep_alive: lis
 # test catches format drift BEFORE it reaches production.
 # ---------------------------------------------------------------------------
 
+
+def _as_int(v) -> int:
+    """Coerce a resolved config value to the int Go would hash.
+
+    Go stores these fields as plain ints and hashes them with %d, so the
+    Python side must emit the same integer — including negative sentinels
+    such as the -1 used by the tri-state TCP fields.  None means "the caller
+    is not using cache-key pre-computation"; map it to 0 rather than raising
+    so a partially-populated dict still produces a deterministic hash.
+    """
+    return 0 if v is None else int(v)
+
+
 def _compute_cache_key_hash(r: dict) -> str:
     """Return the SHA-256 hex digest of resolved config values.
 
     The format matches Go's buildCacheKey exactly — same field order,
     same separators, same sort order for maps, same hex encoding.
 
-    FORMAT VERSION: 2
+    FORMAT VERSION: 5
     If you change the hash format below, increment the version AND update
     Go's buildCacheKey / buildCacheKeyFromConfig in cffi_binding/main.go
     and the corresponding test in test_cache_key_parity.py.  Format drift
@@ -1638,6 +1790,29 @@ def _compute_cache_key_hash(r: dict) -> str:
         r.get("h2_max_data_frame_size") or 0,
         r.get("preface_ping_idle_ms") or 0,
         r.get("hpack_indexing_policy") or "",
+    )).encode("utf-8"))
+    # ABI 3 / format-version 5: extension-order policy, PRIORITY-frame
+    # suppression and the deep TCP fingerprint fields.  header_order_by_dest /
+    # header_order_dest and cookie_crumb are per-request wire behaviour that
+    # does not change the transport, so they are not keyed (mirrors Go).
+    #
+    # The integers are emitted RAW — never collapsed through a truthiness
+    # test — because Go's %d verbs hash the stored int verbatim.  Two traps
+    # this avoids:
+    #   * the tri-state TCP fields use -1 for "unset", which is truthy in
+    #     Python; `1 if x else 0` would emit 1 where Go emits -1;
+    #   * extension_permute_mode is a 4-valued enum (0=off, 1=chrome, 2=all,
+    #     3=prefix); a truthiness test collapses 2 and 3 onto 1, hashing
+    #     distinct transports to the same key.
+    update(("|epm=%d|epp=%d|hdpf=%d|df=%d|tos=%d|nd=%d|wc=%d|ipid=%s" % (
+        _as_int(r.get("extension_permute_mode")),
+        _as_int(r.get("extension_permute_prefix")),
+        _as_int(r.get("h2_disable_priority_frames")),
+        _as_int(r.get("tcp_dont_fragment")),
+        _as_int(r.get("tcp_tos")),
+        _as_int(r.get("tcp_no_delay")),
+        _as_int(r.get("tcp_window_clamp")),
+        r.get("tcp_ip_id_mode") or "",
     )).encode("utf-8"))
 
     # ── Pseudo-header orders ──────────────────────────────────────────
@@ -1840,10 +2015,6 @@ class Session:
             self.defaults[name] = _clone_default_value(value)
             self._defaults_version += 1
             self._selected_snapshot_cache.clear()
-
-    def _snapshot_defaults(self) -> Dict[str, Any]:
-        with self._defaults_lock:
-            return {k: _clone_default_value(v) for k, v in self.defaults.items()}
 
     def _snapshot_selected_defaults(self, names: List[str]) -> Dict[str, Any]:
         cache_key = tuple(names)
@@ -2481,6 +2652,27 @@ class Session:
         hpack_indexing_policy: str = "",
         # Cookie 按对拆分 (ABI 2.1) / Split Cookie header per cookie-pair
         cookie_crumb: bool = False,
+        # ── ABI 3 — 细粒度指纹控制 / fine-grained fingerprint control ──
+        # 扩展乱序策略: 0=off, 1=chrome, 2=all, 3=prefix (ABI 3)
+        # Extension-order permutation policy (per-handshake, Chromium-style)
+        extension_permute_mode: int = 0,
+        # 前缀长度（仅 mode=3）: 前 N 个扩展保持原位不乱序 / prefix length
+        extension_permute_prefix: int = 0,
+        # 抑制 HTTP/2 PRIORITY 帧与 HEADERS 优先级标志 (ABI 3)
+        # Suppress RFC 7540 PRIORITY frames / HEADERS priority flag
+        h2_disable_priority_frames: bool = False,
+        # 按 Sec-Fetch-Dest 选择浏览器真实头序 (ABI 3)
+        # Derive the header order from Sec-Fetch-Dest instead of header_order
+        header_order_by_dest: bool = False,
+        # 显式指定目的类型（留空则由请求头推断）/ Explicit Sec-Fetch-Dest value
+        header_order_dest: Optional[str] = None,
+        # 深度 TCP 指纹: DF 位 / TOS / Nagle / 窗口钳制 / IP ID 模式 (ABI 3)
+        # -1/None 表示沿用指纹预设值 / -1 or None keeps the profile default
+        tcp_dont_fragment: int = -1,
+        tcp_tos: int = -1,
+        tcp_no_delay: int = -1,
+        tcp_window_clamp: int = 0,
+        tcp_ip_id_mode: str = "",
         # 指纹预设名 / Fingerprint preset name (tls_client.fingerprints)
         fingerprint: Optional[str] = None,
     ) -> None:
@@ -2554,6 +2746,17 @@ class Session:
             "preface_ping_idle_ms": preface_ping_idle_ms,
             "hpack_indexing_policy": hpack_indexing_policy,
             "cookie_crumb": 1 if cookie_crumb else 0,
+            # ── ABI 3 — 细粒度指纹控制 / fine-grained fingerprint control ──
+            "extension_permute_mode": extension_permute_mode,
+            "extension_permute_prefix": extension_permute_prefix,
+            "h2_disable_priority_frames": 1 if h2_disable_priority_frames else 0,
+            "header_order_by_dest": 1 if header_order_by_dest else 0,
+            "header_order_dest": header_order_dest or "",
+            "tcp_dont_fragment": tcp_dont_fragment,
+            "tcp_tos": tcp_tos,
+            "tcp_no_delay": tcp_no_delay,
+            "tcp_window_clamp": tcp_window_clamp,
+            "tcp_ip_id_mode": tcp_ip_id_mode or "",
         }
         # True once the caller overrides the profile's default header block
         # (via the default_headers/headers property or constructor kwargs);
@@ -2730,6 +2933,23 @@ class Session:
         hpack_indexing_policy: Optional[str] = None,
         # 覆盖 Cookie 拆分 (ABI 2.1) / Override cookie crumble
         cookie_crumb: Optional[bool] = None,
+        # ── ABI 3 — 细粒度指纹控制 / fine-grained fingerprint control ──
+        # 扩展乱序策略: 0=off, 1=chrome, 2=all, 3=prefix
+        extension_permute_mode: Optional[int] = None,
+        # 前缀长度（仅 mode=3）/ Prefix length (mode=3 only)
+        extension_permute_prefix: Optional[int] = None,
+        # 抑制 HTTP/2 PRIORITY 帧 / Suppress PRIORITY frames
+        h2_disable_priority_frames: Optional[bool] = None,
+        # 按 Sec-Fetch-Dest 选择浏览器真实头序 / Destination-aware header order
+        header_order_by_dest: Optional[bool] = None,
+        # 显式目的类型（留空自动推断）/ Explicit Sec-Fetch-Dest value
+        header_order_dest: Optional[str] = None,
+        # 深度 TCP 指纹 / Deep TCP fingerprint (ABI 3)
+        tcp_dont_fragment: Optional[int] = None,
+        tcp_tos: Optional[int] = None,
+        tcp_no_delay: Optional[int] = None,
+        tcp_window_clamp: Optional[int] = None,
+        tcp_ip_id_mode: Optional[str] = None,
         **kwargs: Any,
     ) -> Response:
         """通过 Go 引擎执行单次 HTTP 请求。
@@ -2823,6 +3043,25 @@ class Session:
             "tcp_window_size": _val("tcp_window_size", tcp_window_size),
             "tcp_window_scale": _val("tcp_window_scale", tcp_window_scale),
             "tcp_mss": _val("tcp_mss", tcp_mss),
+            # ── ABI 3 — 细粒度指纹控制 / fine-grained fingerprint control ──
+            "extension_permute_mode": _val(
+                "extension_permute_mode", extension_permute_mode
+            ),
+            "extension_permute_prefix": _val(
+                "extension_permute_prefix", extension_permute_prefix
+            ),
+            "h2_disable_priority_frames": _val(
+                "h2_disable_priority_frames", h2_disable_priority_frames, True
+            ),
+            "header_order_by_dest": _val(
+                "header_order_by_dest", header_order_by_dest, True
+            ),
+            "header_order_dest": _val("header_order_dest", header_order_dest),
+            "tcp_dont_fragment": _val("tcp_dont_fragment", tcp_dont_fragment),
+            "tcp_tos": _val("tcp_tos", tcp_tos),
+            "tcp_no_delay": _val("tcp_no_delay", tcp_no_delay),
+            "tcp_window_clamp": _val("tcp_window_clamp", tcp_window_clamp),
+            "tcp_ip_id_mode": _val("tcp_ip_id_mode", tcp_ip_id_mode),
         }
         if verify is not None:
             resolved["insecure_skip_verify"] = 0 if verify else 1
@@ -2838,6 +3077,12 @@ class Session:
         if (resolved["disable_session_tickets"] or resolved["tls_keylog_path"]
                 or resolved["root_ca_pem"]):
             _require_abi2()
+        # ABI 3 deep-fingerprint knobs.  Unlike the ABI 2 gate (which raises),
+        # these degrade: a preset or an implicit default may enable them on a
+        # library that predates ABI 3, and failing the whole request would be
+        # worse than dropping the refinement.  Explicit caller intent is
+        # reported through the warning instead.
+        _degrade_abi3_fields(resolved)
 
         # Per-request client_identifier override: pair the request with the
         # profile's default headers unless the caller manages headers
@@ -2996,6 +3241,25 @@ class Session:
             keep_alive.append(c_hip)
             opts.hpack_indexing_policy = c_hip
         opts.cookie_crumb = resolved["cookie_crumb"]
+
+        # ABI 3 fields — extension-order policy, PRIORITY-frame suppression,
+        # destination-aware header ordering and the deep TCP fingerprint.
+        opts.extension_permute_mode = resolved["extension_permute_mode"]
+        opts.extension_permute_prefix = resolved["extension_permute_prefix"]
+        opts.h2_disable_priority_frames = resolved["h2_disable_priority_frames"]
+        opts.header_order_by_dest = resolved["header_order_by_dest"]
+        if resolved["header_order_dest"]:
+            c_hod = _c_string(ffi, resolved["header_order_dest"])
+            keep_alive.append(c_hod)
+            opts.header_order_dest = c_hod
+        opts.tcp_dont_fragment = resolved["tcp_dont_fragment"]
+        opts.tcp_tos = resolved["tcp_tos"]
+        opts.tcp_no_delay = resolved["tcp_no_delay"]
+        opts.tcp_window_clamp = resolved["tcp_window_clamp"]
+        if resolved["tcp_ip_id_mode"]:
+            c_ipid = _c_string(ffi, resolved["tcp_ip_id_mode"])
+            keep_alive.append(c_ipid)
+            opts.tcp_ip_id_mode = c_ipid
 
         opts.timeout_seconds = resolved["timeout_seconds"]
         opts.timeout_milliseconds = resolved["timeout_milliseconds"]
@@ -3556,6 +3820,35 @@ class AsyncSession:
         tls_keylog_path: Optional[str] = None,
         # 自定义 CA PEM 内容 / Custom CA PEM bytes (ABI 2)
         root_ca_pem: Optional[bytes] = None,
+        # HTTP/2 DATA 帧上限 (ABI 2.1) / Cap per-DATA-frame payload
+        h2_max_data_frame_size: int = 0,
+        # 空闲 H2 连接 PING 阈值毫秒 (ABI 2.1) / Preface-ping idle threshold ms
+        preface_ping_idle_ms: int = 0,
+        # HPACK 索引策略 ("chrome") (ABI 2.1) / HPACK indexing policy
+        hpack_indexing_policy: str = "",
+        # Cookie 按对拆分 (ABI 2.1) / Split Cookie header per cookie-pair
+        cookie_crumb: bool = False,
+        # ── ABI 3 — 细粒度指纹控制 / fine-grained fingerprint control ──
+        # 扩展乱序策略: 0=off, 1=chrome, 2=all, 3=prefix (ABI 3)
+        # Extension-order permutation policy (per-handshake, Chromium-style)
+        extension_permute_mode: int = 0,
+        # 前缀长度（仅 mode=3）: 前 N 个扩展保持原位不乱序 / prefix length
+        extension_permute_prefix: int = 0,
+        # 抑制 HTTP/2 PRIORITY 帧与 HEADERS 优先级标志 (ABI 3)
+        # Suppress RFC 7540 PRIORITY frames / HEADERS priority flag
+        h2_disable_priority_frames: bool = False,
+        # 按 Sec-Fetch-Dest 选择浏览器真实头序 (ABI 3)
+        # Derive the header order from Sec-Fetch-Dest instead of header_order
+        header_order_by_dest: bool = False,
+        # 显式指定目的类型（留空则由请求头推断）/ Explicit Sec-Fetch-Dest value
+        header_order_dest: Optional[str] = None,
+        # 深度 TCP 指纹: DF 位 / TOS / Nagle / 窗口钳制 / IP ID 模式 (ABI 3)
+        # -1/None 表示沿用指纹预设值 / -1 or None keeps the profile default
+        tcp_dont_fragment: int = -1,
+        tcp_tos: int = -1,
+        tcp_no_delay: int = -1,
+        tcp_window_clamp: int = 0,
+        tcp_ip_id_mode: str = "",
         # 指纹预设名 / Fingerprint preset name (tls_client.fingerprints)
         fingerprint: Optional[str] = None,
     ) -> None:
@@ -3613,6 +3906,20 @@ class AsyncSession:
             disable_session_tickets=disable_session_tickets,
             tls_keylog_path=tls_keylog_path,
             root_ca_pem=root_ca_pem,
+            h2_max_data_frame_size=h2_max_data_frame_size,
+            preface_ping_idle_ms=preface_ping_idle_ms,
+            hpack_indexing_policy=hpack_indexing_policy,
+            cookie_crumb=cookie_crumb,
+            extension_permute_mode=extension_permute_mode,
+            extension_permute_prefix=extension_permute_prefix,
+            h2_disable_priority_frames=h2_disable_priority_frames,
+            header_order_by_dest=header_order_by_dest,
+            header_order_dest=header_order_dest,
+            tcp_dont_fragment=tcp_dont_fragment,
+            tcp_tos=tcp_tos,
+            tcp_no_delay=tcp_no_delay,
+            tcp_window_clamp=tcp_window_clamp,
+            tcp_ip_id_mode=tcp_ip_id_mode,
             fingerprint=fingerprint,
         )
 
@@ -3747,6 +4054,17 @@ class AsyncSession:
             "tcp_window_size": _val("tcp_window_size"),
             "tcp_window_scale": _val("tcp_window_scale"),
             "tcp_mss": _val("tcp_mss"),
+            # ── ABI 3 — 细粒度指纹控制 / fine-grained fingerprint control ──
+            "extension_permute_mode": _val("extension_permute_mode"),
+            "extension_permute_prefix": _val("extension_permute_prefix"),
+            "h2_disable_priority_frames": _val("h2_disable_priority_frames", True),
+            "header_order_by_dest": _val("header_order_by_dest", True),
+            "header_order_dest": _val("header_order_dest"),
+            "tcp_dont_fragment": _val("tcp_dont_fragment"),
+            "tcp_tos": _val("tcp_tos"),
+            "tcp_no_delay": _val("tcp_no_delay"),
+            "tcp_window_clamp": _val("tcp_window_clamp"),
+            "tcp_ip_id_mode": _val("tcp_ip_id_mode"),
         }
         _normalize_int_fields(resolved)
         if _build_variant == "lite":
@@ -3756,6 +4074,12 @@ class AsyncSession:
         if (resolved["disable_session_tickets"] or resolved["tls_keylog_path"]
                 or resolved["root_ca_pem"]):
             _require_abi2()
+        # ABI 3 deep-fingerprint knobs.  Unlike the ABI 2 gate (which raises),
+        # these degrade: a preset or an implicit default may enable them on a
+        # library that predates ABI 3, and failing the whole request would be
+        # worse than dropping the refinement.  Explicit caller intent is
+        # reported through the warning instead.
+        _degrade_abi3_fields(resolved)
 
         # Per-request client_identifier override: pair the request with the
         # profile's default headers unless the caller manages headers
@@ -3811,6 +4135,25 @@ class AsyncSession:
             keep_alive.append(c_hip)
             opts.hpack_indexing_policy = c_hip
         opts.cookie_crumb = resolved["cookie_crumb"]
+
+        # ABI 3 fields — extension-order policy, PRIORITY-frame suppression,
+        # destination-aware header ordering and the deep TCP fingerprint.
+        opts.extension_permute_mode = resolved["extension_permute_mode"]
+        opts.extension_permute_prefix = resolved["extension_permute_prefix"]
+        opts.h2_disable_priority_frames = resolved["h2_disable_priority_frames"]
+        opts.header_order_by_dest = resolved["header_order_by_dest"]
+        if resolved["header_order_dest"]:
+            c_hod = _c_string(ffi, resolved["header_order_dest"])
+            keep_alive.append(c_hod)
+            opts.header_order_dest = c_hod
+        opts.tcp_dont_fragment = resolved["tcp_dont_fragment"]
+        opts.tcp_tos = resolved["tcp_tos"]
+        opts.tcp_no_delay = resolved["tcp_no_delay"]
+        opts.tcp_window_clamp = resolved["tcp_window_clamp"]
+        if resolved["tcp_ip_id_mode"]:
+            c_ipid = _c_string(ffi, resolved["tcp_ip_id_mode"])
+            keep_alive.append(c_ipid)
+            opts.tcp_ip_id_mode = c_ipid
 
         opts.timeout_seconds = resolved["timeout_seconds"]
         opts.timeout_milliseconds = resolved["timeout_milliseconds"]
@@ -3916,7 +4259,7 @@ class AsyncSession:
         # falling back to the engine default when both are 0), but if the Go
         # goroutine hangs indefinitely (network partition, OS bug), the
         # _pending_requests entry would leak the Future + keep_alive forever.
-        # A defensive timeout (2× Go timeout + 10 s grace, clamped [60, 600] s)
+        # A defensive timeout (2× Go timeout + 2 s grace, clamped [60, 600] s)
         # cleans up zombie entries so the Python process does not accumulate
         # leaked memory under high-concurrency workloads.
         safe_timeout = _defensive_timeout_seconds(
@@ -4110,6 +4453,17 @@ class AsyncSession:
         tcp_window_size: Optional[int] = None,
         tcp_window_scale: Optional[int] = None,
         tcp_mss: Optional[int] = None,
+        # ── ABI 3 — 细粒度指纹控制 / fine-grained fingerprint control ──
+        extension_permute_mode: Optional[int] = None,
+        extension_permute_prefix: Optional[int] = None,
+        h2_disable_priority_frames: Optional[bool] = None,
+        header_order_by_dest: Optional[bool] = None,
+        header_order_dest: Optional[str] = None,
+        tcp_dont_fragment: Optional[int] = None,
+        tcp_tos: Optional[int] = None,
+        tcp_no_delay: Optional[int] = None,
+        tcp_window_clamp: Optional[int] = None,
+        tcp_ip_id_mode: Optional[str] = None,
         **kwargs: Any,
     ) -> Response:
         """通过 Go 引擎执行单次 HTTP 请求（异步）。
@@ -4167,6 +4521,16 @@ class AsyncSession:
             preface_ping_idle_ms=preface_ping_idle_ms,
             hpack_indexing_policy=hpack_indexing_policy,
             cookie_crumb=cookie_crumb,
+            extension_permute_mode=extension_permute_mode,
+            extension_permute_prefix=extension_permute_prefix,
+            h2_disable_priority_frames=h2_disable_priority_frames,
+            header_order_by_dest=header_order_by_dest,
+            header_order_dest=header_order_dest,
+            tcp_dont_fragment=tcp_dont_fragment,
+            tcp_tos=tcp_tos,
+            tcp_no_delay=tcp_no_delay,
+            tcp_window_clamp=tcp_window_clamp,
+            tcp_ip_id_mode=tcp_ip_id_mode,
             **kwargs,
         )
 

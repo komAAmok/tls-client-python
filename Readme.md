@@ -35,10 +35,14 @@ For a deep dive, see [this excellent article on TLS fingerprinting](https://http
 | 🔄 **sync/Async** | `Session`  +  `AsyncSession` |
 | 🛡️ **Panic-proof** | All Go panics caught and surfaced as Python exceptions |
 | ⚙️ **Custom TLS** | Full 26-field custom TLS client configuration |
-| 🎯 **Fingerprint Presets** | Coherent per-OS bundles: identifier + headers + header order + pseudo-header order (`tls_client.fingerprints`) |
+| 🔬 **Chrome 99–153 Captures** | Byte-exact profiles for **every** Chrome major 99…153, recovered from live handshakes |
+| 🎲 **Per-Handshake Extension Shuffle** | Chromium's unseeded extension rotation, with GREASE/padding/PSK pinned (`ABI 3`) |
+| 🧭 **Destination-Aware Header Order** | Header order selected by `Sec-Fetch-Dest` — navigation vs sub-resource (`ABI 3`) |
+| 🌐 **Deep TCP Fingerprint** | DF bit, TOS, Nagle, window clamp and IP-ID mode (`ABI 3`) |
+| 🎯 **Fingerprint Presets** | Coherent per-OS bundles: identifier + headers + header order + TCP fingerprint (`tls_client.fingerprints`) |
 | 🧭 **Request Contexts** | Browser-coherent `Sec-Fetch-*`, Client Hints and RFC 9218 `Priority` headers (`RequestContext`) |
 | 🔏 **Trust Anchors / ECH** | Chrome 152 `0xCA34` trust anchors and automatic ECH config resolution over DoH |
-| 🪶 **Lite Variant** | QUIC-free build (`TLS_CLIENT_VARIANT=lite`) for a smaller binary |
+| 🪶 **Three Build Tiers** | `full` / `lite` (no QUIC) / `nano` (trimmed catalogue) via `TLS_CLIENT_VARIANT` |
 
 > **macOS TCP fingerprinting:** macOS derives TCP MSS during `connect` and
 > rejects `TCP_MAXSEG` in the pre-connect socket hook. The MSS hint is therefore
@@ -163,23 +167,32 @@ The complete, runtime-validated list is exported as
 `tls_client.SUPPORTED_CLIENT_IDENTIFIERS`. It is also used for IDE/type
 checking through `ClientIdentifiers`.
 
-### 🌐 Chrome — 24 Profiles
+### 🌐 Chrome — 79 Profiles (captured 99–153 + hand-written)
+
+The full Chrome range **99 through 153** is available, recovered from live
+handshakes rather than hand-transcribed. Every major ships as both
+`chrome_<major>` and `chrome_<major>_PSK`:
 
 | Identifier | Notes |
 |-----------|-------|
-| `chrome_103` — `chrome_112` | Chrome Stable 103–112 |
-| `chrome_116_PSK` | Chrome 116 with PSK key exchange |
+| `chrome_99` — `chrome_153` | **Byte-exact captures, every major 99…153** |
+| `chrome_99_PSK` — `chrome_153_PSK` | Same, with PSK key exchange |
+
+The captures pin the real per-version cipher list, extension order, supported
+groups, signature algorithms, JA3/JA4 and HTTP/2 Akamai fingerprint — so
+`chrome_111`, `chrome_121`, `chrome_137` etc. reproduce the wire bytes of that
+exact release, including the per-milestone extension-order reshuffles.
+
+Hand-written profiles with PSK / Post-Quantum / trust-anchor refinements
+(`chrome_116_PSK_PQ`, `chrome_130_PSK`, `chrome_144`, `chrome_146`,
+`chrome_150`, `chrome_152`, …) remain authoritative where they exist.
+
+| Identifier | Notes |
+|-----------|-------|
 | `chrome_116_PSK_PQ` | Chrome 116 with PSK + Post-Quantum |
-| `chrome_117` | Chrome 117 |
-| `chrome_120` | Chrome 120 |
-| `chrome_124` | Chrome 124 |
-| `chrome_130_PSK` | Chrome 130 with PSK |
-| `chrome_131` · `chrome_131_PSK` | Chrome 131 (standard & PSK) |
-| `chrome_133` · `chrome_133_PSK` | Chrome 133 (standard & PSK) |
-| `chrome_144` · `chrome_144_PSK` | Chrome 144 (standard & PSK) |
-| `chrome_146` · `chrome_146_PSK` | Chrome 146 — **default** (standard & PSK) |
-| `chrome_150` · `chrome_150_PSK` | Chrome 150 (standard & PSK) |
-| `chrome_152` · `chrome_152_PSK` | Chrome 152 (standard & PSK) |
+| `chrome_130_PSK` · `chrome_131_PSK` · `chrome_133_PSK` | PSK variants |
+| `chrome_144` · `chrome_146` · `chrome_150` · `chrome_152` | standard + PSK |
+| `chrome_146` | **default identifier** (standard & PSK) |
 
 ### 🦊 Firefox — 16 Profiles
 
@@ -316,19 +329,30 @@ session = Session(
 
 ### Fingerprint Presets (Coherent Browser Bundles)
 
-A preset bundles the engine TLS profile, per-OS coherent headers, and
-HTTP/2 & HTTP/3 pseudo-header ordering in one line:
+A preset bundles the engine TLS profile, the per-OS coherent header block
+(UA + Client Hints), the destination-aware header orders, the extension-shuffle
+policy and the OS TCP fingerprint in one line:
 
 ```python
 from tls_client import Session
 from tls_client.fingerprints import apply, list_presets
 
+print(len(list_presets()))            # 391 presets
+
 session = Session()
-apply(session, "chrome_152_windows")   # or firefox_148_linux, chrome_152_ios, ...
+apply(session, "chrome_150_windows")  # or chrome_99_linux, chrome_153_ios, ...
 session.get("https://tls.peet.ws/api/all")
 ```
 
-Or directly: `Session(fingerprint="chrome_152_windows")`. Custom presets are
+All 55 captured Chrome majors (99–153) ship as
+`chrome_<major>_base`, `chrome_<major>_windows`, `_macos`, `_linux`,
+`_android`, `_ios`, plus a bare `chrome_<major>` alias for the Windows
+variant — and each per-OS variant derives a platform-coherent UA and TCP
+fingerprint (Windows `TTL=128/window=64240`, Linux/macOS `TTL=64/window=65535`,
+etc.). `header_order_for_dest(dest)` returns the header template for a
+`Sec-Fetch-Dest` value.
+
+Or directly: `Session(fingerprint="chrome_150_windows")`. Custom presets are
 plain JSON with optional `based_on` inheritance:
 
 ```python
@@ -380,6 +404,66 @@ session = Session(
 )
 ```
 
+### Deep Fingerprint Control (ABI 3)
+
+Fine-grained, byte-level control over the handshake and the socket:
+
+```python
+session = Session(
+    client_identifier="chrome_150",
+
+    # Chromium shuffles the ClientHello extension order on *every*
+    # handshake (unseeded), pinning GREASE / padding / pre_shared_key.
+    #   0 = off (captured order)   1 = chrome
+    #   2 = all extensions         3 = prefix (first N stay fixed)
+    extension_permute_mode=1,
+    extension_permute_prefix=0,     # only meaningful when mode=3
+
+    # Suppress RFC 7540 PRIORITY frames / the HEADERS priority flag.
+    h2_disable_priority_frames=False,
+
+    # Pick the header order from the request's Sec-Fetch-Dest instead of
+    # using one fixed order for every request.
+    header_order_by_dest=True,
+    header_order_dest=None,         # None = infer from Sec-Fetch-Dest
+
+    # Deep TCP fingerprint. -1 (the default) leaves the profile's own
+    # value untouched; 0 is a *real* value (DF cleared / TOS 0 / Nagle off).
+    tcp_dont_fragment=-1,           # -1 unset · 0 clear DF · 1 set DF
+    tcp_tos=-1,                     # -1 unset · 0..255
+    tcp_no_delay=-1,                # -1 unset · 0 off · 1 on
+    tcp_window_clamp=0,             # 0 unset · Linux TCP_WINDOW_CLAMP
+    tcp_ip_id_mode="",              # "" unset · "random" · "zero" · "incremental"
+)
+```
+
+Every parameter can also be set per request. On a shared library older than
+ABI 3 these degrade to their defaults with a one-time `RuntimeWarning`
+instead of failing the request — rebuild the native library to enable them.
+
+Presets bundle all of the above automatically:
+
+```python
+from tls_client.fingerprints import apply
+
+session = Session()
+apply(session, "chrome_150_linux")   # identifier + headers + permute + TCP
+```
+
+### Build Tiers
+
+Three prebuilt tiers ship in each wheel; select one at runtime:
+
+```bash
+TLS_CLIENT_VARIANT=full   # default — QUIC/HTTP-3 enabled, all profiles
+TLS_CLIENT_VARIANT=lite   # no QUIC/HTTP-3 (smaller); disable_http3 forced on
+TLS_CLIENT_VARIANT=nano   # lite + trimmed profile catalogue
+```
+
+If the requested tier is not bundled the loader falls back
+`nano → lite → full`, so a `nano` deployment against a `full`-only wheel
+still starts. `TLS_CLIENT_LIB` overrides the path entirely.
+
 ### Engine-Level HTTP/2 Realism (ABI 2.1)
 
 ```python
@@ -394,12 +478,6 @@ session = Session(
 `cookie_crumb` splits the `Cookie` header into one field per cookie-pair on
 the wire (Chromium "crumble") — observable as multiple `cookie:` fields by
 HTTP/2 servers.
-
-### Lite Build (No QUIC — Smaller Binary)
-
-Set `TLS_CLIENT_VARIANT=lite` to load the `-lite` shared library (built
-without QUIC/HTTP-3; ~15-20% smaller uncompressed, more after UPX).
-`disable_http3` is forced automatically in this variant.
 
 ### Stream Response to Disk
 

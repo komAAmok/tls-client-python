@@ -21,5 +21,8 @@ __pycache__/
 # Local test/build caches
 /.cache/
 
+# Agent working notes (local only — never published)
+/.workbuddy-ai/
+
 # NOTE: tls_client/bin/*.so, *.dylib, *.dll are NOT gitignored —
 # they are distributed with the PyPI package.

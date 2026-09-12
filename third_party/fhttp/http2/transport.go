@@ -126,6 +126,13 @@ type Transport struct {
 	// default policy (index everything indexable).
 	HPACKIndexingPolicy string
 
+	// DisablePriorityFrames, when true, suppresses the RFC 7540 PRIORITY
+	// frame and the PRIORITY flag on HEADERS.  Chromium stopped sending
+	// PRIORITY frames in Chrome 120 (RFC 9218 priority lives in the
+	// `priority` header instead) and Safari never sends them, so a client
+	// that still emits them stands out.
+	DisablePriorityFrames bool
+
 	// PushHandler is called upon receiving PUSH_PROMISEs from the server.
 	// If nil, server push is disabled.
 	//
@@ -903,6 +910,9 @@ func (t *Transport) newClientConn(c net.Conn, addr string, singleUse bool) (*Cli
 	}
 
 	for _, priority := range t.Priorities {
+		if t.DisablePriorityFrames {
+			break
+		}
 		cc.fr.WritePriority(priority.StreamID, priority.PriorityParam)
 		cc.nextStreamID = priority.StreamID + 2
 	}
@@ -1473,13 +1483,20 @@ func (cc *ClientConn) writeHeaders(streamID uint32, endStream bool, maxFrameSize
 				defaultHeaderPriorityParam = *cc.t.HeaderPriority
 			}
 
-			cc.fr.WriteHeaders(HeadersFrameParam{
+			param := HeadersFrameParam{
 				StreamID:      streamID,
 				BlockFragment: chunk,
 				EndStream:     endStream,
 				EndHeaders:    endHeaders,
 				Priority:      defaultHeaderPriorityParam,
-			})
+			}
+			// Chromium 120+ and Safari send HEADERS without the PRIORITY
+			// flag; leaving it set adds a frame field a real browser omits.
+			if cc.t.DisablePriorityFrames {
+				param.Priority = PriorityParam{}
+			}
+
+			cc.fr.WriteHeaders(param)
 			first = false
 		} else {
 			cc.fr.WriteContinuation(streamID, endHeaders, chunk)

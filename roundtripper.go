@@ -26,6 +26,7 @@ type roundTripper struct {
 	initialStreamID   uint32
 	allowHTTP         bool
 	clientHelloId     tls.ClientHelloID
+	extensionPermute  extensionPermuteConfig
 	certificatePinner CertificatePinner
 
 	dialer proxy.ContextDialer
@@ -461,6 +462,7 @@ func (rt *roundTripper) dialTLSWithSetup(ctx context.Context, network, addr stri
 			}
 			t2.PrefacePingIdleMs = rt.transportOptions.H2PrefacePingIdleMs
 			t2.HPACKIndexingPolicy = rt.transportOptions.H2HPACKIndexingPolicy
+			t2.DisablePriorityFrames = rt.transportOptions.H2DisablePriorityFrames
 		}
 
 		t2.PushHandler = &http2.DefaultPushHandler{}
@@ -609,6 +611,14 @@ func (rt *roundTripper) getDialTLSAddr(req *http.Request) string {
 }
 
 func newRoundTripper(clientProfile profiles.ClientProfile, transportOptions *TransportOptions, serverNameOverwrite string, insecureSkipVerify, withRandomTlsExtensionOrder, forceHttp1, disableHttp3, disableSessionTickets, enableH3Racing bool, certificatePins map[string][]string, badPinHandlerFunc BadPinHandlerFunc, disableIPV6, disableIPV4 bool, bandwidthTracker bandwidth.BandwidthTracker, proxyURL string, dialer ...proxy.ContextDialer) (http.RoundTripper, error) {
+	return newRoundTripperWithPermute(clientProfile, transportOptions, serverNameOverwrite, insecureSkipVerify, extensionPermuteConfig{}, forceHttp1, disableHttp3, disableSessionTickets, enableH3Racing, certificatePins, badPinHandlerFunc, disableIPV6, disableIPV4, bandwidthTracker, proxyURL, dialer...)
+}
+
+// newRoundTripperWithPermute is newRoundTripper with an explicit extension-order
+// policy.  The permutation is applied to the ClientHello spec on every
+// handshake, so two connections from one client carry different orders just
+// like Chromium.
+func newRoundTripperWithPermute(clientProfile profiles.ClientProfile, transportOptions *TransportOptions, serverNameOverwrite string, insecureSkipVerify bool, permute extensionPermuteConfig, forceHttp1, disableHttp3, disableSessionTickets, enableH3Racing bool, certificatePins map[string][]string, badPinHandlerFunc BadPinHandlerFunc, disableIPV6, disableIPV4 bool, bandwidthTracker bandwidth.BandwidthTracker, proxyURL string, dialer ...proxy.ContextDialer) (http.RoundTripper, error) {
 	pinner, err := NewCertificatePinner(certificatePins)
 	if err != nil {
 		return nil, fmt.Errorf("can not instantiate certificate pinner: %w", err)
@@ -637,9 +647,10 @@ func newRoundTripper(clientProfile profiles.ClientProfile, transportOptions *Tra
 		insecureSkipVerify:          insecureSkipVerify,
 		forceHttp1:                  forceHttp1,
 		disableHttp3:                disableHttp3,
-		withRandomTlsExtensionOrder: withRandomTlsExtensionOrder,
+		withRandomTlsExtensionOrder: permute.mode != PermuteOff,
 		connectionFlow:              clientProfile.GetConnectionFlow(),
-		clientHelloId:               clientProfile.GetClientHelloId(),
+		clientHelloId:               applyExtensionPermute(clientProfile.GetClientHelloId(), permute),
+		extensionPermute:            permute,
 		cachedTransports:            make(map[string]http.RoundTripper),
 		cachedConnections:           make(map[string]net.Conn),
 		cachedKinds:                 make(map[string]transportKind),

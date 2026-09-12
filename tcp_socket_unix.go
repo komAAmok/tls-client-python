@@ -45,19 +45,65 @@ func setWindowSize(fd int, windowSize int) error {
 	return syscall.SetsockoptInt(fd, syscall.SOL_SOCKET, syscall.SO_RCVBUF, windowSize)
 }
 
-// setWindowScale sets the TCP window scale factor.
-// Note: The window scale factor is derived from the receive buffer size by the kernel;
-// it cannot be directly set via a socket option on most platforms.
-// We adjust SO_RCVBUF to approximate the desired scale factor.
-// Window scale of S means the actual window = SO_RCVBUF, and the advertised window = SO_RCVBUF / 2^S.
-// To set a scale of S, we set SO_RCVBUF to the kernel default (65535 for most) and let the kernel decide.
+// setWindowScale validates the TCP window scale factor.
+//
+// The scale factor is NOT settable through a socket option: the kernel
+// derives it from the receive buffer size at connect time and advertises it
+// in the SYN.  The value is therefore applied indirectly — WindowSize drives
+// SO_RCVBUF and the resulting scale follows from it — so this function only
+// range-checks the hint and reports an invalid one to the caller.
 func setWindowScale(fd int, scale int) error {
+	_ = fd
 	if scale < 0 || scale > 14 {
 		return fmt.Errorf("window scale %d out of range (0-14)", scale)
 	}
-	// On Linux, we can try to set TCP_WINDOW_CLAMP in combination with the scale.
-	// But since TCP_WINDOW_CLAMP is already set via setWindowSize, we just accept
-	// the scale value here. The kernel will derive the actual scale from the
-	// receive buffer size set by setWindowSize.
 	return nil
+}
+
+// setWindowClamp caps the advertised receive window.  Linux implements this as
+// TCP_WINDOW_CLAMP; other Unix systems ignore the value.
+func setWindowClamp(fd int, clamp int) error {
+	if clamp <= 0 {
+		return fmt.Errorf("window clamp %d out of range", clamp)
+	}
+	if runtime.GOOS != "linux" {
+		return nil
+	}
+	// TCP_WINDOW_CLAMP = 10 on Linux.
+	const tcpWindowClamp = 0xa
+	return syscall.SetsockoptInt(fd, syscall.IPPROTO_TCP, tcpWindowClamp, clamp)
+}
+
+// setTOS sets the IPv4 Type-Of-Service / DSCP byte.
+func setTOS(fd int, tos int) error {
+	if tos < 0 || tos > 255 {
+		return fmt.Errorf("tos %d out of range (0-255)", tos)
+	}
+	return syscall.SetsockoptInt(fd, syscall.IPPROTO_IP, syscall.IP_TOS, tos)
+}
+
+// setDontFragment toggles PMTU discovery, which drives the IP Don't-Fragment
+// bit.  Linux uses IP_MTU_DISCOVER with IP_PMTUDISC_DO; Darwin has no
+// equivalent pre-connect option and relies on the route's default.
+func setDontFragment(fd int, on bool) error {
+	if runtime.GOOS != "linux" {
+		return nil
+	}
+	const ipMtuDiscover = 0xa
+	const ipPmtudiscDo = 2
+	const ipPmtudiscDont = 0
+	v := ipPmtudiscDont
+	if on {
+		v = ipPmtudiscDo
+	}
+	return syscall.SetsockoptInt(fd, syscall.IPPROTO_IP, ipMtuDiscover, v)
+}
+
+// setNoDelay disables Nagle's algorithm (TCP_NODELAY).
+func setNoDelay(fd int, on bool) error {
+	v := 0
+	if on {
+		v = 1
+	}
+	return syscall.SetsockoptInt(fd, syscall.IPPROTO_TCP, syscall.TCP_NODELAY, v)
 }

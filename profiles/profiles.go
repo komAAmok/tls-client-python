@@ -133,20 +133,71 @@ func NewClientProfile(clientHelloId tls.ClientHelloID, settings map[http2.Settin
 // TcpFingerprint holds the TCP/IP stack parameters that should be set on outgoing
 // connections to mimic a specific operating system.  Each field is a pointer — nil
 // means "use the OS default"; a non-nil value forces the corresponding socket option.
+//
+// The first four fields cover the values a passive observer reads from the SYN
+// packet itself.  The remaining fields let a caller match the TCP option block
+// and IP header behaviour, which is what distinguishes a real OS stack from a
+// tuned one when two hosts advertise the same MSS/window.
 type TcpFingerprint struct {
 	TTL         *int // IP TTL (Time To Live).  Windows=128, Linux/macOS=64.
 	WindowSize  *int // TCP receive window size.  Windows=64240, Linux/macOS=65535.
 	WindowScale *int // TCP window scale factor.  Windows=8, Linux=7, macOS=6.
 	MSS         *int // TCP MSS (Maximum Segment Size).  Standard Ethernet=1460.
+
+	// DontFragment sets the IP Don't-Fragment bit.  Linux and macOS set it by
+	// default (PMTU discovery); Windows leaves it clear.  nil = OS default.
+	DontFragment *bool
+	// TOS is the IPv4 Type-Of-Service / DSCP byte.  All mainstream stacks
+	// send 0 for ordinary traffic; a non-zero value is unusual.  nil = default.
+	TOS *int
+	// NoDelay disables Nagle's algorithm (TCP_NODELAY).  Browsers set it.
+	// nil = OS default.
+	NoDelay *bool
+	// WindowClamp caps the advertised receive window (Linux only; ignored
+	// elsewhere).  nil = no clamp.
+	WindowClamp *int
+	// IPIDMode records how the IP identification field is filled, as
+	// documented for the emulated stack ("random" or "zero").  It is
+	// INFORMATIONAL: userspace has no portable socket option for the IP-ID
+	// policy (Linux exposes it only through the per-netns
+	// net.ipv4.ip_early_demux / IPID sysctls), so this value is not applied
+	// to the socket.  It exists so profiles describe a complete TCP/IP
+	// fingerprint and so the ABI-3 surface can round-trip the field.
+	// Empty = unspecified.
+	IPIDMode string
 }
 
 // DefaultTcpFingerprints maps client names to their default OS TCP fingerprints.
+//
+// The values follow what each OS actually puts on the wire: Windows sets DF
+// only for PMTU-discovered routes and uses a 64240 window with scale 8, while
+// Linux and the BSDs set DF on every TCP segment and use a 65535 window.
 var DefaultTcpFingerprints = map[string]TcpFingerprint{
-	"Windows": {TTL: IntPtr(128), WindowSize: IntPtr(64240), WindowScale: IntPtr(8), MSS: IntPtr(1460)},
-	"Linux":   {TTL: IntPtr(64), WindowSize: IntPtr(65535), WindowScale: IntPtr(7), MSS: IntPtr(1460)},
-	"macOS":   {TTL: IntPtr(64), WindowSize: IntPtr(65535), WindowScale: IntPtr(6), MSS: IntPtr(1460)},
-	"iOS":     {TTL: IntPtr(64), WindowSize: IntPtr(65535), WindowScale: IntPtr(6), MSS: IntPtr(1460)},
-	"Android": {TTL: IntPtr(64), WindowSize: IntPtr(65535), WindowScale: IntPtr(7), MSS: IntPtr(1460)},
+	"Windows": {
+		TTL: IntPtr(128), WindowSize: IntPtr(64240), WindowScale: IntPtr(8), MSS: IntPtr(1460),
+		DontFragment: BoolPtr(false), TOS: IntPtr(0), NoDelay: BoolPtr(true),
+		IPIDMode: "random",
+	},
+	"Linux": {
+		TTL: IntPtr(64), WindowSize: IntPtr(65535), WindowScale: IntPtr(7), MSS: IntPtr(1460),
+		DontFragment: BoolPtr(true), TOS: IntPtr(0), NoDelay: BoolPtr(true),
+		IPIDMode: "random",
+	},
+	"macOS": {
+		TTL: IntPtr(64), WindowSize: IntPtr(65535), WindowScale: IntPtr(6), MSS: IntPtr(1460),
+		DontFragment: BoolPtr(true), TOS: IntPtr(0), NoDelay: BoolPtr(true),
+		IPIDMode: "random",
+	},
+	"iOS": {
+		TTL: IntPtr(64), WindowSize: IntPtr(65535), WindowScale: IntPtr(6), MSS: IntPtr(1460),
+		DontFragment: BoolPtr(true), TOS: IntPtr(0), NoDelay: BoolPtr(true),
+		IPIDMode: "random",
+	},
+	"Android": {
+		TTL: IntPtr(64), WindowSize: IntPtr(65535), WindowScale: IntPtr(7), MSS: IntPtr(1460),
+		DontFragment: BoolPtr(true), TOS: IntPtr(0), NoDelay: BoolPtr(true),
+		IPIDMode: "random",
+	},
 }
 
 // clientToPlatform maps the Client name in a ClientHelloID to the platform name
@@ -204,6 +255,13 @@ func (c ClientProfile) GetTcpFingerprint() *TcpFingerprint {
 // Use this (not &localVar) when storing pointers in TcpFingerprint to avoid
 // dangling pointers after the calling function returns.
 func IntPtr(v int) *int {
+	cp := v
+	return &cp
+}
+
+// BoolPtr returns a pointer to a heap-allocated copy of v, for the tri-state
+// boolean fields of TcpFingerprint.
+func BoolPtr(v bool) *bool {
 	cp := v
 	return &cp
 }

@@ -156,6 +156,22 @@ typedef struct {
     int   preface_ping_idle_ms;
     const char* hpack_indexing_policy;
     int   cookie_crumb;
+    // ── ABI 3 additions (fine-grained fingerprint control; append-only) ──
+    // Extension-order policy: 0=off, 1=chrome, 2=all, 3=prefix.
+    int   extension_permute_mode;
+    int   extension_permute_prefix;
+    // Suppress RFC 7540 PRIORITY frames / HEADERS priority flag.
+    int   h2_disable_priority_frames;
+    // Per-Sec-Fetch-Dest header ordering.  When non-zero the order for the
+    // request's destination replaces the caller-supplied header_order.
+    int   header_order_by_dest;
+    const char* header_order_dest;
+    // TCP fingerprint depth.
+    int   tcp_dont_fragment;   // -1 = unset, 0 = clear, 1 = set
+    int   tcp_tos;             // -1 = unset
+    int   tcp_no_delay;        // -1 = unset, 0 = off, 1 = on
+    int   tcp_window_clamp;    // 0 = unset
+    const char* tcp_ip_id_mode;
 } RequestOptions;
 
 typedef struct {
@@ -442,6 +458,18 @@ type requestConfig struct {
 	tcpWindowSize            int
 	tcpWindowScale           int
 	tcpMSS                   int
+	// ABI 3: deeper TCP fingerprint controls.  Negative values mean "unset".
+	tcpDontFragment          int
+	tcpTOS                   int
+	tcpNoDelay               int
+	tcpWindowClamp           int
+	tcpIPIDMode              string
+	// ABI 3: extension-order policy and destination-aware header ordering.
+	extensionPermuteMode     int
+	extensionPermutePrefix   int
+	headerOrderByDest        bool
+	headerOrderDest          string
+	h2DisablePriorityFrames  bool
 	withoutCookieJar         bool
 	catchPanics              bool
 	withDebug                bool
@@ -506,6 +534,16 @@ func requestConfigFromOptions(opts *C.RequestOptions, copyBody bool) (cfg *reque
 		tcpWindowSize:            int(opts.tcp_window_size),
 		tcpWindowScale:           int(opts.tcp_window_scale),
 		tcpMSS:                   int(opts.tcp_mss),
+		tcpDontFragment:          int(opts.tcp_dont_fragment),
+		tcpTOS:                   int(opts.tcp_tos),
+		tcpNoDelay:               int(opts.tcp_no_delay),
+		tcpWindowClamp:           int(opts.tcp_window_clamp),
+		tcpIPIDMode:              C.GoString(opts.tcp_ip_id_mode),
+		extensionPermuteMode:     int(opts.extension_permute_mode),
+		extensionPermutePrefix:   int(opts.extension_permute_prefix),
+		headerOrderByDest:        int(opts.header_order_by_dest) != 0,
+		headerOrderDest:          C.GoString(opts.header_order_dest),
+		h2DisablePriorityFrames:  int(opts.h2_disable_priority_frames) != 0,
 		withoutCookieJar:         int(opts.without_cookie_jar) != 0,
 		catchPanics:              int(opts.catch_panics) != 0,
 		withDebug:                int(opts.with_debug) != 0,
@@ -1088,6 +1126,14 @@ func buildCacheKeyFromConfig(cfg *requestConfig) string {
 	// of the client cache key.
 	fmt.Fprintf(h, "|mdf=%d|pp=%d|hip=%s",
 		cfg.h2MaxDataFrameSize, cfg.prefacePingIdleMs, cfg.hpackIndexingPol)
+	// ABI 3 / format-version 5: extension-order policy, PRIORITY-frame
+	// suppression and the deep TCP fingerprint fields.  header_order_by_dest /
+	// header_order_dest and the ABI 2.1 cookie_crumb are per-request wire
+	// behaviour that does not change the transport, so they are not keyed.
+	fmt.Fprintf(h, "|epm=%d|epp=%d|hdpf=%d|df=%d|tos=%d|nd=%d|wc=%d|ipid=%s",
+		cfg.extensionPermuteMode, cfg.extensionPermutePrefix,
+		b2i(cfg.h2DisablePriorityFrames), cfg.tcpDontFragment, cfg.tcpTOS,
+		cfg.tcpNoDelay, cfg.tcpWindowClamp, cfg.tcpIPIDMode)
 	if len(cfg.pseudoHeaderOrder) > 0 {
 		for _, s := range cfg.pseudoHeaderOrder {
 			fmt.Fprintf(h, ":%s", s)
@@ -1245,6 +1291,26 @@ func buildCacheKeyFromConfig(cfg *requestConfig) string {
 	return fmt.Sprintf("%x", h.Sum(nil))
 }
 
+// browserFamilyForIdentifier maps a client_identifier to the header-order
+// family used by the destination-aware ordering tables.  A custom identifier
+// or an unknown browser returns "" (no ordering applied).
+func browserFamilyForIdentifier(identifier string) string {
+	lower := strings.ToLower(identifier)
+	switch {
+	case strings.HasPrefix(lower, "chrome"), strings.HasPrefix(lower, "cloudscraper"):
+		return "chrome"
+	case strings.HasPrefix(lower, "brave"):
+		return "chrome"
+	case strings.HasPrefix(lower, "opera"):
+		return "chrome"
+	case strings.HasPrefix(lower, "firefox"):
+		return "firefox"
+	case strings.HasPrefix(lower, "safari"):
+		return "safari"
+	}
+	return ""
+}
+
 func getOrCreateClientFromConfig(cfg *requestConfig) (tls_client.HttpClient, error) {
 	startEviction()
 	key := cfg.cacheKeyHash
@@ -1332,8 +1398,12 @@ func buildClientFromConfig(cfg *requestConfig) (tls_client.HttpClient, error) {
 	if cfg.forceHttp1 {
 		options = append(options, tls_client.WithForceHttp1())
 	}
-	if cfg.withRandomTLSExtOrder {
-		options = append(options, tls_client.WithRandomTLSExtensionOrder())
+	if cfg.withRandomTLSExtOrder || cfg.extensionPermuteMode != 0 {
+		mode := tls_client.ExtensionPermuteMode(cfg.extensionPermuteMode)
+		if cfg.extensionPermuteMode == 0 {
+			mode = tls_client.PermuteChrome
+		}
+		options = append(options, tls_client.WithExtensionPermuteMode(mode, cfg.extensionPermutePrefix))
 	}
 	if cfg.disableHTTP3 {
 		options = append(options, tls_client.WithDisableHttp3())
@@ -1350,7 +1420,9 @@ func buildClientFromConfig(cfg *requestConfig) (tls_client.HttpClient, error) {
 
 	// TCP/IP fingerprint (async path) — use profiles.IntPtr() to heap-allocate
 	// values so pointers inside TcpFingerprint remain valid after this function returns.
-	if cfg.tcpTTL > 0 || cfg.tcpWindowSize > 0 || cfg.tcpWindowScale > 0 || cfg.tcpMSS > 0 {
+	if cfg.tcpTTL > 0 || cfg.tcpWindowSize > 0 || cfg.tcpWindowScale > 0 || cfg.tcpMSS > 0 ||
+		cfg.tcpDontFragment >= 0 || cfg.tcpTOS >= 0 || cfg.tcpNoDelay >= 0 ||
+		cfg.tcpWindowClamp > 0 || cfg.tcpIPIDMode != "" {
 		fp := profiles.TcpFingerprint{}
 		if cfg.tcpTTL > 0 {
 			fp.TTL = profiles.IntPtr(cfg.tcpTTL)
@@ -1363,6 +1435,22 @@ func buildClientFromConfig(cfg *requestConfig) (tls_client.HttpClient, error) {
 		}
 		if cfg.tcpMSS > 0 {
 			fp.MSS = profiles.IntPtr(cfg.tcpMSS)
+		}
+		// ABI 3: tri-state fields use -1 for "unset".
+		if cfg.tcpDontFragment >= 0 {
+			fp.DontFragment = profiles.BoolPtr(cfg.tcpDontFragment != 0)
+		}
+		if cfg.tcpTOS >= 0 {
+			fp.TOS = profiles.IntPtr(cfg.tcpTOS)
+		}
+		if cfg.tcpNoDelay >= 0 {
+			fp.NoDelay = profiles.BoolPtr(cfg.tcpNoDelay != 0)
+		}
+		if cfg.tcpWindowClamp > 0 {
+			fp.WindowClamp = profiles.IntPtr(cfg.tcpWindowClamp)
+		}
+		if cfg.tcpIPIDMode != "" {
+			fp.IPIDMode = cfg.tcpIPIDMode
 		}
 		options = append(options, tls_client.WithTcpFingerprint(fp))
 	}
@@ -1425,6 +1513,7 @@ func buildClientFromConfig(cfg *requestConfig) (tls_client.HttpClient, error) {
 	transportOpts.H2MaxDataFrameSize = cfg.h2MaxDataFrameSize
 	transportOpts.H2PrefacePingIdleMs = cfg.prefacePingIdleMs
 	transportOpts.H2HPACKIndexingPolicy = cfg.hpackIndexingPol
+	transportOpts.H2DisablePriorityFrames = cfg.h2DisablePriorityFrames
 	// Default idle connection timeout of 30s — prevents unbounded
 	// connection-pool growth when the caller does not set it explicitly.
 	if cfg.idleConnTimeoutSeconds > 0 {
@@ -1507,7 +1596,15 @@ func executeRequestFromConfig(cfg *requestConfig) *C.ResponseResult {
 	}
 
 	if len(cfg.headers) > 0 {
+		if cfg.headerOrderByDest {
+			// Destination-aware ordering: pick the order Chrome/Firefox/Safari
+			// uses for this Sec-Fetch-Dest instead of a single session order.
+			browser := browserFamilyForIdentifier(cfg.clientIdentifier)
+			tls_client.ApplyHeaderOrderForDest(cfg.headers, browser, cfg.headerOrderDest)
+		}
 		if len(cfg.headerOrder) > 0 {
+			// An explicit caller-supplied order always wins over the
+			// destination-derived default.
 			cfg.headers[http.HeaderOrderKey] = cfg.headerOrder
 		}
 		req.Header = cfg.headers
@@ -1893,8 +1990,13 @@ func GetBuildVariant() *C.char {
 func GetAbiVersion() C.int {
 	// ABI 2: RequestOptions gained disable_session_tickets / tls_keylog_path /
 	// root_ca_pem(+len) and CustomTlsClient gained trust_anchors_payload.
+	// ABI 3: RequestOptions gained the extension-order policy
+	// (extension_permute_mode/prefix), destination-aware header ordering
+	// (header_order_by_dest/dest), h2_disable_priority_frames and the deep
+	// TCP fingerprint fields (tcp_dont_fragment/tos/no_delay/window_clamp/
+	// ip_id_mode); CustomTlsClient gained extension_permute_mode/prefix.
 	// Append-only struct evolution; consumers must verify via this export.
-	return 2
+	return 3
 }
 
 //export RequestAsync
@@ -1969,6 +2071,13 @@ func RequestAsync(opts *C.RequestOptions, requestID C.uintptr_t, cb unsafe.Point
 }
 
 func main() {}
+
+// init applies the optional nano-build profile trimming.  A c-shared library
+// never runs main(), so the environment knob has to be honoured here, after
+// the profiles package's own init() registrations have completed.
+func init() {
+	profiles.ApplyNanoProfileFilter()
+}
 
 // ---------------------------------------------------------------------------
 // Test-support bridge — Go test files cannot use cgo directly ("use of cgo

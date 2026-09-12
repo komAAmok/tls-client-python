@@ -22,13 +22,62 @@ jobs:
   # -----------------------------------------------------------------------
   # 1. Build and Pack Native Platforms (Linux-amd64, macOS, Windows-amd64)
   # -----------------------------------------------------------------------
+  verify-generated:
+    name: Verify generated fingerprint tables are current
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: "1.24"
+          cache: true
+
+      # The Chrome profile tables and the Python preset catalogue are both
+      # generated from tools/_chrome_captures.json.  If a capture refresh is
+      # committed without regenerating, the checked-in tables go stale and the
+      # JA3/preset tests would pass against outdated data.  These --check
+      # gates fail the build instead.
+      - name: Check generated Go profiles are current
+        run: python3 tools/gen_chrome_profiles.py --check
+
+      - name: Check generated Python presets are current
+        run: python3 tools/gen_chrome_fingerprint_presets.py --check
+
+      - name: Check ABI/CDEF parity (Go ↔ Python)
+        run: |
+          python3 -m pip install --upgrade pip cffi
+          python3 -m unittest python_tests.test_cdef_parity -v
+          python3 -m unittest python_tests.test_cache_key_parity -v
+          # Export/signature parity guards: a build tag must not drop an
+          # exported symbol, and AsyncSession must accept every Session knob.
+          python3 -m unittest python_tests.test_export_parity -v
+          python3 -m unittest python_tests.test_session_signature_parity -v
+
+      - name: Check fingerprint preset catalogue
+        run: |
+          python3 -m unittest python_tests.test_abi3_fingerprints -v
+
+      - name: Go unit tests (fingerprint layer)
+        run: |
+          go test . -run 'Test.*Permute|Test.*HeaderOrder|Test.*TcpFingerprint|Test.*TCP' -count=1
+          go test ./profiles/ -count=1
+
   build-native:
     name: Build & Pack ${{ matrix.goos }}-${{ matrix.goarch }}
+    needs: verify-generated
     runs-on: ${{ matrix.runner }}
     strategy:
       fail-fast: false
       matrix:
-        variant: [full, lite]
+        variant: [full, lite, nano]
         include:
           - runner: ubuntu-latest
             goos: linux
@@ -92,6 +141,20 @@ jobs:
         with:
           python-version: "3.11"
 
+      # nano is the size-trimmed tier.  TLS_CLIENT_NANO_PROFILES only prunes
+      # the runtime map — every captured profile's data is still linked in
+      # because they all live in one `switch major`.  Regenerating the table
+      # with just the named majors is what actually removes the data from the
+      # binary; the env var stays set as a backstop for hand-built nano libs.
+      - name: Trim profile table (nano only)
+        if: matrix.variant == 'nano'
+        shell: bash
+        run: |
+          IDS="${{ vars.NANO_PROFILES || 'chrome_133,chrome_150,chrome_152' }}"
+          MAJORS=$(echo "$IDS" | tr ',' '\n' | sed -E 's/^[[:space:]]*chrome_//' | paste -sd, -)
+          echo "nano majors: $MAJORS"
+          python3 tools/gen_chrome_profiles.py --majors "$MAJORS"
+
       - name: Build Core
         working-directory: cffi_binding
         shell: bash
@@ -105,20 +168,35 @@ jobs:
         run: |
           mkdir -p ../tls_client/bin
           find ../tls_client/bin -maxdepth 1 -type f -name 'tls-client-*' -delete
+          # Variant wiring:
+          #   lite/nano → -tags=tls_lite (no QUIC/HTTP-3)
+          #   nano      → TLS_CLIENT_NANO_PROFILES trims the profile catalogue
+          case "${{ matrix.variant }}" in
+            lite|nano) EXTRA_TAG=" tls_lite" ;;
+            *)         EXTRA_TAG="" ;;
+          esac
+          case "${{ matrix.variant }}" in
+            full) SUFFIX="" ;;
+            *)    SUFFIX="-${{ matrix.variant }}" ;;
+          esac
+          if [ "${{ matrix.variant }}" = "nano" ]; then
+            export TLS_CLIENT_NANO_PROFILES="${{ vars.NANO_PROFILES || 'chrome_133,chrome_150,chrome_152' }}"
+          fi
           # 🌟 极客优化：加入 -gcflags、-asmflags 全深度擦除路径元数据，并在 -ldflags 中擦除 -buildid=
           go build -buildmode=c-shared \
                    -buildvcs=false \
                    -trimpath \
-                   -tags="netgo osusergo${{ matrix.variant == 'lite' && ' tls_lite' || '' }}" \
+                   -tags="netgo osusergo${EXTRA_TAG}" \
                    -gcflags="all=-trimpath=${{ github.workspace }}" \
                    -asmflags="all=-trimpath=${{ github.workspace }}" \
                    -ldflags="-s -w -buildid= -extldflags '-Wl,-s'" \
-                   -o "../tls_client/bin/tls-client-${{ matrix.goos }}-${{ matrix.goarch }}${{ matrix.variant == 'lite' && '-lite' || '' }}${{ matrix.ext }}" .
+                   -o "../tls_client/bin/tls-client-${{ matrix.goos }}-${{ matrix.goarch }}${SUFFIX}${{ matrix.ext }}" .
 
       - name: Strip Binary Safely
         shell: bash
         run: |
-          TARGET="tls_client/bin/tls-client-${{ matrix.goos }}-${{ matrix.goarch }}${{ matrix.variant == 'lite' && '-lite' || '' }}${{ matrix.ext }}"
+          if [ "${{ matrix.variant }}" = "full" ]; then SUFFIX=""; else SUFFIX="-${{ matrix.variant }}"; fi
+          TARGET="tls_client/bin/tls-client-${{ matrix.goos }}-${{ matrix.goarch }}${SUFFIX}${{ matrix.ext }}"
           if [ "${{ matrix.goos }}" = "darwin" ]; then
             strip -x "$TARGET" || true
           else
@@ -130,19 +208,30 @@ jobs:
         if: matrix.goos != 'darwin'
         shell: bash
         run: |
-          TARGET="tls_client/bin/tls-client-${{ matrix.goos }}-${{ matrix.goarch }}${{ matrix.variant == 'lite' && '-lite' || '' }}${{ matrix.ext }}"
+          if [ "${{ matrix.variant }}" = "full" ]; then SUFFIX=""; else SUFFIX="-${{ matrix.variant }}"; fi
+          TARGET="tls_client/bin/tls-client-${{ matrix.goos }}-${{ matrix.goarch }}${SUFFIX}${{ matrix.ext }}"
           if [ "${{ matrix.goos }}" = "linux" ]; then
             upx --ultra-brute --shlib "$TARGET" || true
           else
             upx --ultra-brute "$TARGET" || true
           fi
 
+      - name: Report binary size
+        shell: bash
+        run: |
+          if [ "${{ matrix.variant }}" = "full" ]; then SUFFIX=""; else SUFFIX="-${{ matrix.variant }}"; fi
+          TARGET="tls_client/bin/tls-client-${{ matrix.goos }}-${{ matrix.goarch }}${SUFFIX}${{ matrix.ext }}"
+          BYTES=$(stat -c%s "$TARGET" 2>/dev/null || stat -f%z "$TARGET")
+          printf '%-10s %s  %s bytes (%.1f MiB)\n' \
+            "${{ matrix.variant }}" "$(basename "$TARGET")" "$BYTES" \
+            "$(echo "$BYTES" | awk '{print $1/1048576}')"
+
       - name: Build Wheel
         shell: bash
         run: |
           python -m pip install --upgrade pip build
           python -m build --wheel -C--build-option=--plat-name=${{ matrix.plat }}
-          python -c "import glob,zipfile; w=glob.glob('dist/*.whl')[-1]; n=[x for x in zipfile.ZipFile(w).namelist() if x.startswith('tls_client/bin/tls-client-')]; assert len(n)==1, 'wheel must contain exactly one native binary: %r' % n"
+          python -c "import glob,zipfile,re; w=glob.glob('dist/*.whl')[-1]; n=[x for x in zipfile.ZipFile(w).namelist() if x.startswith('tls_client/bin/tls-client-')]; full=[x for x in n if re.search(r'tls-client-[a-z0-9]+-[a-z0-9]+\\.(so|dll|dylib)$', x)]; assert len(full)==1, 'wheel must contain exactly one full-tier native binary: %r' % n"
 
       - name: Upload Platform Wheel Artifact
         uses: actions/upload-artifact@v4
@@ -221,7 +310,7 @@ jobs:
         run: |
           python -m pip install --upgrade pip build
           python -m build --wheel -C--build-option=--plat-name=win32
-          python -c "import glob,zipfile; w=glob.glob('dist/*.whl')[-1]; n=[x for x in zipfile.ZipFile(w).namelist() if x.startswith('tls_client/bin/tls-client-')]; assert len(n)==1, 'wheel must contain exactly one native binary: %r' % n"
+          python -c "import glob,zipfile,re; w=glob.glob('dist/*.whl')[-1]; n=[x for x in zipfile.ZipFile(w).namelist() if x.startswith('tls_client/bin/tls-client-')]; full=[x for x in n if re.search(r'tls-client-[a-z0-9]+-[a-z0-9]+\\.(so|dll|dylib)$', x)]; assert len(full)==1, 'wheel must contain exactly one full-tier native binary: %r' % n"
 
       - name: Upload Artifact
         uses: actions/upload-artifact@v4
@@ -325,7 +414,7 @@ jobs:
         run: |
           python -m pip install --upgrade pip build
           python -m build --wheel -C--build-option=--plat-name=${{ matrix.plat }}
-          python -c "import glob,zipfile; w=glob.glob('dist/*.whl')[-1]; n=[x for x in zipfile.ZipFile(w).namelist() if x.startswith('tls_client/bin/tls-client-')]; assert len(n)==1, 'wheel must contain exactly one native binary: %r' % n"
+          python -c "import glob,zipfile,re; w=glob.glob('dist/*.whl')[-1]; n=[x for x in zipfile.ZipFile(w).namelist() if x.startswith('tls_client/bin/tls-client-')]; full=[x for x in n if re.search(r'tls-client-[a-z0-9]+-[a-z0-9]+\\.(so|dll|dylib)$', x)]; assert len(full)==1, 'wheel must contain exactly one full-tier native binary: %r' % n"
 
       - name: Upload Artifact
         uses: actions/upload-artifact@v4
@@ -391,7 +480,7 @@ jobs:
       - name: Build Wheel
         run: |
           python3 -m build --wheel -C--build-option=--plat-name=musllinux_1_1_x86_64
-          python3 -c "import glob,zipfile; w=glob.glob('dist/*.whl')[-1]; n=[x for x in zipfile.ZipFile(w).namelist() if x.startswith('tls_client/bin/tls-client-')]; assert len(n)==1, 'wheel must contain exactly one native binary: %r' % n"
+          python3 -c "import glob,zipfile,re; w=glob.glob('dist/*.whl')[-1]; n=[x for x in zipfile.ZipFile(w).namelist() if x.startswith('tls_client/bin/tls-client-')]; full=[x for x in n if re.search(r'tls-client-[a-z0-9]+-[a-z0-9]+\\.(so|dll|dylib)$', x)]; assert len(full)==1, 'wheel must contain exactly one full-tier native binary: %r' % n"
 
       - name: Upload Artifact
         uses: actions/upload-artifact@v4

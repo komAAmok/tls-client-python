@@ -13,8 +13,8 @@ import (
 // python_tests/test_cache_key_parity.py holds the same constants on the
 // Python side.  If either side drifts, these tests fail BEFORE production
 // cache keys diverge and silently poison the client pool.
-// Format version: 3 (ABI 2 — disable_session_tickets / tls_keylog_path /
-// root_ca_pem / trust_anchors_payload).
+// Format version: 5 (ABI 3 — extension permutation, PRIORITY-frame
+// suppression and the deep TCP fingerprint).
 func TestCacheKeyParityWithPython(t *testing.T) {
 	const testPEM = "-----BEGIN CERTIFICATE-----\nAAE=\n-----END CERTIFICATE-----\n"
 
@@ -35,8 +35,16 @@ func TestCacheKeyParityWithPython(t *testing.T) {
 		h2MaxDataFrameSize:    14000,
 		prefacePingIdleMs:     10000,
 		hpackIndexingPol:      "chrome",
+		// ABI 3 — all of these participate in the hash.
+		extensionPermuteMode:    1,
+		h2DisablePriorityFrames: false,
+		tcpDontFragment:         0,
+		tcpTOS:                  0,
+		tcpNoDelay:              1,
+		tcpWindowClamp:          0,
+		tcpIPIDMode:             "random",
 	}
-	const wantFull = "672f67e5996cafe5167bbb50b2c32f76181e19f564fda270e91b67306ac474bc"
+	const wantFull = "a2c79b647bc79f4cdb78ad3e2bbbda85ead64047d0c6bfa08b8c680fcba0f07d"
 	if got := buildCacheKeyFromConfig(full); got != wantFull {
 		t.Fatalf("full vector mismatch:\n got  %s\n want %s", got, wantFull)
 	}
@@ -47,8 +55,13 @@ func TestCacheKeyParityWithPython(t *testing.T) {
 		timeoutSeconds:        30,
 		withRandomTLSExtOrder: true,
 		customTLSClient:       ctc,
+		// ABI 3 tri-state fields use -1 for "unset" (0 is a meaningful
+		// wire value for NoDelay / TOS / DontFragment).
+		tcpDontFragment: -1,
+		tcpTOS:          -1,
+		tcpNoDelay:      -1,
 	}
-	const wantMinimal = "c5fcb1ed64fbde71a681052e916ccf25e004ef3b537770a44948232da582be5f"
+	const wantMinimal = "fcdf48ebf9e03e1ff1d0b5c15be5f2da2f5e96e7bfd94cff94c3cc74ab7dca98"
 	if got := buildCacheKeyFromConfig(minimal); got != wantMinimal {
 		t.Fatalf("minimal vector mismatch:\n got  %s\n want %s", got, wantMinimal)
 	}
@@ -56,5 +69,19 @@ func TestCacheKeyParityWithPython(t *testing.T) {
 	// The ABI-2 fields must actually participate in the cache key.
 	if buildCacheKeyFromConfig(full) == buildCacheKeyFromConfig(minimal) {
 		t.Fatal("ABI 2 fields did not influence the cache key")
+	}
+
+	// ABI 3: extension-permute policy participates.
+	permuted := *minimal
+	permuted.extensionPermuteMode = 2
+	if buildCacheKeyFromConfig(&permuted) == buildCacheKeyFromConfig(minimal) {
+		t.Fatal("extension_permute_mode did not influence the cache key")
+	}
+
+	// ABI 3: the -1 sentinel must not collide with a real 0 value.
+	zeroDelay := *minimal
+	zeroDelay.tcpNoDelay = 0
+	if buildCacheKeyFromConfig(&zeroDelay) == buildCacheKeyFromConfig(minimal) {
+		t.Fatal("tcp_no_delay=0 hashed identically to the -1 sentinel")
 	}
 }

@@ -93,6 +93,11 @@ def apply(session: Any, name: str) -> Dict[str, Any]:
     keeps everything else.  Header templates (``header_order`` /
     ``header_order_xhr``) are stored on the session for use with the
     request-context layer and are NOT sent automatically.
+
+    ABI 3 keys (``extension_permute_mode`` / ``extension_permute_prefix`` /
+    ``h2_disable_priority_frames`` / ``header_order_by_dest`` and the deep
+    TCP fingerprint fields) are written onto the session defaults when the
+    session exposes them, so a preset round-trips as a complete bundle.
     """
     resolved = resolve(name)
 
@@ -113,6 +118,47 @@ def apply(session: Any, name: str) -> Dict[str, Any]:
         session.default_headers = dict(resolved["default_headers"])
     if resolved.get("custom_tls_client"):
         session.custom_tls_client = dict(resolved["custom_tls_client"])
+
+    # ── ABI 3 deep-fingerprint knobs + the TCP fields they build on ────
+    # Written only when the session exposes the matching default key, so an
+    # older Session subclass without ABI 3 support still applies the rest.
+    #
+    # The write goes through Session._set_default rather than mutating the
+    # `defaults` dict in place: _set_default bumps _defaults_version and
+    # clears the resolved-snapshot cache, which is what keeps a previously
+    # materialised request snapshot from being reused after the preset
+    # changed the session.  A bare dict assignment would leave both stale.
+    defaults = getattr(session, "defaults", None)
+    set_default = getattr(session, "_set_default", None)
+    if isinstance(defaults, dict):
+        _fp_keys = (
+            # Core TCP fingerprint (ABI 1), carried by every OS variant.
+            "tcp_ttl",
+            "tcp_window_size",
+            "tcp_window_scale",
+            "tcp_mss",
+            # ABI 3 deep-fingerprint controls.
+            "extension_permute_mode",
+            "extension_permute_prefix",
+            "h2_disable_priority_frames",
+            "header_order_by_dest",
+            "header_order_dest",
+            "tcp_dont_fragment",
+            "tcp_tos",
+            "tcp_no_delay",
+            "tcp_window_clamp",
+            "tcp_ip_id_mode",
+        )
+        _bool_keys = ("h2_disable_priority_frames", "header_order_by_dest")
+        for key in _fp_keys:
+            if key in resolved and key in defaults:
+                value = resolved[key]
+                if key in _bool_keys:
+                    value = 1 if value else 0
+                if callable(set_default):
+                    set_default(key, value)
+                else:
+                    defaults[key] = value
 
     session._fingerprint_header_order = resolved.get("header_order")
     session._fingerprint_header_order_xhr = resolved.get("header_order_xhr")

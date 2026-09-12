@@ -219,6 +219,11 @@ _FIREFOX_NAVIGATION_ACCEPT = (
     "text/html,application/xhtml+xml,application/xml;q=0.9,"
     "image/avif,image/webp,image/png,image/svg+xml,*/*;q=0.8"
 )
+# Safari sends the same navigation Accept as Chrome but without the
+# signed-exchange token, which is a Chromium-only feature.
+_SAFARI_NAVIGATION_ACCEPT = (
+    "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8"
+)
 _CHROME_EMPTY_ACCEPT = "*/*"
 _FIREFOX_EMPTY_ACCEPT = "*/*"
 _IMAGE_ACCEPT = (
@@ -231,8 +236,17 @@ _SCRIPT_ACCEPT = (
 
 
 def _accept_for(ctx: RequestContext, browser: str) -> str:
+    """Navigation/XHR Accept header for *browser* ("" = unknown family).
+
+    An unknown family falls back to the Chromium value, which matches the
+    pre-existing behaviour for identifiers the engine does not recognise.
+    """
     if ctx.dest == "document":
-        return _FIREFOX_NAVIGATION_ACCEPT if browser == "firefox" else _CHROME_NAVIGATION_ACCEPT
+        if browser == "firefox":
+            return _FIREFOX_NAVIGATION_ACCEPT
+        if browser == "safari":
+            return _SAFARI_NAVIGATION_ACCEPT
+        return _CHROME_NAVIGATION_ACCEPT
     if ctx.dest == "image":
         return _IMAGE_ACCEPT
     if ctx.dest == "style":

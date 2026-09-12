@@ -16,7 +16,9 @@ layer.  Custom user presets are plain JSON/dict files with optional
 
 from tls_client.fingerprints import registry as _registry
 from tls_client.fingerprints import chrome as _chrome
+from tls_client.fingerprints import chrome_full as _chrome_full
 from tls_client.fingerprints import firefox as _firefox
+from tls_client.fingerprints.chrome_full import header_order_for_dest  # noqa: F401
 from tls_client.fingerprints.registry import (  # noqa: F401
     apply,
     list_presets,
@@ -25,6 +27,7 @@ from tls_client.fingerprints.registry import (  # noqa: F401
 )
 
 _chrome._register(_registry)
+_chrome_full._register(_registry)
 _firefox._register(_registry)
 
 
