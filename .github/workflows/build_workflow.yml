@@ -352,6 +352,8 @@ jobs:
         working-directory: cffi_binding
         env:
           CGO_ENABLED: 1
+          # Retry alternate module mirrors when proxy.golang.org resets HTTP/2 streams.
+          GOPROXY: "https://proxy.golang.org|https://goproxy.cn|direct"
           # 🌟 极客优化：Alpine 对齐 CGO 编译体积参数（包含 -fno-asynchronous-unwind-tables）
           CGO_CFLAGS: "-Os -g0 -fdata-sections -ffunction-sections -fno-asynchronous-unwind-tables -fno-ident"
           CGO_LDFLAGS: "-Wl,--gc-sections"
