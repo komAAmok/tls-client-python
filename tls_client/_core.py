@@ -1150,8 +1150,10 @@ def _go_arch() -> str:
     return {
         "x86_64": "amd64", "amd64": "amd64",
         "arm64": "arm64", "aarch64": "arm64",
-        "armv7l": "arm", "armv6l": "arm",
+        "armv7l": "arm", "armv6l": "arm", "armv8l": "arm",
         "i386": "386", "i686": "386",
+        # 32-bit Windows reports "x86" (not "i386"); other 32-bit x86 spellings.
+        "x86": "386", "x86pc": "386", "win32": "386", "intel": "386",
     }.get(m, m)
 
 

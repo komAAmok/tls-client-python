@@ -10,9 +10,43 @@ on:
       - 'go.mod'
       - 'go.sum'
       - 'profiles/**'
+      - '.github/workflows/build_workflow.yml'
     tags:
       - 'v*'
   workflow_dispatch:
+
+# ---------------------------------------------------------------------------
+# Supported target matrix
+#
+# The package advertises twelve (OS, arch, libc) triples plus a macOS
+# universal2 wheel that bundles both Apple architectures.  Every arch-specific
+# triple must have a prebuilt core committed under tls_client/bin/, otherwise
+# `pip install` succeeds but the first import raises FileNotFoundError.
+#
+#   GOOS/GOARCH       libc    extension  wheel platform tag
+#   ----------------  ------  ---------  ---------------------
+#   windows/amd64     -       .dll       win_amd64
+#   windows/386       -       .dll       win32
+#   windows/arm64     -       .dll       win_arm64
+#   linux/amd64       glibc   .so        manylinux2014_x86_64
+#   linux/arm64       glibc   .so        manylinux2014_aarch64
+#   linux/arm  (v7)   glibc   .so        manylinux2014_armv7l
+#   linux/386         glibc   .so        manylinux2014_i686
+#   darwin/amd64      -       .dylib     macosx_10_9_x86_64
+#   darwin/arm64      -       .dylib     macosx_11_0_arm64
+#   darwin/universal2 -       .dylib     macosx_10_9_universal2  (both arches)
+#   linux/amd64       musl    .so        musllinux_1_1_x86_64
+#   linux/arm64       musl    .so        musllinux_1_1_aarch64
+#   linux/arm  (v7)   musl    .so        musllinux_1_1_armv7l
+#
+# Invariant enforced by every wheel job: after the core is built and every
+# foreign binary is deleted, the package directory holds EXACTLY the library
+# (or libraries) the target interpreter resolves at import time (see
+# tls_client/_core.py::_shared_lib_name).  A wheel that carries a foreign
+# library is dead weight; one that carries none is unusable.  Both are hard
+# failures.  The universal2 wheel is the one exception: it legitimately
+# bundles BOTH darwin architectures, which the loader selects between.
+# ---------------------------------------------------------------------------
 
 permissions:
   contents: write
@@ -20,7 +54,7 @@ permissions:
 
 jobs:
   # -----------------------------------------------------------------------
-  # 1. Build and Pack Native Platforms (Linux-amd64, macOS, Windows-amd64)
+  # 0. Source-level gates.  Runs once, cheap, and gates every compile job.
   # -----------------------------------------------------------------------
   verify-generated:
     name: Verify generated fingerprint tables are current
@@ -40,11 +74,6 @@ jobs:
           go-version: "1.24"
           cache: true
 
-      # The Chrome profile tables and the Python preset catalogue are both
-      # generated from tools/_chrome_captures.json.  If a capture refresh is
-      # committed without regenerating, the checked-in tables go stale and the
-      # JA3/preset tests would pass against outdated data.  These --check
-      # gates fail the build instead.
       - name: Check generated Go profiles are current
         run: python3 tools/gen_chrome_profiles.py --check
 
@@ -56,8 +85,6 @@ jobs:
           python3 -m pip install --upgrade pip cffi
           python3 -m unittest python_tests.test_cdef_parity -v
           python3 -m unittest python_tests.test_cache_key_parity -v
-          # Export/signature parity guards: a build tag must not drop an
-          # exported symbol, and AsyncSession must accept every Session knob.
           python3 -m unittest python_tests.test_export_parity -v
           python3 -m unittest python_tests.test_session_signature_parity -v
 
@@ -65,11 +92,21 @@ jobs:
         run: |
           python3 -m unittest python_tests.test_abi3_fingerprints -v
 
+      # The loader names the file it will dlopen from (sys.platform,
+      # platform.machine(), libc).  If any build step writes a name the loader
+      # would not compute, the wheel ships a payload that is present but
+      # unreachable.  This runs before any build on a clean checkout.
+      - name: Check loader names match the build matrix
+        run: python3 python_tests/test_core_naming_contract.py
+
       - name: Go unit tests (fingerprint layer)
         run: |
           go test . -run 'Test.*Permute|Test.*HeaderOrder|Test.*TcpFingerprint|Test.*TCP' -count=1
           go test ./profiles/ -count=1
 
+  # -----------------------------------------------------------------------
+  # 1. Native build hosts: Linux-amd64 (glibc), macOS, Windows.
+  # -----------------------------------------------------------------------
   build-native:
     name: Build & Pack ${{ matrix.goos }}-${{ matrix.goarch }}
     needs: verify-generated
@@ -78,14 +115,16 @@ jobs:
       fail-fast: false
       matrix:
         include:
+          # Linux x86_64 (glibc) — primary target.
           - runner: ubuntu-latest
             goos: linux
             goarch: amd64
             ext: .so
             cgo_ldflags: "-Wl,--gc-sections -Wl,-z,relro -Wl,-z,now"
             plat: "manylinux2014_x86_64"
-            cc: "clang" # 🌟 极客优化：Linux 切换为 clang 编译器
-            cgo_cflags: "-Oz -g0 -fdata-sections -ffunction-sections -fno-asynchronous-unwind-tables -fno-ident" # 🌟 极客优化：使用极致体积压缩参数 -Oz
+            cc: "clang"
+            cgo_cflags: "-Oz -g0 -fdata-sections -ffunction-sections -fno-asynchronous-unwind-tables -fno-ident"
+          # macOS Intel.
           - runner: macos-latest
             goos: darwin
             goarch: amd64
@@ -93,7 +132,8 @@ jobs:
             cgo_ldflags: "-Wl,-dead_strip"
             plat: "macosx_10_9_x86_64"
             cc: "clang"
-            cgo_cflags: "-Oz -g0 -fdata-sections -ffunction-sections -fno-asynchronous-unwind-tables -fno-ident" # 🌟 极客优化：macOS 开启 -Oz
+            cgo_cflags: "-Oz -g0 -fdata-sections -ffunction-sections -fno-asynchronous-unwind-tables -fno-ident"
+          # macOS Apple Silicon.
           - runner: macos-latest
             goos: darwin
             goarch: arm64
@@ -101,14 +141,15 @@ jobs:
             cgo_ldflags: "-Wl,-dead_strip"
             plat: "macosx_11_0_arm64"
             cc: "clang"
-            cgo_cflags: "-Oz -g0 -fdata-sections -ffunction-sections -fno-asynchronous-unwind-tables -fno-ident" # 🌟 极客优化：macOS 开启 -Oz
+            cgo_cflags: "-Oz -g0 -fdata-sections -ffunction-sections -fno-asynchronous-unwind-tables -fno-ident"
+          # Windows x86_64.
           - runner: windows-latest
             goos: windows
             goarch: amd64
             ext: .dll
             cgo_ldflags: "-Wl,--gc-sections"
             plat: "win_amd64"
-            cc: "gcc" # Windows 保持 gcc 稳定版
+            cc: "gcc"
             cgo_cflags: "-Os -g0 -fdata-sections -ffunction-sections -fno-asynchronous-unwind-tables -fno-ident"
 
     steps:
@@ -121,9 +162,6 @@ jobs:
           go-version: "1.24"
           cache: true
 
-      # Linux 构建使用 clang。UPX 已整体移除：--shlib 模式对 Go c-shared ELF
-      # 静默失败（历史产物均未压缩），打包产物还会触发 AV/EDR 误报并削弱
-      # relro/now 加固。
       - name: Install Clang (Linux)
         if: matrix.goos == 'linux'
         shell: bash
@@ -148,7 +186,6 @@ jobs:
         run: |
           mkdir -p ../tls_client/bin
           find ../tls_client/bin -maxdepth 1 -type f -name 'tls-client-*' -delete
-          # 🌟 极客优化：加入 -gcflags、-asmflags 全深度擦除路径元数据，并在 -ldflags 中擦除 -buildid=
           go build -buildmode=c-shared \
                    -buildvcs=false \
                    -trimpath \
@@ -168,13 +205,24 @@ jobs:
             strip -R .comment -R .note.GNU-stack --strip-unneeded "$TARGET" || true
           fi
 
+      # Exactly one library must survive into the wheel — this platform's.
+      - name: Prune foreign binaries
+        shell: bash
+        run: |
+          WANT="tls-client-${{ matrix.goos }}-${{ matrix.goarch }}${{ matrix.ext }}"
+          echo "keeping: $WANT"
+          find tls_client/bin -maxdepth 1 -type f -name 'tls-client-*' ! -name "$WANT" -delete
+          ls -l tls_client/bin/
+          COUNT=$(find tls_client/bin -maxdepth 1 -type f -name 'tls-client-*' | wc -l)
+          [ "$COUNT" -eq 1 ] || { echo "expected exactly 1 library, found $COUNT"; exit 1; }
+
       - name: Report binary size
         shell: bash
         run: |
           TARGET="tls_client/bin/tls-client-${{ matrix.goos }}-${{ matrix.goarch }}${{ matrix.ext }}"
           BYTES=$(stat -c%s "$TARGET" 2>/dev/null || stat -f%z "$TARGET")
-          printf '%-10s %s  %s bytes (%.1f MiB)\n' \
-            "full" "$(basename "$TARGET")" "$BYTES" \
+          printf '%s  %s bytes (%.1f MiB)\n' \
+            "$(basename "$TARGET")" "$BYTES" \
             "$(echo "$BYTES" | awk '{print $1/1048576}')"
 
       - name: Build Wheel
@@ -182,7 +230,9 @@ jobs:
         run: |
           python -m pip install --upgrade pip build
           python -m build --wheel -C--build-option=--plat-name=${{ matrix.plat }}
-          python -c "import glob,zipfile,re; w=glob.glob('dist/*.whl')[-1]; n=[x for x in zipfile.ZipFile(w).namelist() if x.startswith('tls_client/bin/tls-client-')]; full=[x for x in n if re.search(r'tls-client-[a-z0-9]+-[a-z0-9]+\\.(so|dll|dylib)$', x)]; assert len(full)==1, 'wheel must contain exactly one native binary: %r' % n"
+          python python_tests/check_wheel_contents.py \
+            --dir dist \
+            --expect "tls-client-${{ matrix.goos }}-${{ matrix.goarch }}${{ matrix.ext }}"
 
       - name: Upload Platform Wheel Artifact
         uses: actions/upload-artifact@v4
@@ -197,13 +247,28 @@ jobs:
           path: tls_client/bin/tls-client-${{ matrix.goos }}-${{ matrix.goarch }}${{ matrix.ext }}
 
   # -----------------------------------------------------------------------
-  # 2. Cross-compile and Pack Windows 32-bit (386) on Linux
+  # 2. Windows x86 (386) and Windows on ARM (arm64), cross-compiled on Linux.
+  #
+  #    llvm-mingw is the only toolchain that targets windows/arm64 from Linux
+  #    (MinGW has no arm64 target); the same release ships the i686 triple.
   # -----------------------------------------------------------------------
-  build-windows-386-cross:
-    name: Cross Windows-386
+  build-windows-cross:
+    name: Cross Windows-${{ matrix.goarch }}
+    needs: verify-generated
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
+      matrix:
+        include:
+          - goarch: "386"
+            cc_prefix: i686-w64-mingw32
+            plat: win32
+            ext: .dll
+          - goarch: arm64
+            cc_prefix: aarch64-w64-mingw32
+            plat: win_arm64
+            ext: .dll
+
     steps:
       - name: Checkout Code
         uses: actions/checkout@v4
@@ -219,10 +284,15 @@ jobs:
         with:
           python-version: "3.11"
 
-      - name: Install MinGW 32-bit Cross Compiler
+      - name: Install llvm-mingw
         run: |
           sudo apt-get update
-          sudo apt-get install -y gcc-mingw-w64-i686
+          sudo apt-get install -y lld
+          LLVM_MINGW=llvm-mingw-20240619-ucrt-ubuntu-20.04-x86_64
+          wget -q "https://github.com/mstorsjo/llvm-mingw/releases/download/20240619/${LLVM_MINGW}.tar.xz"
+          tar -xf "${LLVM_MINGW}.tar.xz"
+          sudo mv "${LLVM_MINGW}" /opt/llvm-mingw
+          echo "/opt/llvm-mingw/bin" >> "$GITHUB_PATH"
 
       - name: Build Core
         working-directory: cffi_binding
@@ -231,12 +301,11 @@ jobs:
           CGO_CFLAGS: "-Os -g0 -fdata-sections -ffunction-sections -fno-asynchronous-unwind-tables -fno-ident"
           CGO_LDFLAGS: "-Wl,--gc-sections"
           GOOS: windows
-          GOARCH: "386"
-          CC: i686-w64-mingw32-gcc
+          GOARCH: ${{ matrix.goarch }}
+          CC: ${{ matrix.cc_prefix }}-gcc
         run: |
           mkdir -p ../tls_client/bin
           find ../tls_client/bin -maxdepth 1 -type f -name 'tls-client-*' -delete
-          # 🌟 极客优化：加入全深度擦除路径元数据与 buildid
           go build -buildmode=c-shared \
                    -buildvcs=false \
                    -trimpath \
@@ -244,47 +313,51 @@ jobs:
                    -gcflags="all=-trimpath=${{ github.workspace }}" \
                    -asmflags="all=-trimpath=${{ github.workspace }}" \
                    -ldflags="-s -w -buildid= -extldflags '-Wl,-s'" \
-                   -o "../tls_client/bin/tls-client-windows-386.dll" .
+                   -o "../tls_client/bin/tls-client-windows-${{ matrix.goarch }}${{ matrix.ext }}" .
 
       - name: Strip
         run: |
-          i686-w64-mingw32-strip --strip-unneeded tls_client/bin/tls-client-windows-386.dll || true
+          TARGET="tls_client/bin/tls-client-windows-${{ matrix.goarch }}${{ matrix.ext }}"
+          ${{ matrix.cc_prefix }}-strip --strip-unneeded "$TARGET" || true
+
+      - name: Prune foreign binaries
+        run: |
+          WANT="tls-client-windows-${{ matrix.goarch }}${{ matrix.ext }}"
+          find tls_client/bin -maxdepth 1 -type f -name 'tls-client-*' ! -name "$WANT" -delete
+          ls -l tls_client/bin/
+          COUNT=$(find tls_client/bin -maxdepth 1 -type f -name 'tls-client-*' | wc -l)
+          [ "$COUNT" -eq 1 ] || { echo "expected exactly 1 library, found $COUNT"; exit 1; }
 
       - name: Build Wheel
         run: |
           python -m pip install --upgrade pip build
-          python -m build --wheel -C--build-option=--plat-name=win32
-          python -c "import glob,zipfile,re; w=glob.glob('dist/*.whl')[-1]; n=[x for x in zipfile.ZipFile(w).namelist() if x.startswith('tls_client/bin/tls-client-')]; full=[x for x in n if re.search(r'tls-client-[a-z0-9]+-[a-z0-9]+\\.(so|dll|dylib)$', x)]; assert len(full)==1, 'wheel must contain exactly one full-tier native binary: %r' % n"
+          python -m build --wheel -C--build-option=--plat-name=${{ matrix.plat }}
+          python python_tests/check_wheel_contents.py \
+            --dir dist --expect "tls-client-windows-${{ matrix.goarch }}${{ matrix.ext }}"
 
       - name: Upload Artifact
         uses: actions/upload-artifact@v4
         with:
-          name: wheel-windows-386
+          name: wheel-windows-${{ matrix.goarch }}
           path: dist/*.whl
 
       - name: Upload Raw Binary Artifact
         uses: actions/upload-artifact@v4
         with:
-          name: bin-windows-386
-          path: tls_client/bin/tls-client-windows-386.dll
+          name: bin-windows-${{ matrix.goarch }}
+          path: tls_client/bin/tls-client-windows-${{ matrix.goarch }}${{ matrix.ext }}
 
   # -----------------------------------------------------------------------
-  # 3. Cross-compile and Pack Linux ARM & 386 (glibc based)
+  # 3. Linux ARM (v7), ARM64 and i386, glibc, cross-compiled.
   # -----------------------------------------------------------------------
   build-linux-cross:
-    name: Cross Linux-${{ matrix.goarch }}
+    name: Cross Linux-${{ matrix.goarch }}${{ matrix.goarm && format('v{0}', matrix.goarm) || '' }}
+    needs: verify-generated
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
       matrix:
         include:
-          - goarch: arm
-            goarm: "7"
-            ext: .so
-            compiler_pkg: gcc-arm-linux-gnueabihf
-            cc: arm-linux-gnueabihf-gcc
-            strip_cmd: arm-linux-gnueabihf-strip
-            plat: manylinux2014_armv7l
           - goarch: arm64
             goarm: ""
             ext: .so
@@ -292,6 +365,13 @@ jobs:
             cc: aarch64-linux-gnu-gcc
             strip_cmd: aarch64-linux-gnu-strip
             plat: manylinux2014_aarch64
+          - goarch: arm
+            goarm: "7"
+            ext: .so
+            compiler_pkg: gcc-arm-linux-gnueabihf
+            cc: arm-linux-gnueabihf-gcc
+            strip_cmd: arm-linux-gnueabihf-strip
+            plat: manylinux2014_armv7l
           - goarch: "386"
             goarm: ""
             ext: .so
@@ -333,7 +413,6 @@ jobs:
         run: |
           mkdir -p ../tls_client/bin
           find ../tls_client/bin -maxdepth 1 -type f -name 'tls-client-*' -delete
-          # 🌟 极客优化：全深度擦除路径元数据与 buildid
           go build -buildmode=c-shared \
                    -buildvcs=false \
                    -trimpath \
@@ -345,92 +424,199 @@ jobs:
 
       - name: Strip
         run: |
-          ${{ matrix.strip_cmd }} -R .comment -R .note.GNU-stack --strip-unneeded tls_client/bin/tls-client-linux-${{ matrix.goarch }}${{ matrix.ext }} || true
+          TARGET="tls_client/bin/tls-client-linux-${{ matrix.goarch }}${{ matrix.ext }}"
+          ${{ matrix.strip_cmd }} -R .comment -R .note.GNU-stack --strip-unneeded "$TARGET" || true
+
+      - name: Prune foreign binaries
+        run: |
+          WANT="tls-client-linux-${{ matrix.goarch }}${{ matrix.ext }}"
+          find tls_client/bin -maxdepth 1 -type f -name 'tls-client-*' ! -name "$WANT" -delete
+          ls -l tls_client/bin/
+          COUNT=$(find tls_client/bin -maxdepth 1 -type f -name 'tls-client-*' | wc -l)
+          [ "$COUNT" -eq 1 ] || { echo "expected exactly 1 library, found $COUNT"; exit 1; }
 
       - name: Build Wheel
         run: |
           python -m pip install --upgrade pip build
           python -m build --wheel -C--build-option=--plat-name=${{ matrix.plat }}
-          python -c "import glob,zipfile,re; w=glob.glob('dist/*.whl')[-1]; n=[x for x in zipfile.ZipFile(w).namelist() if x.startswith('tls_client/bin/tls-client-')]; full=[x for x in n if re.search(r'tls-client-[a-z0-9]+-[a-z0-9]+\\.(so|dll|dylib)$', x)]; assert len(full)==1, 'wheel must contain exactly one full-tier native binary: %r' % n"
+          python python_tests/check_wheel_contents.py \
+            --dir dist --expect "tls-client-linux-${{ matrix.goarch }}${{ matrix.ext }}"
 
       - name: Upload Artifact
         uses: actions/upload-artifact@v4
         with:
-          name: wheel-linux-${{ matrix.goarch }}
+          name: wheel-linux-${{ matrix.goarch }}${{ matrix.goarm && format('v{0}', matrix.goarm) || '' }}
           path: dist/*.whl
 
       - name: Upload Raw Binary Artifact
         uses: actions/upload-artifact@v4
         with:
-          name: bin-linux-${{ matrix.goarch }}
+          name: bin-linux-${{ matrix.goarch }}${{ matrix.goarm && format('v{0}', matrix.goarm) || '' }}
           path: tls_client/bin/tls-client-linux-${{ matrix.goarch }}${{ matrix.ext }}
 
   # -----------------------------------------------------------------------
-  # 4. Native-compile and Pack for Alpine Linux (musl libc based)
+  # 4. Alpine / musl.  musl is not cross-compilable from a glibc host without
+  #    a matching sysroot, so each target compiles inside a musl container.
+  #
+  #    These jobs deliberately do NOT use the `container:` key: binfmt must be
+  #    registered as a step of the SAME job before the target image is pulled,
+  #    and the container is started explicitly with `docker run --platform`.
   # -----------------------------------------------------------------------
-  build-alpine:
-    name: Build Alpine-amd64 (musl)
+  build-musl:
+    name: Build musl-${{ matrix.goarch }}
+    needs: verify-generated
     runs-on: ubuntu-latest
-    container:
-      image: golang:1.24-alpine
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - goarch: amd64
+            plat: musllinux_1_1_x86_64
+            image: golang:1.24-alpine
+            pkgs: "gcc musl-dev git binutils"
+            goarm: ""
+          - goarch: arm64
+            plat: musllinux_1_1_aarch64
+            image: arm64v8/golang:1.24-alpine
+            pkgs: "gcc musl-dev git binutils"
+            goarm: ""
+          - goarch: arm
+            plat: musllinux_1_1_armv7l
+            image: arm32v7/golang:1.24-alpine
+            pkgs: "gcc musl-dev git binutils"
+            goarm: "7"
     steps:
       - name: Checkout Code
         uses: actions/checkout@v4
 
-      - name: Install Build Dependencies
-        run: apk add --no-cache gcc musl-dev git binutils python3 py3-pip py3-build
+      - name: Register QEMU binfmt handlers
+        if: matrix.goarch != 'amd64'
+        uses: docker/setup-qemu-action@v3
+        with:
+          platforms: ${{ matrix.goarch == 'arm' && 'arm' || 'arm64' }}
+
+      - name: Verify the target image is runnable
+        run: |
+          docker run --rm --platform linux/${{ matrix.goarch }} \
+            ${{ matrix.image }} uname -m
 
       - name: Build Core
-        working-directory: cffi_binding
-        env:
-          CGO_ENABLED: 1
-          # Retry alternate module mirrors when proxy.golang.org resets HTTP/2 streams.
-          GOPROXY: "https://proxy.golang.org|https://goproxy.cn|direct"
-          # 🌟 极客优化：Alpine 对齐 CGO 编译体积参数（包含 -fno-asynchronous-unwind-tables）
-          CGO_CFLAGS: "-Os -g0 -fdata-sections -ffunction-sections -fno-asynchronous-unwind-tables -fno-ident"
-          CGO_LDFLAGS: "-Wl,--gc-sections"
-          GOOS: linux
-          GOARCH: amd64
         run: |
-          mkdir -p ../tls_client/bin
-          find ../tls_client/bin -maxdepth 1 -type f -name 'tls-client-*' -delete
-          # 🌟 极客优化：全深度擦除路径元数据与 buildid
-          go build -buildmode=c-shared \
-                   -buildvcs=false \
-                   -trimpath \
-                   -tags="netgo osusergo musl" \
-                   -gcflags="all=-trimpath=${{ github.workspace }}" \
-                   -asmflags="all=-trimpath=${{ github.workspace }}" \
-                   -ldflags="-s -w -buildid= -extldflags '-Wl,-s'" \
-                   -o "../tls_client/bin/tls-client-linux-amd64-musl.so" .
+          docker run --rm \
+            --platform linux/${{ matrix.goarch }} \
+            -v "$PWD:/work" \
+            -w /work/cffi_binding \
+            -e CGO_ENABLED=1 \
+            -e GOPROXY="https://proxy.golang.org|https://goproxy.cn|direct" \
+            -e CGO_CFLAGS="-Os -g0 -fdata-sections -ffunction-sections -fno-asynchronous-unwind-tables -fno-ident" \
+            -e CGO_LDFLAGS="-Wl,--gc-sections" \
+            -e GOOS=linux \
+            -e GOARCH=${{ matrix.goarch }} \
+            -e GOARM=${{ matrix.goarm }} \
+            -e CC=gcc \
+            ${{ matrix.image }} \
+            sh -euxc '
+              apk add --no-cache ${{ matrix.pkgs }}
+              mkdir -p ../tls_client/bin
+              find ../tls_client/bin -maxdepth 1 -type f -name "tls-client-*" -delete
+              go build -buildmode=c-shared \
+                       -buildvcs=false \
+                       -trimpath \
+                       -tags="netgo osusergo musl" \
+                       -ldflags="-s -w -buildid= -extldflags \"-Wl,-s\"" \
+                       -o "../tls_client/bin/tls-client-linux-${{ matrix.goarch }}-musl.so" .
+              strip -R .comment -R .note.GNU-stack --strip-unneeded \
+                "../tls_client/bin/tls-client-linux-${{ matrix.goarch }}-musl.so" || true
+            '
 
-      - name: Strip
+      - name: Prune foreign binaries
         run: |
-          strip -R .comment -R .note.GNU-stack --strip-unneeded tls_client/bin/tls-client-linux-amd64-musl.so || true
+          WANT="tls-client-linux-${{ matrix.goarch }}-musl.so"
+          find tls_client/bin -maxdepth 1 -type f -name 'tls-client-*' ! -name "$WANT" -delete
+          ls -l tls_client/bin/
+          COUNT=$(find tls_client/bin -maxdepth 1 -type f -name 'tls-client-*' | wc -l)
+          [ "$COUNT" -eq 1 ] || { echo "expected exactly 1 library, found $COUNT"; exit 1; }
+
+      # The Go core was built inside the Alpine container, but the wheel is
+      # assembled on the runner host — install `build` here, not in the image.
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
 
       - name: Build Wheel
         run: |
-          python3 -m build --wheel -C--build-option=--plat-name=musllinux_1_1_x86_64
-          python3 -c "import glob,zipfile,re; w=glob.glob('dist/*.whl')[-1]; n=[x for x in zipfile.ZipFile(w).namelist() if x.startswith('tls_client/bin/tls-client-')]; full=[x for x in n if re.search(r'tls-client-[a-z0-9]+-[a-z0-9]+\\.(so|dll|dylib)$', x)]; assert len(full)==1, 'wheel must contain exactly one full-tier native binary: %r' % n"
+          python -m pip install --upgrade pip build
+          python -m build --wheel -C--build-option=--plat-name=${{ matrix.plat }}
+          python python_tests/check_wheel_contents.py \
+            --dir dist --expect "tls-client-linux-${{ matrix.goarch }}-musl.so"
 
       - name: Upload Artifact
         uses: actions/upload-artifact@v4
         with:
-          name: wheel-alpine-amd64
+          name: wheel-linux-${{ matrix.goarch }}-musl
           path: dist/*.whl
 
       - name: Upload Raw Binary Artifact
         uses: actions/upload-artifact@v4
         with:
-          name: bin-alpine-amd64
-          path: tls_client/bin/tls-client-linux-amd64-musl.so
+          name: bin-linux-${{ matrix.goarch }}-musl
+          path: tls_client/bin/tls-client-linux-${{ matrix.goarch }}-musl.so
 
   # -----------------------------------------------------------------------
-  # 5. Build Source Distribution & Publish All Wheels to PyPI
+  # 5. macOS universal2 wheel — bundles BOTH darwin architectures into one
+  #    wheel so a single artifact installs on Intel and Apple Silicon.  The
+  #    loader still selects tls-client-darwin-{amd64,arm64}.dylib at import,
+  #    so no loader change is required; the wheel just ships both.
+  # -----------------------------------------------------------------------
+  build-macos-universal2:
+    name: Build macOS universal2 wheel
+    needs: build-native
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Download both darwin cores
+        uses: actions/download-artifact@v4
+        with:
+          pattern: bin-darwin-*
+          path: tmp_artifacts
+
+      - name: Assemble universal2 payload
+        run: |
+          mkdir -p tls_client/bin
+          find tls_client/bin -maxdepth 1 -type f -name 'tls-client-*' -delete
+          cp tmp_artifacts/bin-darwin-amd64/tls-client-darwin-amd64.dylib tls_client/bin/
+          cp tmp_artifacts/bin-darwin-arm64/tls-client-darwin-arm64.dylib tls_client/bin/
+          ls -l tls_client/bin/
+
+      - name: Build Wheel
+        run: |
+          python -m pip install --upgrade pip build
+          python -m build --wheel -C--build-option=--plat-name=macosx_10_9_universal2
+          python python_tests/check_wheel_contents.py \
+            --dir dist \
+            --expect "tls-client-darwin-amd64.dylib" \
+            --expect "tls-client-darwin-arm64.dylib"
+
+      - name: Upload Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: wheel-darwin-universal2
+          path: dist/*.whl
+
+  # -----------------------------------------------------------------------
+  # 6. Build Source Distribution & Publish All Wheels to PyPI
   # -----------------------------------------------------------------------
   sync-and-publish:
     name: Collect, Sync to GitHub & Publish to PyPI
-    needs: [build-native, build-windows-386-cross, build-linux-cross, build-alpine]
+    needs: [build-native, build-windows-cross, build-linux-cross, build-musl, build-macos-universal2]
     runs-on: ubuntu-latest
     steps:
       - name: Checkout Repository
@@ -449,33 +635,33 @@ jobs:
           mkdir -p tls_client/bin
           find tls_client/bin -maxdepth 1 -type f -name 'tls-client-*' -delete
 
-      # 下载所有的平台特定的 .whl 轮子文件和裸二进制文件
       - name: Download All Artifacts
         uses: actions/download-artifact@v4
         with:
           path: tmp_artifacts
 
-      # 将多系统的编译二进制和轮子分别归类整理
       - name: Organize Wheels & Binaries
         run: |
-          # 归类所有平台专属 Wheels 包
           find tmp_artifacts/ -type f -name "*.whl" -exec cp {} dist/ \;
-          # 归类所有平台专属裸二进制动态库到 tls_client/bin/
           find tmp_artifacts/ -type f -name "tls-client-*" -exec cp {} tls_client/bin/ \;
-          
           echo "=== Collected Binaries in tls_client/bin/ ==="
           ls -lh tls_client/bin/
           echo "=== Collected Wheels in dist/ ==="
           ls -lh dist/
 
-      # 🌟 核心修复步骤：在提交前拉取最新远程代码并进行变基（Rebase），防止由于编译耗时（~10分钟）导致的 push 冲突
+      # The committed payload is what non-wheel installs (sdist, git checkout)
+      # resolve at import time, so it must cover the whole arch-specific matrix.
+      # (The universal2 wheel is assembled from these same two darwin cores.)
+      - name: Verify committed cores cover the platform matrix
+        run: python3 python_tests/check_platform_matrix.py
+
       - name: Pull latest remote changes
         if: github.ref == 'refs/heads/main' || github.ref == 'refs/heads/master'
         run: |
           git config --global user.name "github-actions[bot]"
           git config --global user.email "github-actions[bot]@users.noreply.github.com"
-          git pull --rebase origin ${{ github.ref_name }} || true          
-      # 将编译好的动态库同步并提交推送回你的 GitHub 仓库（仅在常规分支推送时执行，规避 Tag 冲突）
+          git pull --rebase origin ${{ github.ref_name }} || true
+
       - name: Auto Commit and Push back to GitHub
         if: github.ref == 'refs/heads/main' || github.ref == 'refs/heads/master'
         uses: stefanzweifel/git-auto-commit-action@v5
@@ -486,13 +672,11 @@ jobs:
           commit_user_name: "github-actions[bot]"
           commit_user_email: "github-actions[bot]@users.noreply.github.com"
 
-      # 额外生成一个 Source Distribution
       - name: Build Source Tarball
         run: |
           python -m pip install --upgrade pip build
           python -m build --sdist
 
-      # 安全发布至 PyPI
       - name: Publish to PyPI
         if: startsWith(github.ref, 'refs/tags/v') || github.event_name == 'workflow_dispatch'
         uses: pypa/gh-action-pypi-publish@release/v1
