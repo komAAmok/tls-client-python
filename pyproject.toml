@@ -69,7 +69,7 @@ Repository = "https://github.com/komAAmok/tls-client-python"
 Issues = "https://github.com/komAAmok/tls-client-python/issues"
 
 [tool.setuptools]
-packages = ["tls_client"]
+packages = ["tls_client", "tls_client.fingerprints"]
 include-package-data = true
 zip-safe = false
 

@@ -36,7 +36,6 @@ from tls_client.requests_compat import (
 from tls_client import adapters, auth, cookies, exceptions, models, status_codes, structures
 from tls_client import context as request_context
 from tls_client import ech, fingerprints
-from tls_client import fingerprints
 from tls_client._multipart_boundary import blink_boundary, boundary, gecko_boundary
 from tls_client.context import RequestContext
 from tls_client.status_codes import codes
