@@ -79,12 +79,6 @@ var expectedJA3 = map[int]string{
 
 // TestCapturedChromeProfilesRegistered verifies the generated table covers the
 // whole captured range and that every version is selectable by name.
-//
-// The table is generated either in full (55 majors, 99..153) or trimmed for
-// the size-critical nano tier (only the majors named by
-// TLS_CLIENT_NANO_PROFILES).  A trimmed table is still required to be a
-// faithful subset — every entry inside the captured range and registered — so
-// the guarantee is meaningful in both builds.
 func TestCapturedChromeProfilesRegistered(t *testing.T) {
 	majors := CapturedChromeMajors()
 	if len(majors) == 0 {
@@ -117,8 +111,7 @@ func TestCapturedChromeProfilesRegistered(t *testing.T) {
 // JA3 string from each generated ClientHello spec and compares it against the
 // wire capture.  GREASE entries are dropped from both sides, matching JA3.
 //
-// Every major present in the generated table is checked; majors that were
-// trimmed out of a nano build are skipped (they have no spec to compare).
+// Every major present in the generated table is checked.
 func TestCapturedChromeSpecMatchesJA3(t *testing.T) {
 	present := make(map[int]bool, len(chromeCapturedMajors))
 	for _, major := range chromeCapturedMajors {

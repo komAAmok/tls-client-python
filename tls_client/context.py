@@ -323,27 +323,23 @@ def expand_client_hints(
 ) -> Dict[str, str]:
     """Expand the low-entropy client-hint trio into the full set.
 
-    Every brand's version is expanded to ``major.0.0.0`` (Chromium
-    semantics, keeping the GREASE brand token verbatim).  When
-    *ua_full_version* is given, the real browser brands (Chromium, Google
-    Chrome, Microsoft Edge, Brave) get that exact full version while the
-    GREASE brand keeps its own padded version — matching how Chrome
-    reports ``sec-ch-ua-full-version-list``.
+    The ``sec-ch-ua-full-version-list`` value is derived by
+    ``_client_hints.full_version_list``: every brand's major is expanded to
+    ``major.0.0.0`` (keeping the GREASE brand token verbatim), and when
+    *ua_full_version* is given the real browser brands (Chromium, Google
+    Chrome, Microsoft Edge, Brave, Opera) get that exact full version while
+    the GREASE brand keeps its own padded version — matching how Chrome
+    reports the header.
     """
-    import re
+    from tls_client._client_hints import full_version_list
 
-    full_list = re.sub(r';v="(\d+)"', lambda m: ';v="%s.0.0.0"' % m.group(1), sec_ch_ua)
-    if ua_full_version:
-        full_list = re.sub(
-            r'"((?:Chromium|Google Chrome|Microsoft Edge|Brave))";v="\d+\.0\.0\.0"',
-            lambda m: '"%s";v="%s"' % (m.group(1), ua_full_version),
-            full_list,
-        )
     return {
         "sec-ch-ua": sec_ch_ua,
         "sec-ch-ua-mobile": mobile,
         "sec-ch-ua-platform": platform,
-        "sec-ch-ua-full-version-list": full_list,
+        "sec-ch-ua-full-version-list": full_version_list(
+            sec_ch_ua, ua_full_version or ""
+        ),
         "sec-ch-ua-platform-version": platform_version,
         "sec-ch-ua-arch": architecture,
         "sec-ch-ua-bitness": bitness,

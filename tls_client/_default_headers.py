@@ -12,6 +12,8 @@ corresponding key below.
 
 from typing import Dict
 
+from tls_client._client_hints import full_version_for, high_entropy_hints
+
 # ═══════════════════════════════════════════════════════════════════════════════
 # Chrome helpers
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -26,12 +28,13 @@ def _chrome_ua(version: str) -> str:
 def _chrome_headers(version: str, *, zstd: bool = False) -> Dict[str, str]:
     """Standard Chrome desktop headers.  *zstd* is True for Chrome ≥117."""
     enc = "gzip, deflate, br, zstd" if zstd else "gzip, deflate, br"
-    return {
+    sec_ch_ua = (
+        f'"Chromium";v="{version}", "Google Chrome";v="{version}",'
+        f' "Not?A_Brand";v="99"'
+    )
+    headers: Dict[str, str] = {
         "User-Agent": _chrome_ua(version),
-        "sec-ch-ua": (
-            f'"Chromium";v="{version}", "Google Chrome";v="{version}",'
-            f' "Not?A_Brand";v="99"'
-        ),
+        "sec-ch-ua": sec_ch_ua,
         "sec-ch-ua-mobile": "?0",
         "sec-ch-ua-platform": '"Windows"',
         "Accept": (
@@ -42,6 +45,10 @@ def _chrome_headers(version: str, *, zstd: bool = False) -> Dict[str, str]:
         "Accept-Encoding": enc,
         "Accept-Language": "en-US,en;q=0.9",
     }
+    headers.update(
+        high_entropy_hints("windows", sec_ch_ua, full_version_for(int(version)))
+    )
+    return headers
 
 
 def _chrome_psk(version: str, *, zstd: bool = False) -> Dict[str, str]:
@@ -55,12 +62,13 @@ def _chrome_psk(version: str, *, zstd: bool = False) -> Dict[str, str]:
 
 def _brave_headers(version: str, *, zstd: bool = True) -> Dict[str, str]:
     enc = "gzip, deflate, br, zstd" if zstd else "gzip, deflate, br"
-    return {
+    sec_ch_ua = (
+        f'"Chromium";v="{version}", "Brave";v="{version}",'
+        f' "Not?A_Brand";v="99"'
+    )
+    headers: Dict[str, str] = {
         "User-Agent": _chrome_ua(version),
-        "sec-ch-ua": (
-            f'"Chromium";v="{version}", "Brave";v="{version}",'
-            f' "Not?A_Brand";v="99"'
-        ),
+        "sec-ch-ua": sec_ch_ua,
         "sec-ch-ua-mobile": "?0",
         "sec-ch-ua-platform": '"Windows"',
         "Accept": (
@@ -71,6 +79,10 @@ def _brave_headers(version: str, *, zstd: bool = True) -> Dict[str, str]:
         "Accept-Encoding": enc,
         "Accept-Language": "en-US,en;q=0.9",
     }
+    headers.update(
+        high_entropy_hints("windows", sec_ch_ua, full_version_for(int(version)))
+    )
+    return headers
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -81,16 +93,17 @@ def _opera_headers(
     opera_ver: str, chromium_ver: str, *, zstd: bool = False
 ) -> Dict[str, str]:
     enc = "gzip, deflate, br, zstd" if zstd else "gzip, deflate, br"
-    return {
+    sec_ch_ua = (
+        f'"Chromium";v="{chromium_ver}", "Opera";v="{opera_ver}",'
+        f' "Not?A_Brand";v="99"'
+    )
+    headers: Dict[str, str] = {
         "User-Agent": (
             "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"
             f" (KHTML, like Gecko) Chrome/{chromium_ver}.0.0.0 Safari/537.36"
             f" OPR/{opera_ver}.0.0.0"
         ),
-        "sec-ch-ua": (
-            f'"Chromium";v="{chromium_ver}", "Opera";v="{opera_ver}",'
-            f' "Not?A_Brand";v="99"'
-        ),
+        "sec-ch-ua": sec_ch_ua,
         "sec-ch-ua-mobile": "?0",
         "sec-ch-ua-platform": '"Windows"',
         "Accept": (
@@ -101,6 +114,12 @@ def _opera_headers(
         "Accept-Encoding": enc,
         "Accept-Language": "en-US,en;q=0.9",
     }
+    headers.update(
+        high_entropy_hints(
+            "windows", sec_ch_ua, full_version_for(int(chromium_ver))
+        )
+    )
+    return headers
 
 
 # ═══════════════════════════════════════════════════════════════════════════════

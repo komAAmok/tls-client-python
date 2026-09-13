@@ -42,7 +42,7 @@ For a deep dive, see [this excellent article on TLS fingerprinting](https://http
 | 🎯 **Fingerprint Presets** | Coherent per-OS bundles: identifier + headers + header order + TCP fingerprint (`tls_client.fingerprints`) |
 | 🧭 **Request Contexts** | Browser-coherent `Sec-Fetch-*`, Client Hints and RFC 9218 `Priority` headers (`RequestContext`) |
 | 🔏 **Trust Anchors / ECH** | Chrome 152 `0xCA34` trust anchors and automatic ECH config resolution over DoH |
-| 🪶 **Three Build Tiers** | `full` / `lite` (no QUIC) / `nano` (trimmed catalogue) via `TLS_CLIENT_VARIANT` |
+| 🪶 **Full-fidelity build** | A single full build (QUIC/HTTP-3 + the complete profile catalogue) |
 
 > **macOS TCP fingerprinting:** macOS derives TCP MSS during `connect` and
 > rejects `TCP_MAXSEG` in the pre-connect socket hook. The MSS hint is therefore
@@ -452,17 +452,15 @@ apply(session, "chrome_150_linux")   # identifier + headers + permute + TCP
 
 ### Build Tiers
 
-Three prebuilt tiers ship in each wheel; select one at runtime:
+A single full-fidelity build ships in each wheel — QUIC/HTTP-3 enabled and
+the complete profile catalogue (there are no lite/nano tiers).
 
 ```bash
-TLS_CLIENT_VARIANT=full   # default — QUIC/HTTP-3 enabled, all profiles
-TLS_CLIENT_VARIANT=lite   # no QUIC/HTTP-3 (smaller); disable_http3 forced on
-TLS_CLIENT_VARIANT=nano   # lite + trimmed profile catalogue
+TLS_CLIENT_LIB=/path/to/tls-client.so   # optional: override the library path
 ```
 
-If the requested tier is not bundled the loader falls back
-`nano → lite → full`, so a `nano` deployment against a `full`-only wheel
-still starts. `TLS_CLIENT_LIB` overrides the path entirely.
+`TLS_CLIENT_LIB` overrides the path entirely; by default the loader picks the
+bundled native binary for the current OS/arch.
 
 ### Engine-Level HTTP/2 Realism (ABI 2.1)
 
@@ -560,23 +558,20 @@ This project is a Python binding for **[bogdanfinn/tls-client](https://github.co
 - [Carcraftz/utls](https://github.com/Carcraftz/utls)
 - [refraction-networking/utls](https://github.com/refraction-networking/utls)
 
+The byte-exact fingerprint layer also draws on two Go fingerprinting projects whose
+captured-clienthello techniques were studied as references:
+
+- **[enetx/surf](https://github.com/enetx/surf)** — full `utls.ClientHelloSpec`
+  profiles (trust-anchor `0xCA34`, ML-DSA/ML-KEM post-quantum, GREASE) for
+  Chrome/Firefox.
+- **[httpcloak](https://github.com/sardanioss/httpcloak)** — raw ClientHello /
+  PSK-resumption replay, per-header HPACK representation and the high-entropy
+  Client Hints model.
+
+Thanks to the authors of all of the above for their open work.
+
 ---
 
 ## 📄 License
 
 MIT — see [LICENSE](LICENSE).
-
----
-
-## 🙏 Community
-
-Join the [Discord server](https://discord.gg/7Ej9eJvHqk) for support and discussion.
-
----
-
-<p align="center">
-  <em>Powered by</em><br>
-  <a href="https://jb.gg/OpenSource">
-    <img src="https://resources.jetbrains.com/storage/products/company/brand/logos/jetbrains.svg" alt="JetBrains logo." height="40">
-  </a>
-</p>

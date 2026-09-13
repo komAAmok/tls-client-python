@@ -4,6 +4,7 @@ package main
 
 import (
 	"bytes"
+	"fmt"
 	"sync"
 	"testing"
 	"time"
@@ -33,6 +34,8 @@ func resetPoolForTest() {
 	lastEvictionTime.Store(0)
 	poolTTLNs.Store(int64(5 * time.Minute))
 	poolScanIntervalNs.Store(int64(60 * time.Second))
+	poolMaxEntries.Store(defaultPoolMaxEntries)
+	poolEntryCount.Store(0)
 }
 
 // TestEvictStaleEntries_EmptyPool verifies that evicting an empty pool
@@ -276,4 +279,79 @@ func TestPoolEntry_ConcurrentAccess(t *testing.T) {
 		}()
 	}
 	wg.Wait()
+}
+
+// TestEvictLRUOverCapLocked_BoundsPoolSize verifies the pool size cap:
+// inserting more distinct entries than poolMaxEntries evicts the oldest
+// (least-recently-used), keeping both the pool and the counter bounded.
+func TestEvictLRUOverCapLocked_BoundsPoolSize(t *testing.T) {
+	resetPoolForTest()
+	poolMaxEntries.Store(3)
+	defer poolMaxEntries.Store(defaultPoolMaxEntries)
+
+	now := time.Now().UnixNano()
+	for i := 0; i < 5; i++ {
+		key := fmt.Sprintf("lru-%d", i)
+		pe := &poolEntry{}
+		pe.lastAccess.Store(now + int64(i)) // strictly increasing age order
+		clientPool.Store(key, pe)
+		poolEntryCount.Add(1)
+		clientPoolMu.Lock()
+		evictLRUOverCapLocked(key)
+		clientPoolMu.Unlock()
+	}
+
+	if got := poolEntryCount.Load(); got > 3 {
+		t.Errorf("poolEntryCount = %d, want <= 3", got)
+	}
+	for _, key := range []string{"lru-0", "lru-1"} {
+		if _, ok := clientPool.Load(key); ok {
+			t.Errorf("entry %s should have been LRU-evicted", key)
+		}
+	}
+	for _, key := range []string{"lru-3", "lru-4"} {
+		if _, ok := clientPool.Load(key); !ok {
+			t.Errorf("entry %s should have survived (newest)", key)
+		}
+	}
+	if totalEvictions.Load() < 2 {
+		t.Errorf("totalEvictions = %d, want >= 2", totalEvictions.Load())
+	}
+}
+
+// TestSetPoolMaxEntries_ShrinksImmediately verifies that lowering the cap
+// evicts the overflow eagerly, and that 0 disables the cap entirely.
+func TestSetPoolMaxEntries_ShrinksImmediately(t *testing.T) {
+	resetPoolForTest()
+
+	now := time.Now().UnixNano()
+	for i := 0; i < 4; i++ {
+		pe := &poolEntry{}
+		pe.lastAccess.Store(now + int64(i))
+		clientPool.Store(fmt.Sprintf("shrink-%d", i), pe)
+		poolEntryCount.Add(1)
+	}
+
+	SetPoolMaxEntries(2)
+	defer poolMaxEntries.Store(defaultPoolMaxEntries)
+
+	if got := poolEntryCount.Load(); got != 2 {
+		t.Errorf("poolEntryCount = %d, want 2", got)
+	}
+	for _, key := range []string{"shrink-0", "shrink-1"} {
+		if _, ok := clientPool.Load(key); ok {
+			t.Errorf("entry %s should have been evicted", key)
+		}
+	}
+
+	// 0 disables the cap (legacy unbounded behaviour).
+	SetPoolMaxEntries(0)
+	if poolMaxEntries.Load() != 0 {
+		t.Error("SetPoolMaxEntries(0) should disable the cap")
+	}
+	// Negative restores the default.
+	SetPoolMaxEntries(-1)
+	if poolMaxEntries.Load() != defaultPoolMaxEntries {
+		t.Errorf("poolMaxEntries = %d, want default %d", poolMaxEntries.Load(), defaultPoolMaxEntries)
+	}
 }

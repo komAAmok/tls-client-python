@@ -17,6 +17,7 @@ import asyncio
 import concurrent.futures
 import json
 import multiprocessing
+import os
 import random
 import sys
 import threading
@@ -188,6 +189,41 @@ def _ttl_child_worker(port):
         if remaining <= 1:
             break
     return created, remaining
+
+
+def _cap_child_worker(port):
+    """Runs in a spawned child: cap the pool at 3, then rotate through 30
+    distinct configurations.  Without the cap each unique config would pin
+    a distinct pooled HttpClient; with the cap the pool must stay bounded.
+    Returns None when the loaded library predates SetPoolMaxEntries."""
+    from tls_client._core import Session
+
+    try:
+        Session.set_pool_max_entries(3)
+    except RuntimeError:
+        return None  # library predates SetPoolMaxEntries — skip in caller
+
+    base = _pool_entries()
+    for i in range(30):
+        session = Session(timeout=15, idle_conn_timeout_seconds=i + 1)
+        response = session.get("http://127.0.0.1:%d/" % port)
+        if response.status_code != 200:
+            return ("status", response.status_code)
+        del session
+    return ("ok", _pool_entries() - base)
+
+
+def _fork_child_probe():
+    """Runs in a forked child whose parent had already loaded the library."""
+    from tls_client import _core
+
+    try:
+        _core._get_ffi()
+        return "no-error"
+    except RuntimeError as exc:
+        if "fork" in str(exc):
+            return "fork-guard"
+        return "other-error: %s" % exc
 
 
 class FingerprintPairingTests(unittest.TestCase):
@@ -434,6 +470,35 @@ class SessionLifecycleTests(unittest.TestCase):
             for future in futures:
                 for ok in future.result(timeout=120):
                     self.assertTrue(ok)
+
+    def test_pool_max_entries_bounds_rotation(self):
+        if _pool_entries() is None:
+            self.skipTest("GetPoolStats not available")
+        context = multiprocessing.get_context("spawn")
+        with concurrent.futures.ProcessPoolExecutor(
+            max_workers=1, mp_context=context
+        ) as pool:
+            outcome = pool.submit(_cap_child_worker, _SERVER_PORT).result(timeout=120)
+        if outcome is None:
+            self.skipTest("library predates SetPoolMaxEntries")
+        status, growth = outcome
+        self.assertEqual(status, "ok")
+        # 30 distinct configs, capped at 3 → the pool must stay ≤ 3 entries.
+        self.assertLessEqual(growth, 3)
+
+    def test_fork_after_load_fails_fast(self):
+        if not hasattr(os, "fork"):
+            self.skipTest("os.fork unavailable on this platform")
+        from tls_client import _core
+
+        _core._get_ffi()  # load the Go library BEFORE forking
+
+        context = multiprocessing.get_context("fork")
+        with concurrent.futures.ProcessPoolExecutor(
+            max_workers=1, mp_context=context
+        ) as pool:
+            outcome = pool.submit(_fork_child_probe).result(timeout=60)
+        self.assertEqual(outcome, "fork-guard")
 
 
 if __name__ == "__main__":

@@ -1,5 +1,3 @@
-//go:build !tls_lite
-
 package tls_client
 
 import (
@@ -12,11 +10,8 @@ import (
 )
 
 // nextProtoH3 mirrors http3.NextProtoH3 so the ALPN switch in
-// roundtripper.go stays identical in both build variants.
+// roundtripper.go stays identical.
 const nextProtoH3 = http3.NextProtoH3
-
-// buildVariant is reported to bindings via GetBuildVariant().
-const BuildVariant = "full"
 
 func buildHTTP3Transport(cfg *http3Config) (http.RoundTripper, error) {
 	utlsConfig := &tls.Config{

@@ -421,95 +421,32 @@ def _shared_lib_ext() -> str:
     return ".so"
 
 
-def _shared_lib_name(variant: str = "full") -> str:
+def _shared_lib_name() -> str:
     ext = _shared_lib_ext()
     goos = _go_os()
     goarch = _go_arch()
-    if variant == "full":
-        return f"tls-client-{goos}-{goarch}{ext}"
-    return f"tls-client-{goos}-{goarch}-{variant}{ext}"
+    return f"tls-client-{goos}-{goarch}{ext}"
 
 
 # ---------------------------------------------------------------------------
 # Go build
 # ---------------------------------------------------------------------------
 
-# Build variant profiles.  Each tier trades binary size against capability;
-# ``lite`` and ``nano`` are meant for container/serverless images where the
-# QUIC stack and the debug surface dominate the artifact.
-#
-#   full  — QUIC/HTTP-3 enabled, race detector off, full profile catalogue
-#   lite  — HTTP/3 compiled out entirely (``-tags=tls_lite``); the Python
-#           layer detects the variant via GetBuildVariant() and forces
-#           disable_http3 so requests fail fast instead of hitting the
-#           engine's H3 error path
-#   nano  — lite plus capture/profile trimming: only the profiles named in
-#           TLS_CLIENT_NANO_PROFILES survive, so a scrape-only deployment
-#           ships a fraction of the profile table
-BUILD_VARIANTS = ("full", "lite", "nano")
-
-# Profiles retained by the ``nano`` tier when TLS_CLIENT_NANO_PROFILES is
-# unset.  Keep this list short — the point of nano is a small artifact.
-#
-# NOTE: setting this variable only prunes the *runtime* profile map; every
-# captured profile's data is still linked in, because they all live inside a
-# single `switch major` in the generated table.  To actually shrink the
-# artifact the table must be regenerated with just these majors:
-#
-#     python tools/gen_chrome_profiles.py --majors 133,150,152
-#
-# The CI nano job does exactly that before building; the env var remains set
-# as a backstop so a hand-built nano library still behaves as documented.
-_DEFAULT_NANO_PROFILES = ("chrome_133", "chrome_150", "chrome_152")
-
-
-def _variant_tags(variant: str) -> list:
-    """Return the ``-tags`` list for *variant*."""
-    base = ["netgo", "osusergo"]
-    if variant in ("lite", "nano"):
-        # roundtripper_http3_stub.go is gated on this tag, so lite/nano
-        # builds link no QUIC code at all.
-        base.append("tls_lite")
-    return base
-
-
-def _variant_ldflags(variant: str) -> str:
-    """Return the ``-ldflags`` string for *variant*.
-
-    Every variant gets the same base: ``-s`` drops the symbol table, ``-w``
-    drops DWARF, and ``-buildid=`` removes the Go build id (non-deterministic,
-    and a few hundred bytes of entropy that helps neither debugging nor
-    reproducibility).  Nano used to append a second ``-w`` — a no-op that
-    only made the flag string harder to read.
-    """
-    flags = ["-s", "-w", "-buildid="]
-    if variant == "nano":
-        # Nano trades debuggability for size: keep .rodata and the type
-        # descriptions lean by dropping the pclntab-backed traces too.
-        flags.append("-X=main.buildVariant=nano")
-    return " ".join(flags)
+# The project ships a single full-fidelity build (QUIC/HTTP-3 enabled, the
+# complete profile catalogue) — there are no lite/nano tiers.
 
 
 def build_go_library(
     srcdir: Optional[Path] = None,
     outdir: Optional[Path] = None,
     verbose: bool = True,
-    variant: str = "full",
-    upx: bool = False,
 ) -> Path:
     """Compile the Go shared library and return its path.
 
-    *variant* selects one of :data:`BUILD_VARIANTS`.  *upx*, when true,
-    additionally runs the UPX packer over the produced artifact — this is
-    opt-in because it roughly halves on-disk size but (a) requires UPX on
-    PATH, (b) can trip some AV/EDR heuristics, and (c) makes the binary
-    non-reproducible.  The unpacked artifact is always kept alongside.
+    UPX packing was removed on purpose: it trips AV/EDR heuristics, weakens
+    ELF/PE hardening, makes the build non-reproducible, and the ``--shlib``
+    mode silently fails on Go c-shared ELF libraries anyway.
     """
-    if variant not in BUILD_VARIANTS:
-        raise ValueError(
-            "unknown build variant %r; expected one of %s"
-            % (variant, ", ".join(BUILD_VARIANTS))
-        )
     if srcdir is None:
         srcdir = Path(__file__).resolve().parent
     if outdir is None:
@@ -520,23 +457,16 @@ def build_go_library(
     goos = _go_os()
     goarch = _go_arch()
     ext = _shared_lib_ext()
-    # The default (full) artifact keeps the canonical name so existing
-    # loaders find it; slimmer tiers get a suffix.
-    if variant == "full":
-        libname = f"tls-client-{goos}-{goarch}{ext}"
-    else:
-        libname = f"tls-client-{goos}-{goarch}-{variant}{ext}"
+    libname = f"tls-client-{goos}-{goarch}{ext}"
     outpath = outdir / libname
 
     env = os.environ.copy()
     env["CGO_ENABLED"] = "1"
     env["GOOS"] = goos
     env["GOARCH"] = goarch
-    if variant == "nano" and "TLS_CLIENT_NANO_PROFILES" not in env:
-        env["TLS_CLIENT_NANO_PROFILES"] = ",".join(_DEFAULT_NANO_PROFILES)
 
-    tags = ",".join(_variant_tags(variant))
-    ldflags = _variant_ldflags(variant)
+    tags = "netgo,osusergo"
+    ldflags = "-s -w -buildid="
 
     cmd = [
         "go", "build",
@@ -550,7 +480,7 @@ def build_go_library(
     ]
 
     if verbose:
-        print(f"[build] variant={variant} {' '.join(cmd)}", flush=True)
+        print(f"[build] {' '.join(cmd)}", flush=True)
 
     subprocess.run(cmd, cwd=str(srcdir), env=env, check=True)
 
@@ -562,49 +492,10 @@ def build_go_library(
         if verbose:
             print(f"[build] removed surplus header {header}", flush=True)
 
-    if upx:
-        _run_upx(outpath, verbose=verbose)
-
     if verbose:
         print(f"[build] → {outpath}", flush=True)
 
     return outpath
-
-
-def _run_upx(libpath: Path, verbose: bool = True) -> None:
-    """Pack *libpath* with UPX, keeping the original at ``<name>.upx-unpacked``.
-
-    UPX on a c-shared Go library is a real size win but is not universally
-    safe: some sandboxes refuse to ``dlopen`` a packed library.  We therefore
-    keep the unpacked copy and never delete it.
-    """
-    backup = libpath.with_suffix(libpath.suffix + ".upx-unpacked")
-    if not backup.exists():
-        import shutil
-
-        shutil.copy2(libpath, backup)
-
-    try:
-        subprocess.run(["upx", "--best", "--lzma", str(libpath)], check=True)
-        if verbose:
-            print(f"[build] upx packed {libpath}", flush=True)
-    except FileNotFoundError:
-        print(
-            "[build] WARNING: upx not found on PATH — leaving the library "
-            "unpacked",
-            flush=True,
-        )
-    except subprocess.CalledProcessError as exc:
-        # UPX failed (already packed, unsupported arch, corrupted output…).
-        # Restore the known-good copy so we never ship a broken artifact.
-        import shutil
-
-        shutil.copy2(backup, libpath)
-        print(
-            "[build] WARNING: upx failed (%s) — restored the unpacked "
-            "library" % exc,
-            flush=True,
-        )
 
 
 # ---------------------------------------------------------------------------
@@ -639,40 +530,19 @@ def main() -> None:
     parser = argparse.ArgumentParser(description="Build tls-client CFFI bindings")
     parser.add_argument("--lib", action="store_true", help="Only compile Go shared library")
     parser.add_argument("--pkg", action="store_true", help="Only verify CFFI definitions")
-    parser.add_argument(
-        "--variant",
-        choices=BUILD_VARIANTS,
-        default="full",
-        help="Build tier: full (all features), lite (no HTTP/3), "
-             "nano (lite + trimmed profile catalogue)",
-    )
-    parser.add_argument(
-        "--all-variants",
-        action="store_true",
-        help="Build full, lite and nano in one run",
-    )
-    parser.add_argument(
-        "--upx",
-        action="store_true",
-        help="Pack the artifact with UPX after building (keeps an unpacked copy)",
-    )
     args = parser.parse_args()
 
     srcdir = Path(__file__).resolve().parent
 
     if args.pkg:
         outdir = srcdir / "dist"
-        libname = _shared_lib_name(args.variant)
-        libpath = outdir / libname
+        libpath = outdir / _shared_lib_name()
         if not libpath.exists():
             sys.exit(f"Shared library not found at {libpath}. Run --lib first.")
         verify_cdef(libpath)
         return
 
-    variants = BUILD_VARIANTS if args.all_variants else (args.variant,)
-    last = None
-    for variant in variants:
-        last = build_go_library(srcdir=srcdir, variant=variant, upx=args.upx)
+    last = build_go_library(srcdir=srcdir)
     if not args.lib and last is not None:
         verify_cdef(last)
 

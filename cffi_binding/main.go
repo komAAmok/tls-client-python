@@ -254,6 +254,8 @@ var (
 	clientPoolMu       sync.Mutex
 	poolTTLNs          atomic.Int64 // pool entry idle timeout (nanoseconds); default 5 min
 	poolScanIntervalNs atomic.Int64 // eviction scan interval (nanoseconds); default 60 s
+	poolMaxEntries     atomic.Int64 // hard cap on distinct pooled clients; <= 0 = unlimited
+	poolEntryCount     atomic.Int64 // exact entry count; mutated only under clientPoolMu
 	evictionStopCh     chan struct{}
 	evictionOnce       sync.Once
 
@@ -263,9 +265,16 @@ var (
 	lastEvictionTime  atomic.Int64 // UnixNano timestamp of the most recent scan
 )
 
+// defaultPoolMaxEntries bounds the client pool when callers rotate through
+// more distinct configurations than the TTL scanner reclaims — e.g. a
+// different TLS fingerprint per request.  1024 is far above any legitimate
+// low-diversity workload yet keeps RSS bounded under pathological rotation.
+const defaultPoolMaxEntries = 1024
+
 func init() {
 	poolTTLNs.Store(int64(5 * time.Minute))
 	poolScanIntervalNs.Store(int64(60 * time.Second))
+	poolMaxEntries.Store(defaultPoolMaxEntries)
 }
 
 // startEviction launches the background TTL eviction goroutine (idempotent).
@@ -337,6 +346,7 @@ func evictStaleEntries() {
 		if !ok {
 			// Orphaned / type-mismatched entry — remove unconditionally.
 			clientPool.Delete(key)
+			poolEntryCount.Add(-1)
 			evicted++
 			continue
 		}
@@ -349,6 +359,7 @@ func evictStaleEntries() {
 			pe.client.CloseIdleConnections()
 		}
 		clientPool.Delete(key)
+		poolEntryCount.Add(-1)
 		evicted++
 	}
 
@@ -358,6 +369,75 @@ func evictStaleEntries() {
 	}
 	lastEvictionCount.Store(evicted)
 	lastEvictionTime.Store(time.Now().UnixNano())
+}
+
+// evictLRUOverCapLocked evicts least-recently-used entries while the pool
+// exceeds poolMaxEntries.  Caller must hold clientPoolMu.
+//
+// The cap bounds memory when configurations rotate faster than the TTL
+// scanner reclaims them (e.g. a distinct TLS fingerprint per request):
+// every unique cache key allocates a new HttpClient, and without a cap a
+// burst of N unique fingerprints inside one TTL window holds N clients —
+// each with its own cookie jar and idle-connection pool.  With the cap,
+// memory stays bounded at poolMaxEntries clients regardless of rotation
+// breadth.  Evicted clients only lose idle connections: an in-flight
+// request that already grabbed the client holds its own reference and
+// completes normally.
+//
+// The full scan also recounts the pool, so poolEntryCount self-heals if a
+// test (or future code path) mutates clientPool without the counter.
+func evictLRUOverCapLocked(protectedKey string) {
+	maxEntries := poolMaxEntries.Load()
+	if maxEntries <= 0 {
+		return // unlimited — legacy behaviour
+	}
+
+	type lruCandidate struct {
+		key        string
+		lastAccess int64
+		entry      *poolEntry
+	}
+	candidates := make([]lruCandidate, 0, 64)
+	var live int64
+	clientPool.Range(func(k, v any) bool {
+		key, ok := k.(string)
+		if !ok {
+			return true // foreign key type — leave it to the TTL scanner
+		}
+		if key == protectedKey {
+			live++ // the entry this call just created never evicts itself
+			return true
+		}
+		pe, ok := v.(*poolEntry)
+		if !ok {
+			// Orphaned entry — lastAccess 0 sorts it first, so it goes first.
+			candidates = append(candidates, lruCandidate{key: key})
+			return true
+		}
+		candidates = append(candidates, lruCandidate{key: key, lastAccess: pe.lastAccess.Load(), entry: pe})
+		return true
+	})
+	poolEntryCount.Store(int64(len(candidates)) + live)
+
+	over := int64(len(candidates)+int(live)) - maxEntries
+	if over <= 0 {
+		return
+	}
+	if over > int64(len(candidates)) {
+		over = int64(len(candidates))
+	}
+	sort.Slice(candidates, func(i, j int) bool {
+		return candidates[i].lastAccess < candidates[j].lastAccess
+	})
+	for i := int64(0); i < over; i++ {
+		c := candidates[i]
+		if c.entry != nil && c.entry.client != nil {
+			c.entry.client.CloseIdleConnections()
+		}
+		clientPool.Delete(c.key)
+		poolEntryCount.Add(-1)
+	}
+	totalEvictions.Add(over)
 }
 
 // respBodyPool reuses *bytes.Buffer for response body reads, avoiding
@@ -943,8 +1023,7 @@ func cStrSlice(arr **C.char, length int) []string {
 }
 
 // buildCustomProfileFromC converts a C CustomTlsClient into a
-// profiles.ClientProfile.  Mirrors getCustomTlsClientProfile in
-// cffi_src/factory.go.
+// profiles.ClientProfile.
 func buildCustomProfileFromC(ctc *C.CustomTlsClient) (profiles.ClientProfile, error) {
 	ja3Str := C.GoString(ctc.ja3_string)
 	supportedSigAlgs := cStrSlice(ctc.supported_signature_algorithms, int(ctc.supported_signature_algorithms_len))
@@ -1338,6 +1417,10 @@ func getOrCreateClientFromConfig(cfg *requestConfig) (tls_client.HttpClient, err
 	pe := &poolEntry{client: client}
 	pe.lastAccess.Store(time.Now().UnixNano())
 	clientPool.Store(key, pe)
+	poolEntryCount.Add(1)
+	// Enforce the size cap after insertion: rotating fingerprints faster
+	// than TTL eviction reclaims them must not grow RSS without bound.
+	evictLRUOverCapLocked(key)
 	return client, nil
 }
 
@@ -1940,6 +2023,7 @@ func ClearClientPool() {
 		clientPool.Delete(key)
 		return true
 	})
+	poolEntryCount.Store(0)
 	// Note: the eviction goroutine is intentionally NOT stopped here.
 	// It continues to run (harmlessly iterating an empty pool until it
 	// repopulates) so that TTL eviction remains active across clear cycles.
@@ -1981,9 +2065,22 @@ func SetPoolScanInterval(seconds C.int) {
 	poolScanIntervalNs.Store(int64(time.Duration(seconds) * time.Second))
 }
 
-//export GetBuildVariant
-func GetBuildVariant() *C.char {
-	return C.CString(tls_client.BuildVariant)
+//export SetPoolMaxEntries
+func SetPoolMaxEntries(entries C.int) {
+	switch {
+	case entries < 0:
+		// Negative resets to the default (documented on the Python side).
+		poolMaxEntries.Store(defaultPoolMaxEntries)
+	case entries == 0:
+		poolMaxEntries.Store(0) // 0 = unlimited — legacy behaviour
+	default:
+		poolMaxEntries.Store(int64(entries))
+	}
+	// Shrinking below the current size takes effect immediately: evict the
+	// overflow now instead of waiting for the next insert or TTL scan.
+	clientPoolMu.Lock()
+	evictLRUOverCapLocked("")
+	clientPoolMu.Unlock()
 }
 
 //export GetAbiVersion
@@ -2071,13 +2168,6 @@ func RequestAsync(opts *C.RequestOptions, requestID C.uintptr_t, cb unsafe.Point
 }
 
 func main() {}
-
-// init applies the optional nano-build profile trimming.  A c-shared library
-// never runs main(), so the environment knob has to be honoured here, after
-// the profiles package's own init() registrations have completed.
-func init() {
-	profiles.ApplyNanoProfileFilter()
-}
 
 // ---------------------------------------------------------------------------
 // Test-support bridge — Go test files cannot use cgo directly ("use of cgo

@@ -1102,8 +1102,8 @@ void           ClearClientPool(void);
 
 void           SetPoolTTL(int seconds);
 void           SetPoolScanInterval(int seconds);
+void           SetPoolMaxEntries(int entries);
 int            GetAbiVersion(void);
-char*          GetBuildVariant(void);
 char*          ResolveECHConfig(char* host);
 
 typedef void (*async_callback_fn)(uintptr_t request_id, ResponseResult* response);
@@ -1177,13 +1177,7 @@ def _find_library() -> str:
     搜索顺序：
     1. 读取 ``TLS_CLIENT_LIB`` 环境变量（显式用户覆盖）。
     2. 寻找包目录内 ``tls_client/bin/`` 下的带架构后缀文件（如 tls-client-windows-amd64.dll）。
-       ``TLS_CLIENT_VARIANT`` 环境变量选择编译变体（``full`` / ``lite`` /
-       ``nano``），文件名相应地追加 ``-lite`` / ``-nano`` 后缀。
     3. 寻找同级开发目录 ``dist/`` 下的文件。
-
-    变体缺失时的回退顺序为 nano → lite → full：一个配置了
-    ``TLS_CLIENT_VARIANT=nano`` 但只发布了 full 二进制包的部署仍能加载，
-    而不是在导入期直接崩溃。
     """
     # 1. 环境变量显式覆盖
     env_lib = os.environ.get("TLS_CLIENT_LIB")
@@ -1197,26 +1191,8 @@ def _find_library() -> str:
 
     name = _shared_lib_name()
     here = Path(__file__).resolve().parent
-    stem, ext = name.rsplit(".", 1)
 
-    # 2. 寻找包目录 bin/ 下的多系统共享动态库。
-    #    候选列表按请求的变体优先，随后逐级回退到功能更全的构建。
-    variant = os.environ.get("TLS_CLIENT_VARIANT", "").strip().lower()
-    if variant not in ("full", "lite", "nano"):
-        variant = "full"
-    fallbacks = {
-        "full": ["full"],
-        "lite": ["lite", "full"],
-        "nano": ["nano", "lite", "full"],
-    }[variant]
-
-    candidates = []
-    for tier in fallbacks:
-        filename = name if tier == "full" else f"{stem}-{tier}.{ext}"
-        candidates.append(here / "bin" / filename)
-    for tier in fallbacks:
-        filename = name if tier == "full" else f"{stem}-{tier}.{ext}"
-        candidates.append(here / "dist" / filename)
+    candidates = [here / "bin" / name, here / "dist" / name]
 
     for candidate in candidates:
         if candidate.exists():
@@ -1231,7 +1207,6 @@ def _find_library() -> str:
     parts.extend([
         "",
         "  Set the 'TLS_CLIENT_LIB' environment variable to point directly to your binary.",
-        "  Build variants are selected with 'TLS_CLIENT_VARIANT' (full | lite | nano).",
     ])
     raise FileNotFoundError("\n".join(parts))
 
@@ -1261,8 +1236,10 @@ def _load_ffi():
 _ffi = None
 _lib = None
 _ffi_lock = threading.Lock()
+# True when this process is a fork child whose parent had already loaded the
+# native Go library — see _after_fork_in_child() and the _get_ffi() guard.
+_forked_after_load = False
 _abi_version = 1  # 1 = legacy pre-rebuild library; 2 = GetAbiVersion() export present
-_build_variant = "full"  # "full" | "lite" (lite = built without QUIC/HTTP-3)
 
 def _require_abi2() -> None:
     if _abi_version < 2:
@@ -1331,16 +1308,22 @@ def _degrade_abi3_fields(resolved: Dict[str, Any]) -> bool:
 
 
 def _get_ffi():
-    global _ffi, _lib, _abi_version, _build_variant
+    global _ffi, _lib, _abi_version
+    if _forked_after_load:
+        raise RuntimeError(
+            "tls_client: the native Go library was loaded in the parent "
+            "process before this process was forked. The Go runtime does not "
+            "survive fork() — its threads (GC, evictor, HTTP workers) exist "
+            "only in the parent, so calling into it here would deadlock or "
+            "crash. Use the 'spawn' or 'forkserver' start method for process "
+            "pools, or import/use tls_client only after forking."
+        )
     if _ffi is None:
         with _ffi_lock:
             if _ffi is None:
                 _ffi, _lib = _load_ffi()
                 # Legacy libraries predate the export; treat them as ABI 1.
                 _abi_version = int(getattr(_lib, "GetAbiVersion", lambda: 1)())
-                variant_fn = getattr(_lib, "GetBuildVariant", None)
-                if variant_fn is not None:
-                    _build_variant = _ffi.string(variant_fn()).decode("ascii", "replace")
     return _ffi, _lib
 
 
@@ -3068,10 +3051,6 @@ class Session:
         else:
             resolved["insecure_skip_verify"] = _val("insecure_skip_verify", None, True)
         _normalize_int_fields(resolved)
-        if _build_variant == "lite":
-            # Lite builds exclude QUIC entirely; force the flag so requests
-            # fail fast instead of reaching the engine's H3 error path.
-            resolved["disable_http3"] = 1
 
         # ABI 2 features need the rebuilt shared library.
         if (resolved["disable_session_tickets"] or resolved["tls_keylog_path"]
@@ -3444,6 +3423,27 @@ class Session:
         _, lib = _get_ffi()
         lib.SetPoolScanInterval(seconds)
 
+    @staticmethod
+    def set_pool_max_entries(entries: int) -> None:
+        """Cap the number of cached Go HttpClient entries (default 1024).
+
+        Bounds memory when configurations rotate faster than the TTL
+        evicts them (e.g. a distinct TLS fingerprint per request): once the
+        pool exceeds *entries*, the least-recently-used clients are evicted
+        (losing only idle connections; in-flight requests complete).  Pass
+        0 to disable the cap entirely (unbounded legacy behaviour), or a
+        negative value to restore the default.
+        """
+        _, lib = _get_ffi()
+        setter = getattr(lib, "SetPoolMaxEntries", None)
+        if setter is None:
+            raise RuntimeError(
+                "set_pool_max_entries requires a native tls-client library "
+                "rebuilt from current source (the loaded binary predates the "
+                "SetPoolMaxEntries export; see UPSTREAM_SYNC.md)."
+            )
+        setter(entries)
+
 
 # ---------------------------------------------------------------------------
 # Async callback bridge — Go goroutine → Python CFFI callback → asyncio Future
@@ -3499,6 +3499,26 @@ def _apply_future_exception(future: "asyncio.Future", exc: BaseException) -> Non
         pass  # event loop already closed — graceful shutdown
 
 
+def _cancel_timeout_handle(future, timeout_handle) -> None:
+    """Cancel a defensive-timeout Handle safely from any thread.
+
+    ``asyncio.Handle.cancel()`` mutates loop-internal scheduler state (the
+    ``_scheduled`` timer heap) without synchronisation, so calling it from
+    the Go-managed callback thread races the event loop thread.  Deferring
+    the cancel through ``call_soon_threadsafe`` runs it on the loop thread,
+    where it is safe.  Best-effort by design: when the loop is already
+    closed the timer can never fire anyway — a stray ``_on_zombie_timeout``
+    pops a missing entry and returns — so the ``RuntimeError`` raised by a
+    dead loop is swallowed.
+    """
+    if timeout_handle is None or future is None:
+        return
+    try:
+        future.get_loop().call_soon_threadsafe(timeout_handle.cancel)
+    except RuntimeError:
+        pass  # event loop already closed — graceful shutdown
+
+
 def _drop_pending_request(request_id: int) -> Optional[tuple]:
     """Pop a pending request entry and cancel its defensive timer.
 
@@ -3509,8 +3529,7 @@ def _drop_pending_request(request_id: int) -> Optional[tuple]:
         entry = _pending_requests.pop(request_id, None)
     if entry is not None:
         _future, _keep_alive, timeout_handle, _owner = entry
-        if timeout_handle is not None:
-            timeout_handle.cancel()
+        _cancel_timeout_handle(_future, timeout_handle)
     return entry
 
 
@@ -3622,8 +3641,10 @@ def _make_async_callback(ffi, lib):
                 )
                 # _keep_alive is now released – the goroutine has finished.
 
-            if timeout_handle is not None:
-                timeout_handle.cancel()
+            # Cancel the defensive timer on the loop thread: this callback
+            # runs on a Go-managed OS thread, and Handle.cancel() is not
+            # thread-safe against a running event loop.
+            _cancel_timeout_handle(future, timeout_handle)
 
             if future is None or future.done():
                 # Already resolved or timed out.  Free C memory and exit.
@@ -3687,6 +3708,51 @@ def _get_async_callback(ffi, lib):
         if _async_callback is None:
             _async_callback = _make_async_callback(ffi, lib)
         return _async_callback
+
+
+# ---------------------------------------------------------------------------
+# Fork safety — ProcessPoolExecutor("fork") / os.fork() interop
+# ---------------------------------------------------------------------------
+
+def _after_fork_in_child() -> None:
+    """Reinitialise cross-thread state in a forked child (Unix only).
+
+    Runs via ``os.register_at_fork`` in the child, before ``os.fork()``
+    returns:
+
+    (a) Every module-level lock is replaced with a fresh, unlocked one — a
+        lock held by another thread at fork time is inherited in the locked
+        state, and the owning thread does not exist in the child, so the
+        first acquire would deadlock forever.
+    (b) The pending-async registry is dropped: its futures, timers and
+        event loops belong to the parent process.
+    (c) If the Go library was already loaded, ``_forked_after_load`` is set
+        so ``_get_ffi()`` fails fast with guidance instead of deadlocking on
+        Go-internal locks held by threads that no longer exist.
+    """
+    global _forked_after_load
+    global _ffi, _ffi_lock, _pending_lock, _request_counter_lock, _async_callback_lock
+    global _pending_requests, _async_callback
+
+    if _lib is None:
+        # Library not yet loaded in the parent — the child may lazily load a
+        # fresh Go runtime.  Reset _ffi in case a fork landed mid-assignment
+        # (only the forking thread survives, so no loader is running here).
+        _ffi = None
+        _forked_after_load = False
+    else:
+        _forked_after_load = True
+
+    _ffi_lock = threading.Lock()
+    _pending_lock = threading.Lock()
+    _request_counter_lock = threading.Lock()
+    _async_callback_lock = threading.Lock()
+    _pending_requests = {}
+    _async_callback = None
+
+
+if hasattr(os, "register_at_fork"):
+    os.register_at_fork(after_in_child=_after_fork_in_child)
 
 
 class AsyncSession:
@@ -4067,8 +4133,6 @@ class AsyncSession:
             "tcp_ip_id_mode": _val("tcp_ip_id_mode"),
         }
         _normalize_int_fields(resolved)
-        if _build_variant == "lite":
-            resolved["disable_http3"] = 1
 
         # ABI 2 features need the rebuilt shared library.
         if (resolved["disable_session_tickets"] or resolved["tls_keylog_path"]
@@ -4644,8 +4708,9 @@ class AsyncSession:
                 if entry is not None:
                     to_cancel.append(entry)
         for future, _keep_alive, timeout_handle, _owner in to_cancel:
-            if timeout_handle is not None:
-                timeout_handle.cancel()
+            # close() may be called from a non-loop thread — cancel the
+            # defensive timer through the loop instead of racing it.
+            _cancel_timeout_handle(future, timeout_handle)
             if future is not None and not future.done():
                 _apply_future_exception(
                     future, RuntimeError("AsyncSession is closed")

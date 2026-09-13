@@ -9,7 +9,11 @@ upstream-sync task:
 
 - root Go files, except `tcp_fingerprint.go`, `tcp_socket_unix.go`, and
   `tcp_socket_windows.go`, and `tcp_socket_darwin_test.go`
-- `bandwidth/`, `profiles/`, `cffi_src/`, `cffi_dist/`, `example/`, and `tests/`
+- `bandwidth/`, `profiles/`, `example/`, and `tests/`
+
+> `cffi_src/` and `cffi_dist/` (the upstream JSON-marshalled CFFI binding and
+> its multi-language distribution) were removed on 2026-09-13: they are fully
+> superseded by the local `cffi_binding/` layer.
 
 When a local feature must touch an upstream-owned file, keep the change
 minimal and record it in `UPSTREAM_SYNC.md` under **Local overlay points**.

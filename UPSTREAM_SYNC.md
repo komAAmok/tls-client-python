@@ -19,31 +19,34 @@ must be preserved when resolving future upstream conflicts:
 - `client.go`, `client_options.go`, `profiles/profiles.go`: TCP/IP fingerprint
   overrides plus the local request/proxy locking and panic-to-error behavior.
 - `roundtripper.go`: the QUIC/HTTP-3 transport construction was split out of
-  this file into `roundtripper_http3.go` (tag `!tls_lite`) so a lightweight
-  `tls_lite` build variant can exclude QUIC entirely. `http3.NextProtoH3`
-  references were replaced by the per-variant `nextProtoH3` identifier.
-- `roundtripper_http3.go` (new, `!tls_lite`), `roundtripper_http3_stub.go`
-  (new, `tls_lite`), `socks5_udp.go` (`!tls_lite` build tag added): the lite
-  build variant ships without QUIC/HTTP-3 and the SOCKS5-UDP QUIC dialer.
-- `cffi_binding/main.go`: ABI 2 — `GetAbiVersion` / `GetBuildVariant`
-  exports, appended RequestOptions fields (disable_session_tickets,
-  tls_keylog_path, root_ca_pem+len) and CustomTlsClient field
-  (trust_anchors_payload), cache-key format version 3 (ABI 2.1: version 4
-  adds h2_max_data_frame_size / preface_ping_idle_ms /
-  hpack_indexing_policy; cookie_crumb is per-request and not keyed).
+  this file into `roundtripper_http3.go`. `http3.NextProtoH3` references were
+  replaced by the local `nextProtoH3` identifier.
+- `roundtripper_http3.go` (new), `socks5_udp.go` (local QUIC dialer addition):
+  QUIC/HTTP-3 and the SOCKS5-UDP QUIC dialer are always built (no lite tier).
+- `cffi_binding/main.go`: ABI 2 — `GetAbiVersion` export, appended
+  RequestOptions fields (disable_session_tickets, tls_keylog_path,
+  root_ca_pem+len) and CustomTlsClient field (trust_anchors_payload),
+  cache-key format version 3 (ABI 2.1: version 4 adds h2_max_data_frame_size /
+  preface_ping_idle_ms / hpack_indexing_policy; cookie_crumb is per-request
+  and not keyed).
   **ABI 3 (2026-09-12):** `GetAbiVersion()` returns 3; RequestOptions gained
   the extension-order policy (`extension_permute_mode` /
   `extension_permute_prefix`), destination-aware header ordering
   (`header_order_by_dest` / `header_order_dest`), `h2_disable_priority_frames`
   and the deep TCP fingerprint (`tcp_dont_fragment`, `tcp_tos`,
   `tcp_no_delay`, `tcp_window_clamp`, `tcp_ip_id_mode`); cache-key format
-  version 5. An `init()` applies the optional nano-build profile
-  trimming (`TLS_CLIENT_NANO_PROFILES`) since a c-shared library never runs
-  `main()`.
+  version 5.
   (An earlier revision also appended `extension_permute_mode` /
   `extension_permute_prefix` to `CustomTlsClient`; no Go code ever read them —
   the permutation is consumed from `RequestOptions` — so the write-only pair
   was removed again and `CustomTlsClient` is unchanged from ABI 2.)
+  **2026-09-13 (pool bound + fork-safety):** a new `//export
+  SetPoolMaxEntries(int)` caps the client pool (default 1024, `0` = unlimited,
+  `<0` = reset) with LRU eviction so rapid fingerprint rotation cannot grow
+  RSS without bound.  The struct layout is unchanged, so `GetAbiVersion()`
+  stays 3 (function-only, append-only surface).  Python-side
+  `Session.set_pool_max_entries()` raises a clear `RuntimeError` against a
+  stale library that predates the export.
 - `extension_permute.go` (new), `header_order.go` (new),
   `tcp_fingerprint.go`, `tcp_socket_unix.go`, `tcp_socket_windows.go`,
   `client_options.go`, `client.go`, `roundtripper.go`: the ABI 3 fingerprint
@@ -56,21 +59,14 @@ must be preserved when resolving future upstream conflicts:
   `roundtripper_setup_test.go`).
 - `profiles/chrome_captured_profiles.go` (generated, 55 majors 99-153),
   `profiles/chrome_captured_registry.go` (new): byte-exact per-version Chrome
-  profiles recovered from live captures, plus the nano-build profile filter.
-  The generator accepts `--majors` so the size-critical nano tier can emit a
-  reduced table; the runtime `TLS_CLIENT_NANO_PROFILES` filter only prunes the
-  profile *map*, so regenerating is what actually removes the data from the
-  binary.
+  profiles recovered from live captures, registered into `MappedTLSClients`
+  for both the plain and the PSK identifier.
 - `tools/extract_chrome_captures.py`, `tools/gen_chrome_profiles.py`,
   `tools/_chrome_captures.json` (new): the capture→Go-profile pipeline.
   `gen_chrome_profiles.py --check` is a CI staleness gate.
 - `tools/gen_chrome_fingerprint_presets.py`,
   `tls_client/fingerprints/chrome_full.py` (generated, new): the same captures
   rendered as Python presets (base + per-OS variants for all 55 majors).
-- `cffi_binding/ech_stub.go` (`tls_lite`): must keep `//export ResolveECHConfig`.
-  The hand-written CDEF in `tls_client/_core.py` declares that symbol for every
-  variant, so a lite build without the export fails at dlopen instead of
-  letting `tls_client.ech.resolve()` return `None` as documented.
 - `cffi_binding/build_binding.py`: derives the CDEF from `main.go`'s cgo
   preamble *and* the exported prototypes from every `//export` directive in the
   package; there is no hand-maintained CDEF or prototype list to go stale.
@@ -85,8 +81,6 @@ must be preserved when resolving future upstream conflicts:
   PRIORITY frames / HEADERS priority flag; plus `Transport.H2*` fields in
   `client_options.go` (TransportOptions) and their wiring in
   `roundtripper.go`.
-- `cffi_src/factory.go`, `cffi_src/types.go`: TCP/IP fingerprint fields and the
-  local cookie-jar construction behavior.
 - `example/main.go`: retained legacy local example; upstream split examples
   into subdirectories.
 - `tests/client_test.go`, `tests/client_test_utils.go`,
@@ -128,40 +122,24 @@ wire behaviour and are deliberately **not** keyed. Parity is pinned by
 `cffi_binding/cachekey_parity_test.go` (TestCacheKeyParityWithPython) —
 update BOTH sides together or these tests will fail.
 
-**ABI 2 (2026-09-12).** The bundled shared libraries export
-`GetAbiVersion()` (2) and `GetBuildVariant()` ("full" / "lite" / "nano").
-`RequestOptions` gained `disable_session_tickets`, `tls_keylog_path`,
-`root_ca_pem`, `root_ca_pem_len`; `CustomTlsClient` gained
+**ABI 2 (2026-09-12).** The bundled shared library exports `GetAbiVersion()`
+(returning 3). `RequestOptions` gained `disable_session_tickets`,
+`tls_keylog_path`, `root_ca_pem`, `root_ca_pem_len`; `CustomTlsClient` gained
 `trust_anchors_payload`. Python's CDEF mirrors both. The Python wrapper
-refuses ABI-2-only features against legacy (ABI 1) libraries and selects
-binaries via `TLS_CLIENT_VARIANT` (`full` | `lite` | `nano`, with a
-nano → lite → full fallback if the requested tier is not bundled).
+refuses ABI-2-only features against legacy (ABI 1) libraries.
 
-## Build tiers
+## Build
 
-`cffi_binding/build_binding.py` produces three tiers (`--variant`, or
-`--all-variants`), with optional UPX packing (`--upx`):
-
-| Tier   | Tags                 | QUIC/HTTP-3 | Profile catalogue            | Filename suffix |
-|--------|----------------------|-------------|------------------------------|-----------------|
-| full   | `netgo,osusergo`     | yes         | all profiles                 | *(none)*        |
-| lite   | `+ tls_lite`         | no          | all profiles                 | `-lite`         |
-| nano   | `+ tls_lite`         | no          | `TLS_CLIENT_NANO_PROFILES`   | `-nano`         |
-
-All tiers build with `-trimpath -buildvcs=false` and
-`-ldflags="-s -w -buildid="`. The nano tier additionally sets
-`TLS_CLIENT_NANO_PROFILES`, which `profiles.ApplyNanoProfileFilter()` reads at
-library init to drop every profile not named in the list — the engine's
-default profile is always retained. The CI workflow (`build_workflow.yml`)
-builds all three tiers, strips sections, and UPX-packs on Linux/Windows.
-
-**Two layers of nano trimming.** `ApplyNanoProfileFilter()` only deletes
-entries from the runtime map: every captured profile's data is still linked
-in, because the generated table keeps all majors inside one `switch major`.
-The CI nano job therefore *also* regenerates the table with just the named
-majors (`gen_chrome_profiles.py --majors …`) before building, which is what
-actually removes the data from the artifact. The env var stays set as a
-backstop for hand-built nano libraries.
+`cffi_binding/build_binding.py` produces a single full-fidelity build with
+`-tags=netgo,osusergo`, `-trimpath -buildvcs=false` and
+`-ldflags="-s -w -buildid="` — QUIC/HTTP-3 enabled and the complete profile
+catalogue linked. There are no lite/nano tiers: the size-trimmed tiers
+(`tls_lite` build tag, `TLS_CLIENT_NANO_PROFILES`, `GetBuildVariant()`) were
+removed on 2026-09-13 because the project targets full-dimension browser
+fingerprint simulation rather than artifact size. (UPX packing was also
+removed earlier: `--shlib` mode silently fails on Go c-shared ELF libraries —
+historical Linux artifacts were never actually packed — and packed binaries
+trip AV/EDR heuristics while weakening relro/now hardening.)
 
 ## Verification
 
@@ -175,7 +153,7 @@ Run from the repository root:
 $env:GOCACHE="$PWD/.cache/go-build"
 $env:GOMODCACHE="$PWD/.cache/go-mod"
 $env:GOTMPDIR="$PWD/.cache/go-tmp"
-go test . ./profiles ./cffi_src
+go test . ./profiles
 python -m compileall -q tls_client cffi_binding
 python -c "from tls_client._core import CDEF; print('Python CFFI definition OK')"
 python -m unittest discover -s python_tests -p "test_*.py"

@@ -1,5 +1,3 @@
-//go:build !tls_lite
-
 package main
 
 // ECH (Encrypted Client Hello) config resolution over DNS HTTPS records

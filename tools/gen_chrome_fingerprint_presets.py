@@ -119,6 +119,82 @@ _PLATFORM_HINT: Dict[str, str] = {
     "ios": '"iOS"',
 }
 
+# High-entropy Client Hints — per-OS defaults mirroring Chromium.  A value of
+# None means "omit the header" (Chrome does not send sec-ch-ua-wow64 off
+# Windows, for example); an empty-quoted string is sent verbatim (Chrome sends
+# "" for sec-ch-ua-platform-version on Linux and for sec-ch-ua-arch/bitness on
+# mobile).
+_HINT_PLATFORM_VERSION: Dict[str, str] = {
+    "windows": '"15.0.0"',
+    "macos": '"14.5.0"',
+    "linux": '""',
+    "android": '"14.0.0"',
+    "ios": '""',
+}
+
+_HINT_ARCH: Dict[str, str] = {
+    "windows": '"x86"',
+    "macos": '"arm"',
+    "linux": '"x86"',
+    "android": '""',
+    "ios": '""',
+}
+
+# Brands that carry the real build; everything else is the GREASE token.
+_REAL_BRANDS = {"Chromium", "Google Chrome", "Brave", "Opera"}
+
+
+def _full_version_list(sec_ch_ua: str, full_version: str) -> str:
+    """Expand a low-entropy ``sec-ch-ua`` into ``sec-ch-ua-full-version-list``.
+
+    Brand names, order and the GREASE token are preserved verbatim; real brands
+    get the exact capture build while the GREASE brand keeps its major expanded
+    to ``<major>.0.0.0`` (matching Chromium's per-brand full version expansion).
+    """
+    out = []
+    for part in sec_ch_ua.split(","):
+        part = part.strip()
+        if not part:
+            continue
+        brand, sep, ver = part.partition(";v=")
+        brand = brand.strip().strip('"')
+        ver = ver.strip().strip('"')
+        if not sep:
+            out.append(part)
+        elif not ver or "." in ver:
+            out.append(part)
+        elif brand in _REAL_BRANDS:
+            out.append('"%s";v="%s"' % (brand, full_version))
+        else:
+            out.append('"%s";v="%s.0.0.0"' % (brand, ver))
+    return ", ".join(out)
+
+
+def _high_entropy_hints(os_name: str, sec_ch_ua: str, full_version: str) -> Dict[str, str]:
+    """Return the six high-entropy Client Hints for an OS (None = omit)."""
+    is_mobile = os_name in ("android", "ios")
+    hints: Dict[str, str] = {
+        "sec-ch-ua-full-version-list": _full_version_list(sec_ch_ua, full_version),
+        "sec-ch-ua-platform-version": _HINT_PLATFORM_VERSION[os_name],
+        "sec-ch-ua-arch": _HINT_ARCH[os_name],
+        "sec-ch-ua-bitness": '""' if is_mobile else '"64"',
+        "sec-ch-ua-model": '""',
+    }
+    # sec-ch-ua-wow64 is Windows-only.
+    if os_name == "windows":
+        hints["sec-ch-ua-wow64"] = "?0"
+    return hints
+
+# Chromium's wire order for the high-entropy block, after the low-entropy trio.
+_HIGH_ENTROPY_ORDER = [
+    "sec-ch-ua-platform-version",
+    "sec-ch-ua-arch",
+    "sec-ch-ua-bitness",
+    "sec-ch-ua-model",
+    "sec-ch-ua-full-version-list",
+    "sec-ch-ua-wow64",
+]
+
 _ACCEPT_HTML = (
     "text/html,application/xhtml+xml,application/xml;q=0.9,"
     "image/avif,image/webp,image/apng,*/*;q=0.8,"
@@ -126,11 +202,18 @@ _ACCEPT_HTML = (
 )
 
 # Navigation (document) request header order — Chromium emits the
-# Sec-Fetch-* block before Accept* on a top-level navigation.
+# Sec-Fetch-* block before Accept* on a top-level navigation.  The high-entropy
+# Client Hints follow the low-entropy trio when a host advertises Accept-CH.
 _NAV_ORDER = [
     "sec-ch-ua",
     "sec-ch-ua-mobile",
     "sec-ch-ua-platform",
+    "sec-ch-ua-platform-version",
+    "sec-ch-ua-arch",
+    "sec-ch-ua-bitness",
+    "sec-ch-ua-model",
+    "sec-ch-ua-full-version-list",
+    "sec-ch-ua-wow64",
     "upgrade-insecure-requests",
     "user-agent",
     "accept",
@@ -150,6 +233,12 @@ _SUBRESOURCE_ORDER = [
     "sec-ch-ua",
     "sec-ch-ua-mobile",
     "sec-ch-ua-platform",
+    "sec-ch-ua-platform-version",
+    "sec-ch-ua-arch",
+    "sec-ch-ua-bitness",
+    "sec-ch-ua-model",
+    "sec-ch-ua-full-version-list",
+    "sec-ch-ua-wow64",
     "user-agent",
     "accept",
     "sec-fetch-site",
@@ -183,8 +272,8 @@ def _sec_ch_ua(version: str, index: int) -> str:
     return '"Chromium";v="%s", %s, "Google Chrome";v="%s"' % (version, brand, version)
 
 
-def _ios_headers(version: str, sec_ch_ua: str) -> Dict[str, str]:
-    return {
+def _ios_headers(version: str, sec_ch_ua: str, full_version: str) -> Dict[str, str]:
+    headers: Dict[str, str] = {
         "User-Agent": (
             "Mozilla/5.0 (iPhone; CPU iPhone OS 17_5 like Mac OS X)"
             " AppleWebKit/605.1.15 (KHTML, like Gecko)"
@@ -197,6 +286,8 @@ def _ios_headers(version: str, sec_ch_ua: str) -> Dict[str, str]:
         "Accept-Encoding": "gzip, deflate, br, zstd",
         "Accept-Language": "en-US,en;q=0.9",
     }
+    headers.update(_high_entropy_hints("ios", sec_ch_ua, full_version))
+    return headers
 
 
 def _replatform_ua(ua: str, os_name: str, version: str) -> str:
@@ -227,9 +318,11 @@ def _replatform_ua(ua: str, os_name: str, version: str) -> str:
     )
 
 
-def _build_headers(ua_platform: str, platform_hint: str, sec_ch_ua: str, ua: str) -> Dict[str, str]:
+def _build_headers(
+    os_name: str, ua_platform: str, platform_hint: str, sec_ch_ua: str, ua: str, full_version: str
+) -> Dict[str, str]:
     """Build the OS-coherent header block, reusing the captured UA verbatim."""
-    return {
+    headers: Dict[str, str] = {
         "User-Agent": ua,
         "sec-ch-ua": sec_ch_ua,
         "sec-ch-ua-mobile": "?1" if ua_platform.startswith("Linux; Android") else "?0",
@@ -238,6 +331,8 @@ def _build_headers(ua_platform: str, platform_hint: str, sec_ch_ua: str, ua: str
         "Accept-Encoding": "gzip, deflate, br, zstd",
         "Accept-Language": "en-US,en;q=0.9",
     }
+    headers.update(_high_entropy_hints(os_name, sec_ch_ua, full_version))
+    return headers
 
 
 def _emit_preset(name: str, body: Dict[str, Any], indent: int = 4) -> str:
@@ -303,6 +398,12 @@ _NAV_ORDER = [
     "sec-ch-ua",
     "sec-ch-ua-mobile",
     "sec-ch-ua-platform",
+    "sec-ch-ua-platform-version",
+    "sec-ch-ua-arch",
+    "sec-ch-ua-bitness",
+    "sec-ch-ua-model",
+    "sec-ch-ua-full-version-list",
+    "sec-ch-ua-wow64",
     "upgrade-insecure-requests",
     "user-agent",
     "accept",
@@ -320,6 +421,12 @@ _SUBRESOURCE_ORDER = [
     "sec-ch-ua",
     "sec-ch-ua-mobile",
     "sec-ch-ua-platform",
+    "sec-ch-ua-platform-version",
+    "sec-ch-ua-arch",
+    "sec-ch-ua-bitness",
+    "sec-ch-ua-model",
+    "sec-ch-ua-full-version-list",
+    "sec-ch-ua-wow64",
     "user-agent",
     "accept",
     "sec-fetch-site",
@@ -379,6 +486,7 @@ def build_module(captures: Dict[str, Dict[str, Any]]) -> str:
     for idx, major in enumerate(majors):
         rec = captures[str(major)]
         version = str(major)
+        full_version = rec.get("version") or ("%s.0.0.0" % version)
         sec_ch_ua = _sec_ch_ua(version, idx)
         ua = rec.get("user_agent") or (
             "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"
@@ -409,8 +517,8 @@ def build_module(captures: Dict[str, Dict[str, Any]]) -> str:
         # Per-OS variants.
         for os_name in ("windows", "macos", "linux", "android"):
             headers = _build_headers(
-                _UA_PLATFORM[os_name], _PLATFORM_HINT[os_name], sec_ch_ua,
-                _replatform_ua(ua, os_name, version),
+                os_name, _UA_PLATFORM[os_name], _PLATFORM_HINT[os_name], sec_ch_ua,
+                _replatform_ua(ua, os_name, version), full_version,
             )
             body: Dict[str, Any] = {
                 "name": "chrome_%d_%s" % (major, os_name),
@@ -423,7 +531,7 @@ def build_module(captures: Dict[str, Dict[str, Any]]) -> str:
         ios_body: Dict[str, Any] = {
             "name": "chrome_%d_ios" % major,
             "based_on": "chrome_%d_base" % major,
-            "default_headers": _ios_headers(version, sec_ch_ua),
+            "default_headers": _ios_headers(version, sec_ch_ua, full_version),
         }
         ios_body.update(OS_TCP["ios"])
         presets["chrome_%d_ios" % major] = ios_body

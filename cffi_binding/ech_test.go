@@ -1,5 +1,3 @@
-//go:build !tls_lite
-
 package main
 
 import (

@@ -1,5 +1,3 @@
-//go:build !tls_lite
-
 package tls_client
 
 // This file implements SOCKS5 UDP ASSOCIATE (RFC 1928, CMD=0x03) to tunnel

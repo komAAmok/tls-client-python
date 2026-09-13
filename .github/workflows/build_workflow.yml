@@ -77,7 +77,6 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        variant: [full, lite, nano]
         include:
           - runner: ubuntu-latest
             goos: linux
@@ -122,38 +121,19 @@ jobs:
           go-version: "1.24"
           cache: true
 
-      # 🌟 极客优化：在 Linux 上顺便安装 clang，并下载部署官方最新的 UPX 4.2.4
-      - name: Install UPX & Clang (Linux/Windows)
-        if: matrix.goos != 'darwin'
+      # Linux 构建使用 clang。UPX 已整体移除：--shlib 模式对 Go c-shared ELF
+      # 静默失败（历史产物均未压缩），打包产物还会触发 AV/EDR 误报并削弱
+      # relro/now 加固。
+      - name: Install Clang (Linux)
+        if: matrix.goos == 'linux'
         shell: bash
         run: |
-          if [ "${{ matrix.goos }}" = "linux" ]; then
-            sudo apt-get update && sudo apt-get install -y clang
-            wget https://github.com/upx/upx/releases/download/v4.2.4/upx-4.2.4-amd64_linux.tar.xz
-            tar -xf upx-4.2.4-amd64_linux.tar.xz
-            sudo mv upx-4.2.4-amd64_linux/upx /usr/local/bin/upx
-          elif [ "${{ matrix.goos }}" = "windows" ]; then
-            choco install upx --no-progress
-          fi
+          sudo apt-get update && sudo apt-get install -y clang
 
       - name: Set up Python
         uses: actions/setup-python@v5
         with:
           python-version: "3.11"
-
-      # nano is the size-trimmed tier.  TLS_CLIENT_NANO_PROFILES only prunes
-      # the runtime map — every captured profile's data is still linked in
-      # because they all live in one `switch major`.  Regenerating the table
-      # with just the named majors is what actually removes the data from the
-      # binary; the env var stays set as a backstop for hand-built nano libs.
-      - name: Trim profile table (nano only)
-        if: matrix.variant == 'nano'
-        shell: bash
-        run: |
-          IDS="${{ vars.NANO_PROFILES || 'chrome_133,chrome_150,chrome_152' }}"
-          MAJORS=$(echo "$IDS" | tr ',' '\n' | sed -E 's/^[[:space:]]*chrome_//' | paste -sd, -)
-          echo "nano majors: $MAJORS"
-          python3 tools/gen_chrome_profiles.py --majors "$MAJORS"
 
       - name: Build Core
         working-directory: cffi_binding
@@ -168,62 +148,33 @@ jobs:
         run: |
           mkdir -p ../tls_client/bin
           find ../tls_client/bin -maxdepth 1 -type f -name 'tls-client-*' -delete
-          # Variant wiring:
-          #   lite/nano → -tags=tls_lite (no QUIC/HTTP-3)
-          #   nano      → TLS_CLIENT_NANO_PROFILES trims the profile catalogue
-          case "${{ matrix.variant }}" in
-            lite|nano) EXTRA_TAG=" tls_lite" ;;
-            *)         EXTRA_TAG="" ;;
-          esac
-          case "${{ matrix.variant }}" in
-            full) SUFFIX="" ;;
-            *)    SUFFIX="-${{ matrix.variant }}" ;;
-          esac
-          if [ "${{ matrix.variant }}" = "nano" ]; then
-            export TLS_CLIENT_NANO_PROFILES="${{ vars.NANO_PROFILES || 'chrome_133,chrome_150,chrome_152' }}"
-          fi
           # 🌟 极客优化：加入 -gcflags、-asmflags 全深度擦除路径元数据，并在 -ldflags 中擦除 -buildid=
           go build -buildmode=c-shared \
                    -buildvcs=false \
                    -trimpath \
-                   -tags="netgo osusergo${EXTRA_TAG}" \
+                   -tags="netgo osusergo" \
                    -gcflags="all=-trimpath=${{ github.workspace }}" \
                    -asmflags="all=-trimpath=${{ github.workspace }}" \
                    -ldflags="-s -w -buildid= -extldflags '-Wl,-s'" \
-                   -o "../tls_client/bin/tls-client-${{ matrix.goos }}-${{ matrix.goarch }}${SUFFIX}${{ matrix.ext }}" .
+                   -o "../tls_client/bin/tls-client-${{ matrix.goos }}-${{ matrix.goarch }}${{ matrix.ext }}" .
 
       - name: Strip Binary Safely
         shell: bash
         run: |
-          if [ "${{ matrix.variant }}" = "full" ]; then SUFFIX=""; else SUFFIX="-${{ matrix.variant }}"; fi
-          TARGET="tls_client/bin/tls-client-${{ matrix.goos }}-${{ matrix.goarch }}${SUFFIX}${{ matrix.ext }}"
+          TARGET="tls_client/bin/tls-client-${{ matrix.goos }}-${{ matrix.goarch }}${{ matrix.ext }}"
           if [ "${{ matrix.goos }}" = "darwin" ]; then
             strip -x "$TARGET" || true
           else
             strip -R .comment -R .note.GNU-stack --strip-unneeded "$TARGET" || true
           fi
 
-      # 🌟 极客优化：升级为 --ultra-brute 极限穷举压缩机制，对 .so 追加 --shlib
-      - name: Compress with UPX (Non-Mac)
-        if: matrix.goos != 'darwin'
-        shell: bash
-        run: |
-          if [ "${{ matrix.variant }}" = "full" ]; then SUFFIX=""; else SUFFIX="-${{ matrix.variant }}"; fi
-          TARGET="tls_client/bin/tls-client-${{ matrix.goos }}-${{ matrix.goarch }}${SUFFIX}${{ matrix.ext }}"
-          if [ "${{ matrix.goos }}" = "linux" ]; then
-            upx --ultra-brute --shlib "$TARGET" || true
-          else
-            upx --ultra-brute "$TARGET" || true
-          fi
-
       - name: Report binary size
         shell: bash
         run: |
-          if [ "${{ matrix.variant }}" = "full" ]; then SUFFIX=""; else SUFFIX="-${{ matrix.variant }}"; fi
-          TARGET="tls_client/bin/tls-client-${{ matrix.goos }}-${{ matrix.goarch }}${SUFFIX}${{ matrix.ext }}"
+          TARGET="tls_client/bin/tls-client-${{ matrix.goos }}-${{ matrix.goarch }}${{ matrix.ext }}"
           BYTES=$(stat -c%s "$TARGET" 2>/dev/null || stat -f%z "$TARGET")
           printf '%-10s %s  %s bytes (%.1f MiB)\n' \
-            "${{ matrix.variant }}" "$(basename "$TARGET")" "$BYTES" \
+            "full" "$(basename "$TARGET")" "$BYTES" \
             "$(echo "$BYTES" | awk '{print $1/1048576}')"
 
       - name: Build Wheel
@@ -231,30 +182,28 @@ jobs:
         run: |
           python -m pip install --upgrade pip build
           python -m build --wheel -C--build-option=--plat-name=${{ matrix.plat }}
-          python -c "import glob,zipfile,re; w=glob.glob('dist/*.whl')[-1]; n=[x for x in zipfile.ZipFile(w).namelist() if x.startswith('tls_client/bin/tls-client-')]; full=[x for x in n if re.search(r'tls-client-[a-z0-9]+-[a-z0-9]+\\.(so|dll|dylib)$', x)]; assert len(full)==1, 'wheel must contain exactly one full-tier native binary: %r' % n"
+          python -c "import glob,zipfile,re; w=glob.glob('dist/*.whl')[-1]; n=[x for x in zipfile.ZipFile(w).namelist() if x.startswith('tls_client/bin/tls-client-')]; full=[x for x in n if re.search(r'tls-client-[a-z0-9]+-[a-z0-9]+\\.(so|dll|dylib)$', x)]; assert len(full)==1, 'wheel must contain exactly one native binary: %r' % n"
 
       - name: Upload Platform Wheel Artifact
         uses: actions/upload-artifact@v4
         with:
-          name: wheel-${{ matrix.goos }}-${{ matrix.goarch }}-${{ matrix.variant }}
+          name: wheel-${{ matrix.goos }}-${{ matrix.goarch }}
           path: dist/*.whl
 
       - name: Upload Raw Binary Artifact
         uses: actions/upload-artifact@v4
         with:
-          name: bin-${{ matrix.goos }}-${{ matrix.goarch }}-${{ matrix.variant }}
-          path: tls_client/bin/tls-client-${{ matrix.goos }}-${{ matrix.goarch }}${{ matrix.variant == 'lite' && '-lite' || '' }}${{ matrix.ext }}
+          name: bin-${{ matrix.goos }}-${{ matrix.goarch }}
+          path: tls_client/bin/tls-client-${{ matrix.goos }}-${{ matrix.goarch }}${{ matrix.ext }}
 
   # -----------------------------------------------------------------------
   # 2. Cross-compile and Pack Windows 32-bit (386) on Linux
   # -----------------------------------------------------------------------
   build-windows-386-cross:
-    name: Cross Windows-386 (${{ matrix.variant }})
+    name: Cross Windows-386
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
-      matrix:
-        variant: [full, lite]
     steps:
       - name: Checkout Code
         uses: actions/checkout@v4
@@ -270,14 +219,10 @@ jobs:
         with:
           python-version: "3.11"
 
-      # 🌟 极客优化：安装最新版 UPX 4.2.4 用于压缩 win32
-      - name: Install MinGW 32-bit Cross Compiler & UPX 4.2.4
+      - name: Install MinGW 32-bit Cross Compiler
         run: |
           sudo apt-get update
           sudo apt-get install -y gcc-mingw-w64-i686
-          wget https://github.com/upx/upx/releases/download/v4.2.4/upx-4.2.4-amd64_linux.tar.xz
-          tar -xf upx-4.2.4-amd64_linux.tar.xz
-          sudo mv upx-4.2.4-amd64_linux/upx /usr/local/bin/upx
 
       - name: Build Core
         working-directory: cffi_binding
@@ -295,16 +240,15 @@ jobs:
           go build -buildmode=c-shared \
                    -buildvcs=false \
                    -trimpath \
-                   -tags="netgo osusergo${{ matrix.variant == 'lite' && ' tls_lite' || '' }}" \
+                   -tags="netgo osusergo" \
                    -gcflags="all=-trimpath=${{ github.workspace }}" \
                    -asmflags="all=-trimpath=${{ github.workspace }}" \
                    -ldflags="-s -w -buildid= -extldflags '-Wl,-s'" \
-                   -o "../tls_client/bin/tls-client-windows-386${{ matrix.variant == 'lite' && '-lite' || '' }}.dll" .
+                   -o "../tls_client/bin/tls-client-windows-386.dll" .
 
-      - name: Strip & Compress
+      - name: Strip
         run: |
-          i686-w64-mingw32-strip --strip-unneeded tls_client/bin/tls-client-windows-386${{ matrix.variant == 'lite' && '-lite' || '' }}.dll || true
-          upx --ultra-brute tls_client/bin/tls-client-windows-386${{ matrix.variant == 'lite' && '-lite' || '' }}.dll || true # 🌟 开启 --ultra-brute
+          i686-w64-mingw32-strip --strip-unneeded tls_client/bin/tls-client-windows-386.dll || true
 
       - name: Build Wheel
         run: |
@@ -315,14 +259,14 @@ jobs:
       - name: Upload Artifact
         uses: actions/upload-artifact@v4
         with:
-          name: wheel-windows-386-${{ matrix.variant }}
+          name: wheel-windows-386
           path: dist/*.whl
 
       - name: Upload Raw Binary Artifact
         uses: actions/upload-artifact@v4
         with:
-          name: bin-windows-386-${{ matrix.variant }}
-          path: tls_client/bin/tls-client-windows-386${{ matrix.variant == 'lite' && '-lite' || '' }}.dll
+          name: bin-windows-386
+          path: tls_client/bin/tls-client-windows-386.dll
 
   # -----------------------------------------------------------------------
   # 3. Cross-compile and Pack Linux ARM & 386 (glibc based)
@@ -333,7 +277,6 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        variant: [full, lite]
         include:
           - goarch: arm
             goarm: "7"
@@ -372,14 +315,10 @@ jobs:
         with:
           python-version: "3.11"
 
-      # 🌟 优化：部署最新的 UPX 4.2.4
-      - name: Install Cross-Compiler & UPX
+      - name: Install Cross-Compiler
         run: |
           sudo apt-get update
           sudo apt-get install -y ${{ matrix.compiler_pkg }}
-          wget https://github.com/upx/upx/releases/download/v4.2.4/upx-4.2.4-amd64_linux.tar.xz
-          tar -xf upx-4.2.4-amd64_linux.tar.xz
-          sudo mv upx-4.2.4-amd64_linux/upx /usr/local/bin/upx
 
       - name: Build Core
         working-directory: cffi_binding
@@ -398,17 +337,15 @@ jobs:
           go build -buildmode=c-shared \
                    -buildvcs=false \
                    -trimpath \
-                   -tags="netgo osusergo${{ matrix.variant == 'lite' && ' tls_lite' || '' }}" \
+                   -tags="netgo osusergo" \
                    -gcflags="all=-trimpath=${{ github.workspace }}" \
                    -asmflags="all=-trimpath=${{ github.workspace }}" \
                    -ldflags="-s -w -buildid= -extldflags '-Wl,-s'" \
-                   -o "../tls_client/bin/tls-client-linux-${{ matrix.goarch }}${{ matrix.variant == 'lite' && '-lite' || '' }}${{ matrix.ext }}" .
+                   -o "../tls_client/bin/tls-client-linux-${{ matrix.goarch }}${{ matrix.ext }}" .
 
-      # 🌟 优化：对 Linux 跨平台 ELF 动态库追加 --shlib 与 --ultra-brute 压缩参数
-      - name: Strip & Compress
+      - name: Strip
         run: |
-          ${{ matrix.strip_cmd }} -R .comment -R .note.GNU-stack --strip-unneeded tls_client/bin/tls-client-linux-${{ matrix.goarch }}${{ matrix.variant == 'lite' && '-lite' || '' }}${{ matrix.ext }} || true
-          upx --ultra-brute --shlib tls_client/bin/tls-client-linux-${{ matrix.goarch }}${{ matrix.variant == 'lite' && '-lite' || '' }}${{ matrix.ext }} || true
+          ${{ matrix.strip_cmd }} -R .comment -R .note.GNU-stack --strip-unneeded tls_client/bin/tls-client-linux-${{ matrix.goarch }}${{ matrix.ext }} || true
 
       - name: Build Wheel
         run: |
@@ -419,25 +356,21 @@ jobs:
       - name: Upload Artifact
         uses: actions/upload-artifact@v4
         with:
-          name: wheel-linux-${{ matrix.goarch }}-${{ matrix.variant }}
+          name: wheel-linux-${{ matrix.goarch }}
           path: dist/*.whl
 
       - name: Upload Raw Binary Artifact
         uses: actions/upload-artifact@v4
         with:
-          name: bin-linux-${{ matrix.goarch }}-${{ matrix.variant }}
-          path: tls_client/bin/tls-client-linux-${{ matrix.goarch }}${{ matrix.variant == 'lite' && '-lite' || '' }}${{ matrix.ext }}
+          name: bin-linux-${{ matrix.goarch }}
+          path: tls_client/bin/tls-client-linux-${{ matrix.goarch }}${{ matrix.ext }}
 
   # -----------------------------------------------------------------------
   # 4. Native-compile and Pack for Alpine Linux (musl libc based)
   # -----------------------------------------------------------------------
   build-alpine:
-    name: Build Alpine-amd64 (musl, ${{ matrix.variant }})
+    name: Build Alpine-amd64 (musl)
     runs-on: ubuntu-latest
-    strategy:
-      fail-fast: false
-      matrix:
-        variant: [full, lite]
     container:
       image: golang:1.24-alpine
     steps:
@@ -445,7 +378,7 @@ jobs:
         uses: actions/checkout@v4
 
       - name: Install Build Dependencies
-        run: apk add --no-cache gcc musl-dev git binutils upx python3 py3-pip py3-build
+        run: apk add --no-cache gcc musl-dev git binutils python3 py3-pip py3-build
 
       - name: Build Core
         working-directory: cffi_binding
@@ -465,17 +398,15 @@ jobs:
           go build -buildmode=c-shared \
                    -buildvcs=false \
                    -trimpath \
-                   -tags="netgo osusergo musl${{ matrix.variant == 'lite' && ' tls_lite' || '' }}" \
+                   -tags="netgo osusergo musl" \
                    -gcflags="all=-trimpath=${{ github.workspace }}" \
                    -asmflags="all=-trimpath=${{ github.workspace }}" \
                    -ldflags="-s -w -buildid= -extldflags '-Wl,-s'" \
-                   -o "../tls_client/bin/tls-client-linux-amd64-musl${{ matrix.variant == 'lite' && '-lite' || '' }}.so" .
+                   -o "../tls_client/bin/tls-client-linux-amd64-musl.so" .
 
-      # 🌟 优化：对 Alpine 本地 ELF 动态库追加 --shlib 与 --ultra-brute 压缩参数
-      - name: Strip & Compress
+      - name: Strip
         run: |
-          strip -R .comment -R .note.GNU-stack --strip-unneeded tls_client/bin/tls-client-linux-amd64-musl${{ matrix.variant == 'lite' && '-lite' || '' }}.so || true
-          upx --ultra-brute --shlib tls_client/bin/tls-client-linux-amd64-musl${{ matrix.variant == 'lite' && '-lite' || '' }}.so || true
+          strip -R .comment -R .note.GNU-stack --strip-unneeded tls_client/bin/tls-client-linux-amd64-musl.so || true
 
       - name: Build Wheel
         run: |
@@ -485,14 +416,14 @@ jobs:
       - name: Upload Artifact
         uses: actions/upload-artifact@v4
         with:
-          name: wheel-alpine-amd64-${{ matrix.variant }}
+          name: wheel-alpine-amd64
           path: dist/*.whl
 
       - name: Upload Raw Binary Artifact
         uses: actions/upload-artifact@v4
         with:
-          name: bin-alpine-amd64-${{ matrix.variant }}
-          path: tls_client/bin/tls-client-linux-amd64-musl${{ matrix.variant == 'lite' && '-lite' || '' }}.so
+          name: bin-alpine-amd64
+          path: tls_client/bin/tls-client-linux-amd64-musl.so
 
   # -----------------------------------------------------------------------
   # 5. Build Source Distribution & Publish All Wheels to PyPI
