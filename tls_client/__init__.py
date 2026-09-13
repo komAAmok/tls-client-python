@@ -78,4 +78,4 @@ __all__ = [
     "status_codes",
     "structures",
 ]
-__version__ = "1.17.0.0"
+__version__ = "1.16.0.1"
