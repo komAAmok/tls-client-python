@@ -57,7 +57,7 @@ For a deep dive, see [this excellent article on TLS fingerprinting](https://http
 pip install tls-client-python
 ```
 
-Pre-compiled binaries are included for **9 platforms** — no Go toolchain required.
+Pre-compiled binaries are included for **12 platforms** (plus a macOS universal2 wheel) — no Go toolchain required.
 
 > **Requirements:** Python 3.6+
 
@@ -149,13 +149,17 @@ Pre-compiled native libraries are bundled for these platforms:
 |----|-------------|--------|
 | **Windows** | x86-64 | `tls-client-windows-amd64.dll` |
 | **Windows** | x86 (32-bit) | `tls-client-windows-386.dll` |
+| **Windows** | ARM64 | `tls-client-windows-arm64.dll` |
 | **macOS** | x86-64 | `tls-client-darwin-amd64.dylib` |
 | **macOS** | ARM64 (Apple Silicon) | `tls-client-darwin-arm64.dylib` |
+| **macOS** | Universal (both) | one `universal2` wheel, both binaries |
 | **Linux** | x86-64 (glibc) | `tls-client-linux-amd64.so` |
 | **Linux** | x86 (32-bit, glibc) | `tls-client-linux-386.so` |
 | **Linux** | ARM64 | `tls-client-linux-arm64.so` |
 | **Linux** | ARMv7 | `tls-client-linux-arm.so` |
-| **Alpine Linux** | x86-64 (musl) | `tls-client-alpine-amd64.so` |
+| **Linux** | x86-64 (musl) | `tls-client-linux-amd64-musl.so` |
+| **Linux** | ARM64 (musl) | `tls-client-linux-arm64-musl.so` |
+| **Linux** | ARMv7 (musl) | `tls-client-linux-arm-musl.so` |
 
 The correct binary is automatically selected at runtime. Override via `TLS_CLIENT_LIB` environment variable.
 
