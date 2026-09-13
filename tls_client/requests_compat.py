@@ -12,6 +12,8 @@ from http.client import responses as reason_phrases
 from urllib.parse import urlencode, urljoin, urlsplit, urlunsplit
 from urllib.request import getproxies
 
+from typing import Any, Dict, List, Optional, Tuple, Union
+
 from tls_client import exceptions
 from tls_client import _multipart_boundary
 from tls_client.auth import HTTPBasicAuth
@@ -20,6 +22,7 @@ from tls_client.hooks import default_hooks, dispatch_hook, merge_hooks
 from tls_client.structures import CaseInsensitiveDict
 from tls_client._core import Session as NativeSession, SUPPORTED_CLIENT_IDENTIFIERS
 from tls_client._core import _load_client_certificates, _resolve_proxy_url
+from tls_client._core import ClientIdentifiers, ProxyConfig
 
 
 REDIRECT_STATI = (301, 302, 303, 307, 308)
@@ -403,7 +406,172 @@ def _encoding_from_headers(headers):
 
 
 class Session(object):
-    def __init__(self, **options):
+    def __init__(
+        self,
+        *,
+        # ── 指纹 / 协议 ──  /  Fingerprint / Protocol ──
+        client_identifier: ClientIdentifiers = "chrome_120",
+        force_http1: bool = False,
+        disable_http3: bool = False,
+        with_protocol_racing: bool = False,
+        random_tls_extension_order: bool = True,
+        # ── 超时 / 重定向 ──  /  Timeout / Redirect ──
+        timeout: int = 30,
+        timeout_milliseconds: int = 0,
+        follow_redirects: bool = False,
+        # ── TLS / 证书 ──  /  TLS / Cert ──
+        verify: bool = True,
+        server_name_overwrite: Optional[str] = None,
+        # ── 代理 ──  /  Proxy ──
+        proxy: Optional[ProxyConfig] = None,
+        proxies: Optional[ProxyConfig] = None,
+        local_address: Optional[str] = None,
+        # ── 请求头控制 ──  /  Header Control ──
+        request_host_override: Optional[str] = None,
+        pseudo_header_order: Optional[List[str]] = None,
+        h3_pseudo_header_order: Optional[List[str]] = None,
+        default_headers: Optional[Dict[str, str]] = None,
+        headers: Optional[Dict[str, str]] = None,
+        connect_headers: Optional[Dict[str, str]] = None,
+        # ── 证书固定 ──  /  Certificate Pinning ──
+        certificate_pinning_hosts: Optional[Dict[str, List[str]]] = None,
+        with_default_bad_pin_handler: bool = False,
+        # ── Cookie ──
+        request_cookies: Optional[Dict[str, str]] = None,
+        cookies: Optional[Dict[str, str]] = None,
+        # ── 自定义 TLS ──  /  Custom TLS ──
+        custom_tls_client: Optional[Dict[str, Any]] = None,
+        client_certificates: Optional[List[Dict[str, bytes]]] = None,
+        # ── 连接池调优 ──  /  Connection Pool Tuning ──
+        max_idle_connections: int = 0,
+        max_idle_connections_per_host: int = 0,
+        max_connections_per_host: int = 0,
+        disable_keep_alives: bool = False,
+        disable_compression: bool = False,
+        idle_conn_timeout_seconds: int = 0,
+        max_response_header_bytes: int = 0,
+        write_buffer_size: int = 0,
+        read_buffer_size: int = 0,
+        # ── IP 协议栈控制 ──  /  IP Stack Control ──
+        disable_ipv4: bool = False,
+        disable_ipv6: bool = False,
+        # ── TCP/IP Fingerprint ──
+        tcp_ttl: int = 0,
+        tcp_window_size: int = 0,
+        tcp_window_scale: int = 0,
+        tcp_mss: int = 0,
+        # ── Cookie ──
+        allow_empty_cookies: bool = False,
+        without_cookie_jar: bool = False,
+        # ── requests 兼容属性 ──  /  requests-compatible ──
+        auth: Optional[Tuple[str, str]] = None,
+        params: Optional[Dict[str, str]] = None,
+        cert: Optional[Union[str, Tuple[str, str]]] = None,
+        stream: bool = False,
+        # ── 调试 / 安全 ──  /  Debug / Safety ──
+        catch_panics: bool = True,
+        with_debug: bool = False,
+        disable_session_tickets: bool = False,
+        tls_keylog_path: Optional[str] = None,
+        root_ca_pem: Optional[bytes] = None,
+        h2_max_data_frame_size: int = 0,
+        preface_ping_idle_ms: int = 0,
+        hpack_indexing_policy: str = "",
+        cookie_crumb: bool = False,
+        # ── ABI 3 — 细粒度指纹控制 ──  /  fine-grained fingerprint control ──
+        extension_permute_mode: int = 0,
+        extension_permute_prefix: int = 0,
+        h2_disable_priority_frames: bool = False,
+        header_order_by_dest: bool = False,
+        header_order_dest: Optional[str] = None,
+        tcp_dont_fragment: int = -1,
+        tcp_tos: int = -1,
+        tcp_no_delay: int = -1,
+        tcp_window_clamp: int = 0,
+        tcp_ip_id_mode: str = "",
+        fingerprint: Optional[str] = None,
+        # ── requests-compat 专属 ──  /  requests-compat only ──
+        hooks: Optional[Dict[str, Any]] = None,
+        max_redirects: int = 30,
+        trust_env: bool = True,
+        **kwargs,
+    ) -> None:
+        # Fold the explicitly-typed parameters back into a single options dict
+        # so the remainder of this method (unchanged) sees them exactly as it
+        # did before the signature was typed.  ``**kwargs`` still admits any
+        # extra native options passed programmatically.
+        options = dict(kwargs)
+        options.update({
+            "client_identifier": client_identifier,
+            "force_http1": force_http1,
+            "disable_http3": disable_http3,
+            "with_protocol_racing": with_protocol_racing,
+            "random_tls_extension_order": random_tls_extension_order,
+            "timeout": timeout,
+            "timeout_milliseconds": timeout_milliseconds,
+            "follow_redirects": follow_redirects,
+            "verify": verify,
+            "server_name_overwrite": server_name_overwrite,
+            "proxy": proxy,
+            "proxies": proxies,
+            "local_address": local_address,
+            "request_host_override": request_host_override,
+            "pseudo_header_order": pseudo_header_order,
+            "h3_pseudo_header_order": h3_pseudo_header_order,
+            "default_headers": default_headers,
+            "headers": headers,
+            "connect_headers": connect_headers,
+            "certificate_pinning_hosts": certificate_pinning_hosts,
+            "with_default_bad_pin_handler": with_default_bad_pin_handler,
+            "request_cookies": request_cookies,
+            "cookies": cookies,
+            "custom_tls_client": custom_tls_client,
+            "client_certificates": client_certificates,
+            "max_idle_connections": max_idle_connections,
+            "max_idle_connections_per_host": max_idle_connections_per_host,
+            "max_connections_per_host": max_connections_per_host,
+            "disable_keep_alives": disable_keep_alives,
+            "disable_compression": disable_compression,
+            "idle_conn_timeout_seconds": idle_conn_timeout_seconds,
+            "max_response_header_bytes": max_response_header_bytes,
+            "write_buffer_size": write_buffer_size,
+            "read_buffer_size": read_buffer_size,
+            "disable_ipv4": disable_ipv4,
+            "disable_ipv6": disable_ipv6,
+            "tcp_ttl": tcp_ttl,
+            "tcp_window_size": tcp_window_size,
+            "tcp_window_scale": tcp_window_scale,
+            "tcp_mss": tcp_mss,
+            "allow_empty_cookies": allow_empty_cookies,
+            "without_cookie_jar": without_cookie_jar,
+            "auth": auth,
+            "params": params,
+            "cert": cert,
+            "stream": stream,
+            "catch_panics": catch_panics,
+            "with_debug": with_debug,
+            "disable_session_tickets": disable_session_tickets,
+            "tls_keylog_path": tls_keylog_path,
+            "root_ca_pem": root_ca_pem,
+            "h2_max_data_frame_size": h2_max_data_frame_size,
+            "preface_ping_idle_ms": preface_ping_idle_ms,
+            "hpack_indexing_policy": hpack_indexing_policy,
+            "cookie_crumb": cookie_crumb,
+            "extension_permute_mode": extension_permute_mode,
+            "extension_permute_prefix": extension_permute_prefix,
+            "h2_disable_priority_frames": h2_disable_priority_frames,
+            "header_order_by_dest": header_order_by_dest,
+            "header_order_dest": header_order_dest,
+            "tcp_dont_fragment": tcp_dont_fragment,
+            "tcp_tos": tcp_tos,
+            "tcp_no_delay": tcp_no_delay,
+            "tcp_window_clamp": tcp_window_clamp,
+            "tcp_ip_id_mode": tcp_ip_id_mode,
+            "fingerprint": fingerprint,
+            "hooks": hooks,
+            "max_redirects": max_redirects,
+            "trust_env": trust_env,
+        })
         requested_identifier = options.get("client_identifier", "chrome_120")
         if requested_identifier not in SUPPORTED_CLIENT_IDENTIFIERS:
             raise ValueError("unsupported client_identifier %r" % requested_identifier)
@@ -660,15 +828,7 @@ def delete(url, **kwargs):
     return request("DELETE", url, **kwargs)
 
 
-# ``Session`` intentionally keeps a ``**options`` implementation so Requests
-# attributes can be normalised before constructing the native client.  Expose
-# the complete native keyword signature to inspect(), IDEs and ``help()`` so
-# TLS controls are discoverable at the public top level as well.
-_session_signature = inspect.signature(NativeSession)
-_session_parameters = list(_session_signature.parameters.values())
-_session_parameters.extend([
-    inspect.Parameter("hooks", inspect.Parameter.KEYWORD_ONLY, default=None),
-    inspect.Parameter("max_redirects", inspect.Parameter.KEYWORD_ONLY, default=30),
-    inspect.Parameter("trust_env", inspect.Parameter.KEYWORD_ONLY, default=True),
-])
-Session.__signature__ = _session_signature.replace(parameters=_session_parameters)
+# ``Session.__init__`` now declares the full native keyword signature directly
+# (plus the requests-only ``hooks``/``max_redirects``/``trust_env`` extras), so
+# both IDEs and ``inspect.signature()``/``help()`` see every TLS control without
+# needing the ``__signature__`` shim that ``**options`` previously required.

@@ -189,6 +189,25 @@ typedef struct {
 } ResponseResult;
 
 typedef struct {
+    const char* url;
+    const char* client_identifier;
+    int   force_http1;
+    HttpHeader* headers;
+    int   headers_len;
+    const char** header_order;
+    int   header_order_len;
+    int   read_buffer_size;
+    int   write_buffer_size;
+    int   handshake_timeout_milliseconds;
+} WebsocketOptions;
+
+typedef struct {
+    int   message_type;
+    const char* data;
+    int   data_len;
+} WebsocketMessage;
+
+typedef struct {
     long long total_evictions;       // cumulative entries evicted since process start
     long long last_eviction_count;   // entries evicted in the most recent scan
     long long last_eviction_time;    // UnixNano timestamp of the last eviction scan
@@ -212,6 +231,7 @@ import "C"
 
 import (
 	"bytes"
+	"context"
 	"crypto/sha256"
 	"crypto/x509"
 	"fmt"
@@ -231,6 +251,7 @@ import (
 	tls_client "github.com/bogdanfinn/tls-client"
 	"github.com/bogdanfinn/tls-client/profiles"
 	tls "github.com/bogdanfinn/utls"
+	websocket "github.com/bogdanfinn/websocket"
 )
 
 // ---------------------------------------------------------------------------
@@ -2165,6 +2186,239 @@ func RequestAsync(opts *C.RequestOptions, requestID C.uintptr_t, cb unsafe.Point
 	}()
 
 	return 0
+}
+
+// ---------------------------------------------------------------------------
+// WebSocket bridge — TLS-fingerprinted WebSocket connections.
+//
+// Go pointers never cross the C boundary (cgo forbids it), so both the
+// `*tls_client.Websocket` and the live `*websocket.Conn` are stored in
+// package-level maps keyed by an opaque, monotonically-increasing uint64.
+// Python holds the ID and passes it back for every operation.
+// ---------------------------------------------------------------------------
+
+var (
+	wsHandleSeq     atomic.Uint64
+	wsHandles       sync.Map // uint64 -> *tls_client.Websocket
+	wsConnHandleSeq atomic.Uint64
+	wsConnHandles   sync.Map // uint64 -> *websocket.Conn
+)
+
+func setWsErr(errMsg **C.char, msg string) {
+	if errMsg != nil {
+		*errMsg = C.CString(msg)
+	}
+}
+
+// buildWebsocketHeaders converts the C header array (+ optional header_order)
+// into the fhttp.Header the websocket dialer expects.  The header order is
+// carried through the fhttp HeaderOrderKey so the engine preserves the exact
+// wire order; when there are no headers at all it reports hasHeaders=false.
+func buildWebsocketHeaders(opts *C.WebsocketOptions) (http.Header, bool) {
+	if opts == nil {
+		return nil, false
+	}
+	hasHeaders := opts.headers != nil && int(opts.headers_len) > 0
+	hasOrder := opts.header_order != nil && int(opts.header_order_len) > 0
+	if !hasHeaders && !hasOrder {
+		return nil, false
+	}
+	h := http.Header{}
+	if hasHeaders {
+		h = cHeadersToHTTP(opts.headers, int(opts.headers_len))
+	}
+	if hasOrder {
+		h[http.HeaderOrderKey] = cStrSlice(opts.header_order, int(opts.header_order_len))
+	}
+	return h, true
+}
+
+//export WebsocketNew
+func WebsocketNew(opts *C.WebsocketOptions, errMsg **C.char) (id C.uintptr_t) {
+	defer func() {
+		if r := recover(); r != nil {
+			setWsErr(errMsg, fmt.Sprintf("go panic in WebsocketNew: %v", r))
+			id = 0
+		}
+	}()
+	if opts == nil {
+		setWsErr(errMsg, "websocket options are nil")
+		return 0
+	}
+	// WebSocket requires HTTP/1.1 — the TLS-fingerprinted client is obtained
+	// (or created) with forceHttp1 so its dialer is compatible.
+	cfg := &requestConfig{
+		clientIdentifier: C.GoString(opts.client_identifier),
+		forceHttp1:       true,
+	}
+	if opts.force_http1 != 0 {
+		cfg.forceHttp1 = true
+	}
+	client, err := getOrCreateClientFromConfig(cfg)
+	if err != nil {
+		setWsErr(errMsg, fmt.Sprintf("failed to obtain tls client: %v", err))
+		return 0
+	}
+
+	wsOpts := []tls_client.WebsocketOption{
+		tls_client.WithTlsClient(client),
+		tls_client.WithUrl(C.GoString(opts.url)),
+	}
+	if h, ok := buildWebsocketHeaders(opts); ok {
+		wsOpts = append(wsOpts, tls_client.WithHeaders(h))
+	}
+	if int(opts.read_buffer_size) > 0 {
+		wsOpts = append(wsOpts, tls_client.WithReadBufferSize(int(opts.read_buffer_size)))
+	}
+	if int(opts.write_buffer_size) > 0 {
+		wsOpts = append(wsOpts, tls_client.WithWriteBufferSize(int(opts.write_buffer_size)))
+	}
+	if int(opts.handshake_timeout_milliseconds) > 0 {
+		wsOpts = append(wsOpts, tls_client.WithHandshakeTimeoutMilliseconds(int(opts.handshake_timeout_milliseconds)))
+	}
+
+	ws, err := tls_client.NewWebsocket(nil, wsOpts...)
+	if err != nil {
+		setWsErr(errMsg, err.Error())
+		return 0
+	}
+	handle := wsHandleSeq.Add(1)
+	wsHandles.Store(handle, ws)
+	return C.uintptr_t(handle)
+}
+
+//export WebsocketConnect
+func WebsocketConnect(wsID C.uintptr_t, errMsg **C.char) (id C.uintptr_t) {
+	defer func() {
+		if r := recover(); r != nil {
+			setWsErr(errMsg, fmt.Sprintf("go panic in WebsocketConnect: %v", r))
+			id = 0
+		}
+	}()
+	v, ok := wsHandles.Load(uint64(wsID))
+	if !ok {
+		setWsErr(errMsg, "invalid websocket handle")
+		return 0
+	}
+	ws := v.(*tls_client.Websocket)
+	conn, err := ws.Connect(context.Background())
+	if err != nil {
+		setWsErr(errMsg, err.Error())
+		return 0
+	}
+	handle := wsConnHandleSeq.Add(1)
+	wsConnHandles.Store(handle, conn)
+	return C.uintptr_t(handle)
+}
+
+//export WebsocketReadMessage
+func WebsocketReadMessage(connID C.uintptr_t, errMsg **C.char) (msg *C.WebsocketMessage) {
+	defer func() {
+		if r := recover(); r != nil {
+			setWsErr(errMsg, fmt.Sprintf("go panic in WebsocketReadMessage: %v", r))
+			msg = nil
+		}
+	}()
+	v, ok := wsConnHandles.Load(uint64(connID))
+	if !ok {
+		setWsErr(errMsg, "invalid websocket connection handle")
+		return nil
+	}
+	conn := v.(*websocket.Conn)
+	messageType, data, err := conn.ReadMessage()
+	if err != nil {
+		setWsErr(errMsg, err.Error())
+		return nil
+	}
+	msg = (*C.WebsocketMessage)(C.malloc(C.size_t(unsafe.Sizeof(C.WebsocketMessage{}))))
+	if msg == nil {
+		setWsErr(errMsg, "failed to allocate websocket message")
+		return nil
+	}
+	msg.message_type = C.int(messageType)
+	msg.data_len = C.int(len(data))
+	if len(data) > 0 {
+		cdata := C.malloc(C.size_t(len(data)))
+		if cdata == nil {
+			C.free(unsafe.Pointer(msg))
+			setWsErr(errMsg, "failed to allocate websocket message body")
+			return nil
+		}
+		copy(unsafe.Slice((*byte)(cdata), len(data)), data)
+		msg.data = (*C.char)(cdata)
+	}
+	return msg
+}
+
+//export WebsocketWriteMessage
+func WebsocketWriteMessage(connID C.uintptr_t, messageType C.int, data *C.char, dataLen C.int, errMsg **C.char) (ret C.int) {
+	defer func() {
+		if r := recover(); r != nil {
+			setWsErr(errMsg, fmt.Sprintf("go panic in WebsocketWriteMessage: %v", r))
+			ret = -1
+		}
+	}()
+	v, ok := wsConnHandles.Load(uint64(connID))
+	if !ok {
+		setWsErr(errMsg, "invalid websocket connection handle")
+		return -1
+	}
+	conn := v.(*websocket.Conn)
+	if data == nil || int(dataLen) <= 0 {
+		setWsErr(errMsg, "empty websocket message body")
+		return -1
+	}
+	payload := C.GoBytes(unsafe.Pointer(data), dataLen)
+	if err := conn.WriteMessage(int(messageType), payload); err != nil {
+		setWsErr(errMsg, err.Error())
+		return -1
+	}
+	return 0
+}
+
+//export WebsocketClose
+func WebsocketClose(connID C.uintptr_t, errMsg **C.char) (ret C.int) {
+	defer func() {
+		if r := recover(); r != nil {
+			setWsErr(errMsg, fmt.Sprintf("go panic in WebsocketClose: %v", r))
+			ret = -1
+		}
+	}()
+	v, ok := wsConnHandles.Load(uint64(connID))
+	if !ok {
+		return 0 // already closed / unknown handle is a no-op
+	}
+	wsConnHandles.Delete(uint64(connID))
+	conn := v.(*websocket.Conn)
+	if err := conn.Close(); err != nil {
+		setWsErr(errMsg, err.Error())
+		return -1
+	}
+	return 0
+}
+
+//export WebsocketFreeMessage
+func WebsocketFreeMessage(msg *C.WebsocketMessage) {
+	if msg == nil {
+		return
+	}
+	if msg.data != nil {
+		C.free(unsafe.Pointer(msg.data))
+	}
+	C.free(unsafe.Pointer(msg))
+}
+
+//export WebsocketFreeHandle
+func WebsocketFreeHandle(handleID C.uintptr_t) {
+	wsConnHandles.Delete(uint64(handleID))
+	wsHandles.Delete(uint64(handleID))
+}
+
+//export FreeCString
+func FreeCString(s *C.char) {
+	if s != nil {
+		C.free(unsafe.Pointer(s))
+	}
 }
 
 func main() {}

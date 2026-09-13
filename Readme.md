@@ -33,6 +33,7 @@ For a deep dive, see [this excellent article on TLS fingerprinting](https://http
 | 🔀 **Redirect Control** | Choose whether to follow redirects per request |
 | 📊 **Bandwidth Tracking** | Monitor upload/download bytes in real time |
 | 🔄 **sync/Async** | `Session`  +  `AsyncSession` |
+| 🔌 **WebSocket** | TLS-fingerprinted WebSocket (HTTP/1.1 handshake) — `WebSocket` |
 | 🛡️ **Panic-proof** | All Go panics caught and surfaced as Python exceptions |
 | ⚙️ **Custom TLS** | Full 26-field custom TLS client configuration |
 | 🔬 **Chrome 99–153 Captures** | Byte-exact profiles for **every** Chrome major 99…153, recovered from live handshakes |
@@ -452,6 +453,42 @@ from tls_client.fingerprints import apply
 
 session = Session()
 apply(session, "chrome_150_linux")   # identifier + headers + permute + TCP
+```
+
+### WebSocket (TLS-fingerprinted)
+
+WebSocket connections reuse the same TLS fingerprint, connection pool and
+header ordering as regular requests.  The handshake is forced to HTTP/1.1
+(as the WebSocket upgrade requires it).
+
+```python
+from tls_client import WebSocket, TEXT, BINARY
+
+# The fingerprint client is created from client_identifier (HTTP/1.1 enforced).
+ws = WebSocket(url="wss://echo.websocket.events", client_identifier="chrome_131")
+
+conn = ws.connect()                       # blocking handshake
+conn.send_text("hello")                   # UTF-8 text frame
+conn.send_binary(b"\x00\x01\x02")         # binary frame
+
+message_type, data = conn.read_message()  # (TEXT=1, b"...") — blocks
+
+conn.close()
+ws.close()
+```
+
+`read_message()` returns a `(message_type, data)` tuple where `message_type` is
+one of `TEXT`/`BINARY`/`CLOSE`/`PING`/`PONG`; it returns `None` on a clean
+close.  Handshake headers and their wire order are controllable:
+
+```python
+ws = WebSocket(
+    url="wss://example.com/ws",
+    client_identifier="firefox_148",
+    headers={"User-Agent": "MyBot/1.0", "Origin": "https://example.com"},
+    header_order=["host", "upgrade", "connection", "user-agent"],
+    handshake_timeout_milliseconds=10000,
+)
 ```
 
 ### Build Tiers

@@ -75,6 +75,23 @@ typedef struct {
     HttpHeader* cookies;
     int   cookies_len;
 } ResponseResult;
+typedef struct {
+    const char* url;
+    const char* client_identifier;
+    int   force_http1;
+    HttpHeader* headers;
+    int   headers_len;
+    const char** header_order;
+    int   header_order_len;
+    int   read_buffer_size;
+    int   write_buffer_size;
+    int   handshake_timeout_milliseconds;
+} WebsocketOptions;
+typedef struct {
+    int   message_type;
+    const char* data;
+    int   data_len;
+} WebsocketMessage;
 """
 
 
@@ -90,6 +107,7 @@ _GO_C_TYPE_MAP = {
     "C.size_t": "size_t",
     "unsafe.Pointer": "void*",
     "*C.char": "char*",
+    "**C.char": "char**",
     "C.char": "char",
 }
 

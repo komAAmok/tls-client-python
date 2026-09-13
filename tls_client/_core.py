@@ -152,10 +152,10 @@ class Request(TypedDict, total=False):
 
     Request body as raw bytes.
     """
-    client_identifier: Optional[str]
-    """TLS 指纹标识。
+    client_identifier: Optional[ClientIdentifiers]
+    """TLS 指纹标识。可为 :data:`ClientIdentifiers` 中的任一浏览器指纹。
 
-    TLS fingerprint identifier.
+    TLS fingerprint identifier — one of :data:`ClientIdentifiers`.
     """
     timeout: Optional[int]
     """超时时间（秒）。
@@ -366,6 +366,99 @@ class Request(TypedDict, total=False):
     Client certificate list for mTLS mutual authentication.
 
     Each element is ``{'cert_pem': bytes, 'key_pem': bytes}``.
+    """
+    # ── ABI 2 / 2.1 高级 TLS 控制 ──  /  Advanced TLS controls ──
+    disable_session_tickets: Optional[bool]
+    """是否禁用 TLS session tickets。
+
+    Whether to disable TLS session tickets.
+    """
+    tls_keylog_path: Optional[str]
+    """TLS keylog 文件路径，用于 Wireshark 解密调试。
+
+    TLS keylog file path for Wireshark decryption debugging.
+    """
+    root_ca_pem: Optional[bytes]
+    """自定义 CA 证书 PEM 内容，用于 TLS 校验。
+
+    Custom CA certificate PEM bytes for TLS verification.
+    """
+    h2_max_data_frame_size: Optional[int]
+    """HTTP/2 单帧 DATA 载荷上限（字节）。
+
+    HTTP/2 per-DATA-frame payload cap (bytes).
+    """
+    preface_ping_idle_ms: Optional[int]
+    """空闲 HTTP/2 连接发送 PING 的阈值（毫秒）。
+
+    Preface-ping idle threshold (ms) for idle HTTP/2 connections.
+    """
+    hpack_indexing_policy: Optional[str]
+    """HPACK 索引策略（如 ``"chrome"``）。
+
+    HPACK indexing policy (e.g. ``"chrome"``).
+    """
+    cookie_crumb: Optional[bool]
+    """是否将 Cookie 头按 cookie-pair 拆分发送。
+
+    Whether to split the Cookie header per cookie-pair.
+    """
+    # ── ABI 3 细粒度指纹控制 ──  /  Fine-grained fingerprint controls ──
+    extension_permute_mode: Optional[int]
+    """TLS 扩展乱序策略：``0``=off, ``1``=chrome, ``2``=all, ``3``=prefix。
+
+    Extension-order permutation policy: ``0``=off, ``1``=chrome, ``2``=all,
+    ``3``=prefix.
+    """
+    extension_permute_prefix: Optional[int]
+    """前缀长度（仅 ``extension_permute_mode=3`` 时生效）：前 N 个扩展保持原位。
+
+    Prefix length (only when ``extension_permute_mode=3``): keep the first N
+    extensions in place.
+    """
+    h2_disable_priority_frames: Optional[bool]
+    """是否抑制 RFC 7540 PRIORITY 帧与 HEADERS 优先级标志。
+
+    Whether to suppress RFC 7540 PRIORITY frames / HEADERS priority flag.
+    """
+    header_order_by_dest: Optional[bool]
+    """是否按 Sec-Fetch-Dest 自动选择浏览器真实请求头顺序。
+
+    Whether to derive header order from Sec-Fetch-Dest instead of
+    ``header_order``.
+    """
+    header_order_dest: Optional[str]
+    """显式指定 Sec-Fetch-Dest 值（留空则由请求头推断）。
+
+    Explicit Sec-Fetch-Dest value (empty = infer from request headers).
+    """
+    tcp_dont_fragment: Optional[int]
+    """TCP DF 位：``-1``/``None`` 沿用预设，``0`` 清位，``1`` 置位。
+
+    TCP Don't-Fragment flag: ``-1``/``None`` keeps the profile default,
+    ``0`` clears, ``1`` sets.
+    """
+    tcp_tos: Optional[int]
+    """TCP 服务类型字段（TOS/DSCP）。``-1``/``None`` 沿用预设。
+
+    TCP Type-of-Service byte. ``-1``/``None`` keeps the profile default.
+    """
+    tcp_no_delay: Optional[int]
+    """TCP Nagle 算法：``-1``/``None`` 沿用预设，``0`` 开启，``1`` 关闭。
+
+    TCP_NODELAY: ``-1``/``None`` keeps the profile default, ``0`` enables
+    Nagle, ``1`` disables it.
+    """
+    tcp_window_clamp: Optional[int]
+    """TCP 接收窗口钳制值。``0``=不钳制。
+
+    TCP receive-window clamp. ``0`` = no clamp.
+    """
+    tcp_ip_id_mode: Optional[str]
+    """IP 分片 ID 生成模式（如 ``"random"``、``"zero"``、``"increment"``）。
+
+    IP fragmentation ID generation mode (e.g. ``"random"``, ``"zero"``,
+    ``"increment"``).
     """
 
 
@@ -1096,6 +1189,25 @@ typedef struct {
     char* _resp_strings;
 } ResponseResult;
 
+typedef struct {
+    const char* url;
+    const char* client_identifier;
+    int   force_http1;
+    HttpHeader* headers;
+    int   headers_len;
+    const char** header_order;
+    int   header_order_len;
+    int   read_buffer_size;
+    int   write_buffer_size;
+    int   handshake_timeout_milliseconds;
+} WebsocketOptions;
+
+typedef struct {
+    int   message_type;
+    const char* data;
+    int   data_len;
+} WebsocketMessage;
+
 ResponseResult* ExecuteRequest(RequestOptions* opts);
 void           FreeResponse(ResponseResult* res);
 void           ClearClientPool(void);
@@ -1108,6 +1220,15 @@ char*          ResolveECHConfig(char* host);
 
 typedef void (*async_callback_fn)(uintptr_t request_id, ResponseResult* response);
 int            RequestAsync(RequestOptions* opts, uintptr_t request_id, async_callback_fn cb);
+
+uintptr_t       WebsocketNew(WebsocketOptions* opts, char** err_msg);
+uintptr_t       WebsocketConnect(uintptr_t ws_id, char** err_msg);
+WebsocketMessage* WebsocketReadMessage(uintptr_t conn_id, char** err_msg);
+int             WebsocketWriteMessage(uintptr_t conn_id, int message_type, const char* data, int data_len, char** err_msg);
+int             WebsocketClose(uintptr_t conn_id, char** err_msg);
+void            WebsocketFreeMessage(WebsocketMessage* msg);
+void            WebsocketFreeHandle(uintptr_t handle_id);
+void            FreeCString(char* s);
 """
 
 # ---------------------------------------------------------------------------

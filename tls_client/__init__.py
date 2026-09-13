@@ -39,6 +39,15 @@ from tls_client import ech, fingerprints
 from tls_client._multipart_boundary import blink_boundary, boundary, gecko_boundary
 from tls_client.context import RequestContext
 from tls_client.status_codes import codes
+from tls_client.websocket import (
+    BINARY,
+    CLOSE,
+    PING,
+    PONG,
+    TEXT,
+    WebSocket,
+    WebSocketConnection,
+)
 
 __all__ = [
     "Session",
@@ -76,5 +85,12 @@ __all__ = [
     "gecko_boundary",
     "status_codes",
     "structures",
+    "WebSocket",
+    "WebSocketConnection",
+    "TEXT",
+    "BINARY",
+    "CLOSE",
+    "PING",
+    "PONG",
 ]
-__version__ = "1.16.0.2"
+__version__ = "1.16.0.3"
