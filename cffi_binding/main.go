@@ -1700,6 +1700,18 @@ func executeRequestFromConfig(cfg *requestConfig) *C.ResponseResult {
 	}
 
 	if len(cfg.headers) > 0 {
+		// net/http derives Content-Length from the bytes.Reader passed to
+		// NewRequest.  Keeping a caller-supplied Content-Length in Header as
+		// well makes the transport emit it twice (the debug trace shows
+		// ``Content-Length:[86 86]``), which strict nginx/Tengine frontends
+		// reject with HTTP 400.  The request body length computed by
+		// NewRequest is authoritative; drop the ordinary header copy.
+		for key := range cfg.headers {
+			if strings.EqualFold(key, "Content-Length") {
+				delete(cfg.headers, key)
+			}
+		}
+
 		if cfg.headerOrderByDest {
 			// Destination-aware ordering: pick the order Chrome/Firefox/Safari
 			// uses for this Sec-Fetch-Dest instead of a single session order.
