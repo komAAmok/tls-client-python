@@ -35,14 +35,14 @@ class RequestContext:
     """
 
     __slots__ = (
-        "mode",
         "dest",
-        "site",
-        "user_triggered",
+        "incremental",
+        "mode",
         "referrer",
+        "site",
         "target_url",
         "urgency",
-        "incremental",
+        "user_triggered",
     )
 
     def __init__(

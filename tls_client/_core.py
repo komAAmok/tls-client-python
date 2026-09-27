@@ -492,13 +492,13 @@ class Response:
     """
 
     __slots__ = (
-        "_status_code",
-        "_headers",
         "_content",
-        "_text",
-        "_encoding",
-        "_url",
         "_cookies",
+        "_encoding",
+        "_headers",
+        "_status_code",
+        "_text",
+        "_url",
         "_used_protocol",
     )
 
@@ -2631,6 +2631,180 @@ class Session:
     def stream(self, value: bool) -> None:
         self._set_default("stream", 1 if value else 0)
 
+    # -- ABI 2 / ABI 3 controls (writable after construction) ---------------
+
+    @property
+    def disable_session_tickets(self) -> bool:
+        """是否禁用 TLS session tickets (ABI 2) / Disable TLS session tickets."""
+        return bool(self._get_default("disable_session_tickets"))
+
+    @disable_session_tickets.setter
+    def disable_session_tickets(self, value: bool) -> None:
+        self._set_default("disable_session_tickets", 1 if value else 0)
+
+    @property
+    def tls_keylog_path(self) -> Optional[str]:
+        """TLS keylog 输出路径 (ABI 2) / TLS keylog output path."""
+        return self._get_default("tls_keylog_path")
+
+    @tls_keylog_path.setter
+    def tls_keylog_path(self, value: Optional[str]) -> None:
+        self._set_default("tls_keylog_path", value)
+
+    @property
+    def root_ca_pem(self) -> Optional[bytes]:
+        """自定义根 CA PEM (ABI 2) / Custom root CA PEM bytes."""
+        return self._get_default("root_ca_pem")
+
+    @root_ca_pem.setter
+    def root_ca_pem(self, value: Optional[bytes]) -> None:
+        self._set_default("root_ca_pem", value)
+
+    @property
+    def h2_max_data_frame_size(self) -> int:
+        """HTTP/2 DATA 帧上限 (ABI 2.1) / HTTP/2 max DATA frame size."""
+        return self._get_default("h2_max_data_frame_size")
+
+    @h2_max_data_frame_size.setter
+    def h2_max_data_frame_size(self, value: int) -> None:
+        self._set_default("h2_max_data_frame_size", value)
+
+    @property
+    def preface_ping_idle_ms(self) -> int:
+        """空闲 PING 阈值 (ABI 2.1) / Preface PING idle threshold."""
+        return self._get_default("preface_ping_idle_ms")
+
+    @preface_ping_idle_ms.setter
+    def preface_ping_idle_ms(self, value: int) -> None:
+        self._set_default("preface_ping_idle_ms", value)
+
+    @property
+    def hpack_indexing_policy(self) -> str:
+        """HPACK 索引策略 (ABI 2.1) / HPACK indexing policy."""
+        return self._get_default("hpack_indexing_policy")
+
+    @hpack_indexing_policy.setter
+    def hpack_indexing_policy(self, value: str) -> None:
+        self._set_default("hpack_indexing_policy", value)
+
+    @property
+    def cookie_crumb(self) -> bool:
+        """Cookie 拆分 (ABI 2.1) / Split cookies into crumbs."""
+        return bool(self._get_default("cookie_crumb"))
+
+    @cookie_crumb.setter
+    def cookie_crumb(self, value: bool) -> None:
+        self._set_default("cookie_crumb", 1 if value else 0)
+
+    # -- ABI 3 — 细粒度指纹控制 / fine-grained fingerprint control ---------
+
+    @property
+    def extension_permute_mode(self) -> int:
+        """扩展乱序策略: 0=off, 1=chrome, 2=all, 3=prefix (ABI 3)."""
+        return self._get_default("extension_permute_mode")
+
+    @extension_permute_mode.setter
+    def extension_permute_mode(self, value: int) -> None:
+        self._set_default("extension_permute_mode", value)
+
+    @property
+    def extension_permute_prefix(self) -> int:
+        """前缀长度（仅 mode=3） / Prefix length (mode=3 only)."""
+        return self._get_default("extension_permute_prefix")
+
+    @extension_permute_prefix.setter
+    def extension_permute_prefix(self, value: int) -> None:
+        self._set_default("extension_permute_prefix", value)
+
+    @property
+    def h2_disable_priority_frames(self) -> bool:
+        """抑制 HTTP/2 PRIORITY 帧 (ABI 3) / Suppress PRIORITY frames."""
+        return bool(self._get_default("h2_disable_priority_frames"))
+
+    @h2_disable_priority_frames.setter
+    def h2_disable_priority_frames(self, value: bool) -> None:
+        self._set_default("h2_disable_priority_frames", 1 if value else 0)
+
+    @property
+    def header_order_by_dest(self) -> bool:
+        """按 Sec-Fetch-Dest 选择浏览器真实头序 (ABI 3)."""
+        return bool(self._get_default("header_order_by_dest"))
+
+    @header_order_by_dest.setter
+    def header_order_by_dest(self, value: bool) -> None:
+        self._set_default("header_order_by_dest", 1 if value else 0)
+
+    @property
+    def header_order_dest(self) -> str:
+        """显式目的类型（留空自动推断） / Explicit Sec-Fetch-Dest value."""
+        return self._get_default("header_order_dest")
+
+    @header_order_dest.setter
+    def header_order_dest(self, value: str) -> None:
+        self._set_default("header_order_dest", value or "")
+
+    @property
+    def tcp_dont_fragment(self) -> int:
+        """IP DF 位: -1=auto, 0=clear, 1=set (ABI 3)."""
+        return self._get_default("tcp_dont_fragment", -1)
+
+    @tcp_dont_fragment.setter
+    def tcp_dont_fragment(self, value: int) -> None:
+        self._set_default("tcp_dont_fragment", value)
+
+    @property
+    def tcp_tos(self) -> int:
+        """IP TOS / DSCP 值: -1=auto (ABI 3)."""
+        return self._get_default("tcp_tos", -1)
+
+    @tcp_tos.setter
+    def tcp_tos(self, value: int) -> None:
+        self._set_default("tcp_tos", value)
+
+    @property
+    def tcp_no_delay(self) -> int:
+        """TCP_NODELAY: -1=auto, 0=off, 1=on (ABI 3)."""
+        return self._get_default("tcp_no_delay", -1)
+
+    @tcp_no_delay.setter
+    def tcp_no_delay(self, value: int) -> None:
+        self._set_default("tcp_no_delay", value)
+
+    @property
+    def tcp_window_clamp(self) -> int:
+        """TCP 窗口钳制值 (ABI 3) / TCP window clamp."""
+        return self._get_default("tcp_window_clamp")
+
+    @tcp_window_clamp.setter
+    def tcp_window_clamp(self, value: int) -> None:
+        self._set_default("tcp_window_clamp", value)
+
+    @property
+    def tcp_ip_id_mode(self) -> str:
+        """IP ID 生成模式 (ABI 3) / IP ID generation mode."""
+        return self._get_default("tcp_ip_id_mode")
+
+    @tcp_ip_id_mode.setter
+    def tcp_ip_id_mode(self, value: str) -> None:
+        self._set_default("tcp_ip_id_mode", value or "")
+
+    @property
+    def fingerprint(self) -> Optional[str]:
+        """指纹预设名 / Fingerprint preset name (tls_client.fingerprints).
+
+        Assigning a preset re-applies the whole bundle (client profile,
+        per-OS header block, pseudo-header order) to this session.
+        """
+        return self._get_default("fingerprint")
+
+    @fingerprint.setter
+    def fingerprint(self, value: Optional[str]) -> None:
+        self._set_default("fingerprint", value)
+        if value is not None:
+            from tls_client.fingerprints import apply as _apply_fingerprint
+
+            _apply_fingerprint(self, value)
+
     def __init__(
         self,
         *,
@@ -2870,9 +3044,7 @@ class Session:
         # default headers so TLS fingerprint and headers stay consistent.
         self._headers_customized = default_headers is not None or headers is not None
         if fingerprint is not None:
-            from tls_client.fingerprints import apply as _apply_fingerprint
-
-            _apply_fingerprint(self, fingerprint)
+            self.fingerprint = fingerprint
 
     def stream_to_file(
         self,
@@ -4369,7 +4541,7 @@ class AsyncSession:
         opts.tcp_mss = resolved["tcp_mss"]
         opts.catch_panics = resolved["catch_panics"]
         opts.with_debug = resolved["with_debug"]
-      
+
 
         # String fields
         for name, field in [

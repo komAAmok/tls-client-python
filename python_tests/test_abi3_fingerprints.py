@@ -11,9 +11,9 @@ import unittest
 from tls_client._core import (
     _INT_REQUEST_KEYS,
     _TRISTATE_REQUEST_KEYS,
-    _normalize_int_fields,
     ASYNC_REQUEST_DEFAULT_KEYS,
     SYNC_REQUEST_DEFAULT_KEYS,
+    _normalize_int_fields,
 )
 
 ABI3_REQUEST_KEYS = (
@@ -159,7 +159,7 @@ class PresetApplyTests(unittest.TestCase):
 
     class _FakeSession:
         def __init__(self):
-            self.defaults = {k: None for k in SYNC_REQUEST_DEFAULT_KEYS}
+            self.defaults = dict.fromkeys(SYNC_REQUEST_DEFAULT_KEYS)
             self.client_identifier = None
             self.with_random_tls_extension_order = False
             self.pseudo_header_order = None

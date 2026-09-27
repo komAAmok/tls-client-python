@@ -27,8 +27,8 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 from tls_client._core import (
     DEFAULT_HEADERS,
-    Session,
     AsyncSession,
+    Session,
     _pending_requests,
 )
 
@@ -124,6 +124,7 @@ def _pool_entries():
     shared library (GetPoolStats is exported but not in the Python CDEF)."""
     try:
         from cffi import FFI
+
         from tls_client import _core
 
         ffi = FFI()
@@ -148,7 +149,8 @@ def _pool_entries():
 
 def _process_worker(args):
     port, first, second = args
-    from tls_client._core import DEFAULT_HEADERS as DH, Session
+    from tls_client._core import DEFAULT_HEADERS as DH
+    from tls_client._core import Session
 
     session = Session(client_identifier=first, timeout=15)
     ua1 = session.get("http://127.0.0.1:%d/" % port).json()["ua"]
@@ -321,11 +323,11 @@ class FingerprintPairingTests(unittest.TestCase):
         with concurrent.futures.ThreadPoolExecutor(max_workers=6) as pool:
             futures = [pool.submit(switcher) for _ in range(2)]
             futures += [pool.submit(requester) for _ in range(4)]
-            done, stuck = concurrent.futures.wait(futures, timeout=120)
+            _done, stuck = concurrent.futures.wait(futures, timeout=120)
             self.assertFalse(stuck, "concurrent switch/request deadlocked")
 
         self.assertEqual(errors, [])
-        expected = set(_ua(identifier) for identifier in _IDS)
+        expected = {_ua(identifier) for identifier in _IDS}
         self.assertTrue(seen_ua.issubset(expected), seen_ua - expected)
 
 

@@ -9,7 +9,7 @@ import unittest
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 import tls_client
-from tls_client._core import Session, AsyncSession
+from tls_client._core import AsyncSession, Session
 from tls_client._multipart_boundary import blink_boundary, boundary, gecko_boundary
 from tls_client.context import (
     RequestContext,
@@ -21,6 +21,8 @@ from tls_client.context import (
 )
 from tls_client.fingerprints import (
     apply as apply_preset,
+)
+from tls_client.fingerprints import (
     list_presets,
     load_preset_file,
     resolve,
@@ -93,8 +95,8 @@ class RegistryTests(unittest.TestCase):
 
     def test_load_preset_file(self):
         import json
-        import tempfile
         import os
+        import tempfile
 
         data = {
             "name": "my_custom_preset",

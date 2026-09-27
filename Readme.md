@@ -2,6 +2,10 @@
 
 > **维护边界：** Go 引擎同步自上游，本项目的 Python/CFFI 扩展及冲突保留规则见
 > [`UPSTREAM_SYNC.md`](UPSTREAM_SYNC.md)。日常修改请勿直接改动上游归属区域。
+>
+> **Requests 兼容层：** 请求 API 的完整清单、兼容契约与生成式约束见
+> [`docs/REQUESTS_API.md`](docs/REQUESTS_API.md)。静态扫描入口：
+> `python3 -m tls_client._static_scan`。
 
 [![PyPI version](https://img.shields.io/pypi/v/tls-client-python)](https://pypi.org/project/tls-client-python/)
 [![Python](https://img.shields.io/pypi/pyversions/tls-client-python)](https://pypi.org/project/tls-client-python/)

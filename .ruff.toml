@@ -1,0 +1,72 @@
+# Static analysis for the Python surface.
+#
+# Run the fast subset locally with:
+#     ruff check tls_client python_tests
+#     ruff format --check tls_client python_tests
+#
+# The Requests-compatibility surface has its own semantic scanner, which knows
+# things a linter cannot (does session.tcp_mss exist as a property?  does every
+# verb declare the requests arguments explicitly?):
+#     python3 -m tls_client._static_scan
+
+# The package still declares ">=3.6, <3.15" in pyproject.toml, so the
+# typing.List / typing.Dict spellings are deliberate and PEP 585 builtins are
+# not available everywhere we run.
+target-version = "py37"
+line-length = 100
+
+exclude = [
+    ".git",
+    ".venv",
+    "build",
+    "dist",
+    "third_party",
+    # Fragment templates: they contain the __INIT_PARAMS__ placeholder and are
+    # only valid after tools/gen_sessions.py substitutes it.
+    "tools/_sessions_header.py",
+    "tools/_sessions_body.py",
+]
+
+[lint]
+select = [
+    "E",     # pycodestyle errors
+    "W",     # pycodestyle warnings
+    "F",     # pyflakes
+    "I",     # isort
+    "B",     # flake8-bugbear
+    "C4",    # flake8-comprehensions
+    "T10",   # flake8-debugger
+    "RUF",   # ruff-specific
+]
+ignore = [
+    "E203",   # whitespace before ':' - conflicts with black-style slices
+    "E501",   # line length is handled by the formatter
+    "E731",   # lambdas are used as tiny local shims in a few places
+    "B008",   # function call in default argument (typing patterns)
+    "B007",   # unused loop variable (used for tuple unpacking symmetry)
+    "B010",   # setattr with a constant name (the property surface needs it)
+    "B018",   # "useless" expression: the property surface documents by example
+    "B028",   # stacklevel on warnings (raise-site clarity beats stacklevel here)
+    "B904",   # raise-from: the exception identity is the contract here
+    "RUF001", # ambiguous unicode in docstrings (bilingual comments)
+    "RUF002",
+    "RUF003",
+    "RUF012", # mutable class attribute without ClassVar
+]
+
+[lint.per-file-ignores]
+# _core.py is curated around the CFFI CDEF and mirrors the Go struct order;
+# reordering its imports or "simplifying" its branches is not safe.
+"tls_client/_core.py" = ["E402", "F401", "F841", "I001"]
+# The generated surface repeats a uniform property body by construction.
+"tls_client/_tls_surface.py" = ["F811"]
+# Tests import after sys.path manipulation to reach the checkout.
+"python_tests/*.py" = ["E402", "F401"]
+"tools/*.py" = ["E402"]
+
+[lint.isort]
+known-first-party = ["tls_client"]
+
+[format]
+quote-style = "double"
+indent-style = "space"

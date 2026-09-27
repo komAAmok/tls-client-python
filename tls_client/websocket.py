@@ -224,7 +224,7 @@ class WebSocket:
         """Release the client handle (idempotent)."""
         if self._closed:
             return
-        ffi, lib = _core._get_ffi()
+        _ffi, lib = _core._get_ffi()
         lib.WebsocketFreeHandle(self._ws_id)
         self._ws_id = 0
         self._closed = True

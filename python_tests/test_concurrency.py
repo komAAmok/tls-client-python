@@ -27,16 +27,15 @@ from tls_client import _core
 from tls_client._core import (
     AsyncSession,
     Session,
-    _pending_lock,
-    _pending_requests,
     _apply_future_state,
     _compute_cache_key_hash,
     _defensive_timeout_seconds,
     _drop_pending_request,
     _normalize_int_fields,
     _on_zombie_timeout,
+    _pending_lock,
+    _pending_requests,
 )
-
 
 # ---------------------------------------------------------------------------
 # Local test server

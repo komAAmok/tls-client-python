@@ -1744,7 +1744,12 @@ func executeRequestFromConfig(cfg *requestConfig) *C.ResponseResult {
 	// (which may be replaced by DecompressBodyByType below).
 	defer func() { resp.Body.Close() }()
 
-	if !cfg.disableCompression && !resp.Uncompressed {
+	// A response to HEAD (and to 1xx/204/304) has no body by definition, but
+	// Content-Length may still describe the representation the server *would*
+	// have sent.  Reading it as a body blocks until the connection closes and
+	// then fails with an unexpected EOF, so force the empty-body path here.
+	bodyless := responseHasNoBody(resp)
+	if !bodyless && !cfg.disableCompression && !resp.Uncompressed {
 		ce := resp.Header.Get("Content-Encoding")
 		resp.Body = http.DecompressBodyByType(resp.Body, ce)
 	}
@@ -1752,7 +1757,10 @@ func executeRequestFromConfig(cfg *requestConfig) *C.ResponseResult {
 	var respBody []byte
 	var readErr error
 	var bodyDirectToC bool
-	if cfg.streamOutputPath != "" {
+	if bodyless {
+		// Leave result.body nil and result.body_len 0: the status line and the
+		// headers are the whole response.
+	} else if cfg.streamOutputPath != "" {
 		respBody, readErr = readBodyStreamToFileFromConfig(resp.Body, cfg)
 	} else if cBody, cLen, cErr := readBodyToCHeap(resp.Body, resp.ContentLength); cBody != nil {
 		// Fast path: body read directly into C heap — no Go intermediate.
@@ -1796,6 +1804,27 @@ func executeRequestFromConfig(cfg *requestConfig) *C.ResponseResult {
 	}
 
 	return result
+}
+
+// responseHasNoBody reports whether the response carries no payload at all.
+//
+// A HEAD response has the header block of the equivalent GET but never a body,
+// and Content-Length may still be present: the server is describing the
+// representation it would have sent.  RFC 9110 section 9.3.2 also excludes
+// bodies from 1xx, 204 and 304 responses.  Treating the advertised length as a
+// body makes the read block until the peer closes the connection and then fail
+// with an unexpected EOF, which is what every HEAD request used to do against
+// a keep-alive server.
+func responseHasNoBody(resp *http.Response) bool {
+	if resp == nil {
+		return false
+	}
+	if resp.Request != nil && resp.Request.Method == "HEAD" {
+		return true
+	}
+	// 1xx, 204 and 304 are defined without a payload as well.
+	return resp.StatusCode == 204 || resp.StatusCode == 304 ||
+		(resp.StatusCode >= 100 && resp.StatusCode < 200)
 }
 
 func readBodyStreamToFileFromConfig(body io.Reader, cfg *requestConfig) ([]byte, error) {

@@ -1,5 +1,5 @@
-import json
 import inspect
+import json
 import unittest
 
 import tls_client

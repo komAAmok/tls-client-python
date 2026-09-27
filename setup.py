@@ -3,10 +3,11 @@
 Modern Python versions use the PEP 621 metadata in pyproject.toml. Python 3.6
 needs a setuptools release older than PEP 621, so the same essentials live here.
 
-The package version has a single source of truth: ``tls_client/__init__.py``
-(``__version__``).  Both this file and ``pyproject.toml`` (via ``dynamic =
-["version"]`` / ``attr = "tls_client.__version__"``) read it from there, so a
-release bump only ever touches one place.
+The package version has a single source of truth:
+``tls_client/__version__.py`` (``__version__``), which ``tls_client/__init__.py``
+re-exports.  Both this file and ``pyproject.toml`` (via ``dynamic = ["version"]``
+/ ``attr = "tls_client.__version__"``) read it from there, so a release bump only
+ever touches one place.
 """
 
 import os
@@ -19,12 +20,14 @@ _HERE = os.path.abspath(os.path.dirname(__file__))
 
 
 def _read_version():
-    """Return the package version from ``tls_client/__init__.py``.
+    """Return the package version from ``tls_client/__version__.py``.
 
     Read statically (regex) rather than importing the package, so building does
-    not require ``cffi`` or a loadable native library at metadata time.
+    not require ``cffi`` or a loadable native library at metadata time.  The
+    regex is anchored to the start of a line with no indentation, so it cannot
+    pick up the ``__version__`` name inside ``__all__`` or a docstring.
     """
-    path = os.path.join(_HERE, "tls_client", "__init__.py")
+    path = os.path.join(_HERE, "tls_client", "__version__.py")
     with open(path, "r", encoding="utf-8") as handle:
         source = handle.read()
     match = re.search(r'^__version__\s*=\s*["\']([^"\']+)["\']', source, re.M)

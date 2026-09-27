@@ -88,6 +88,27 @@ jobs:
           python3 -m unittest python_tests.test_export_parity -v
           python3 -m unittest python_tests.test_session_signature_parity -v
 
+      # The requests-compatible facade is generated from the native Session
+      # signature.  A stale artefact means the two disagree about which knobs
+      # exist, which is exactly the drift the static scan exists to catch.
+      - name: Check the requests surface is regenerated
+        run: |
+          python3 tools/gen_requests_surface.py --check
+          python3 tools/gen_sessions.py --check
+
+      - name: Static scan (requests API surface)
+        run: python3 -m tls_client._static_scan --json
+
+      - name: Lint the Python surface
+        run: |
+          python3 -m pip install --upgrade ruff
+          ruff check tls_client python_tests tools
+
+      - name: Requests compatibility tests
+        run: |
+          python3 -m unittest python_tests.test_requests_api_parity -v
+          python3 -m unittest python_tests.test_requests_behaviour -v
+
       - name: Check fingerprint preset catalogue
         run: |
           python3 -m unittest python_tests.test_abi3_fingerprints -v
