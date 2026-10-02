@@ -12,6 +12,7 @@ no network access, no proxy and no credentials are involved:
 * the TLS controls remaining reachable through all three surfaces.
 """
 
+import io
 import json
 import os
 import sys
@@ -103,6 +104,21 @@ class _EchoHandler(BaseHTTPRequestHandler):
                 },
             )
             return
+        if path == "/only-hostile-cookie":
+            # Every Set-Cookie here is one the policy must reject, so the
+            # resulting jar is legitimately empty.  That is the case the
+            # engine-map fallback must NOT treat as "no header block".
+            self._send(
+                200,
+                b"ok",
+                {
+                    "Set-Cookie": [
+                        "cross=1; Domain=attacker.test; Path=/",
+                        "gone=1; Max-Age=0; Path=/",
+                    ]
+                },
+            )
+            return
         if path == "/redirect":
             self._send(302, b"", {"Location": "/final", "Set-Cookie": "hop=1; Path=/"})
             return
@@ -126,6 +142,24 @@ class _EchoHandler(BaseHTTPRequestHandler):
             return
         if path == "/notfound":
             self._send(404, b"missing")
+            return
+        if path == "/binary":
+            # Bytes in 0x80-0x9F are the ones the windows-1252 fallback
+            # rewrites, so they are what a charset transcode corrupts.
+            payload = bytes(range(256))
+            self.send_response(200)
+            self.send_header("Content-Type", "application/octet-stream")
+            self.send_header("Content-Length", str(len(payload)))
+            self.end_headers()
+            self.wfile.write(payload)
+            return
+        if path == "/gbk":
+            payload = "\u4e2d\u6587".encode("gbk")
+            self.send_response(200)
+            self.send_header("Content-Type", "text/html; charset=gbk")
+            self.send_header("Content-Length", str(len(payload)))
+            self.end_headers()
+            self.wfile.write(payload)
             return
         if path == "/latin1":
             payload = "caf\xe9".encode("latin1")
@@ -571,6 +605,69 @@ class SessionSemanticsTests(_ServerCase):
         self.assertEqual(response.json()["method"], "POST")
         self.assertEqual(response.json()["body"], "a=1")
 
+    def test_debug_session_returns_the_exact_response_bytes(self):
+        """with_debug must not rewrite the response body.
+
+        The debug preview decodes the body for the log line.  When those
+        decoded bytes were also handed back as the response, a binary payload
+        came back longer than the server sent it (the windows-1252 fallback
+        rewrites every byte in 0x80-0x9F), so an image no longer decoded.
+        """
+        expected = bytes(range(256))
+        response = Session(with_debug=True).get(self.base + "/binary")
+        self.assertEqual(response.content, expected)
+
+    def test_debug_session_decodes_text_exactly_once(self):
+        """A debug session must not double-decode a text body.
+
+        Transcoding the body to UTF-8 while Content-Type still named the
+        original charset made Response.text decode it a second time and
+        produce mojibake.
+        """
+        response = Session(with_debug=True).get(self.base + "/gbk")
+        self.assertEqual(response.encoding, "gbk")
+        self.assertEqual(response.text, "\u4e2d\u6587")
+
+    def test_debug_and_plain_sessions_agree_on_the_body(self):
+        for path in ("/binary", "/gbk", "/latin1", "/ncharset"):
+            with self.subTest(path=path):
+                plain = Session(with_debug=False).get(self.base + path)
+                debug = Session(with_debug=True).get(self.base + path)
+                self.assertEqual(debug.content, plain.content)
+
+    def test_307_replays_a_file_like_body(self):
+        """A file body must be rewound before the second hop.
+
+        The adapter materialises a file-like body by reading it to the end, and
+        the redirect copy shares the same object, so without an explicit rewind
+        the replay sent an empty body and the request silently lost its payload.
+        """
+        response = Session().post(
+            self.base + "/redirect-307", data=io.BytesIO(b"file-payload")
+        )
+        self.assertEqual(response.json()["method"], "POST")
+        self.assertEqual(response.json()["body"], "file-payload")
+
+    def test_307_replays_a_bytes_body(self):
+        response = Session().post(self.base + "/redirect-307", data=b"bytes-payload")
+        self.assertEqual(response.json()["body"], "bytes-payload")
+
+    def test_307_unrewindable_body_raises(self):
+        """An unrewindable body must fail loudly, not replay empty."""
+
+        class Unseekable(io.RawIOBase):
+            def __init__(self, data):
+                self._inner = io.BytesIO(data)
+
+            def readable(self):
+                return True
+
+            def read(self, size=-1):
+                return self._inner.read(size)
+
+        with self.assertRaises(tls_client.exceptions.UnrewindableBodyError):
+            Session().post(self.base + "/redirect-307", data=Unseekable(b"x" * 8))
+
     def test_redirect_loop_raises_too_many_redirects(self):
         session = Session()
         session.max_redirects = 3
@@ -983,6 +1080,26 @@ class CookiePolicyTests(_ServerCase):
         response = session.get(self.base + "/hostile-cookie")
         self.assertNotIn("cross", dict(response.cookies.items()))
         self.assertEqual(sorted(response.cookies.items()), [("plain", "1")])
+
+    def test_empty_jar_from_a_rejected_only_response_stays_empty(self):
+        """A response whose every cookie is rejected must yield an empty jar.
+
+        This is the case the engine-map fallback used to swallow: the fallback
+        keyed off an empty jar, but an empty jar is exactly what the policy
+        produces when it rejects everything, so the engine's host-blind
+        name->value map was merged back in and resurrected the cookies the
+        policy had just refused.
+        """
+        response = Session().get(self.base + "/only-hostile-cookie")
+        self.assertEqual(dict(response.cookies.items()), {})
+        self.assertIsNone(response.cookies.get("cross"))
+        self.assertIsNone(response.cookies.get("gone"))
+
+    def test_rejected_only_cookie_never_reaches_the_session_jar(self):
+        session = Session()
+        session.get(self.base + "/only-hostile-cookie")
+        self.assertEqual(dict(session.cookies.items()), {})
+        self.assertNotIn("attacker.test", session.cookies.list_domains())
 
     def test_expired_cookie_is_not_stored(self):
         jar = tls_client.cookies.extract_cookies(

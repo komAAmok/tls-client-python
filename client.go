@@ -669,17 +669,6 @@ func (c *httpClient) do(req *http.Request) (resp *http.Response, err error) {
 				respBodyBytes = nil
 			} else {
 				bodyReader = io.MultiReader(bytes.NewReader(firstByte[:n]), resp.Body)
-				// Automatically detect the correct charset.
-				// LOCAL OVERLAY: charset_lean.go replaces
-				// golang.org/x/net/html/charset here.  That package links
-				// the whole legacy codec registry, including both
-				// directions of the CJK conversion tables, for a
-				// debug-only transcode.  The replacement decodes the same
-				// labels without dragging in the encode halves.
-				bodyReader, err = newCharsetReader(bodyReader, resp.Header.Get("Content-Type"))
-				if err != nil {
-					return nil, err
-				}
 
 				respBodyBytes, err = io.ReadAll(bodyReader)
 				if err != nil {
@@ -688,11 +677,28 @@ func (c *httpClient) do(req *http.Request) (resp *http.Response, err error) {
 				defer resp.Body.Close()
 			}
 
+			// The body has been consumed, so the caller needs a re-readable
+			// copy - but of the ORIGINAL bytes.  Only the log gets the
+			// charset-decoded view.
+			//
+			// LOCAL OVERLAY: this used to hand the caller the transcoded bytes
+			// (as upstream does).  That changed the payload the caller
+			// received, not just the log line:
+			//   * a binary body was run through the windows-1252 fallback,
+			//     which rewrites every byte in 0x80-0x9F, so an image came
+			//     back longer than the server sent it and no longer decoded;
+			//   * a text body became UTF-8 while Content-Type still named the
+			//     original charset, so a client decoding it by the header
+			//     (requests' Response.text) decoded it twice and produced
+			//     mojibake.
+			// The charset work exists to make the debug log readable; it must
+			// not rewrite the response.  charset_lean.go still supplies the
+			// decoder, and isTextualContentType keeps binary payloads out of
+			// it so the log does not fill with replacement characters.
 			responseBody := io.NopCloser(bytes.NewBuffer(respBodyBytes))
 
-			finalResponse := string(respBodyBytes)
-
-			c.logger.Debug("response body payload: %s", finalResponse)
+			c.logger.Debug("response body payload: %s",
+				string(decodeBodyForLog(respBodyBytes, resp.Header.Get("Content-Type"))))
 
 			resp.Body = responseBody
 		}

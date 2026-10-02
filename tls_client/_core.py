@@ -1212,6 +1212,16 @@ ResponseResult* ExecuteRequest(RequestOptions* opts);
 void           FreeResponse(ResponseResult* res);
 void           ClearClientPool(void);
 
+typedef struct {
+    long long total_evictions;       // cumulative entries evicted since process start
+    long long last_eviction_count;   // entries evicted in the most recent scan
+    long long last_eviction_time;    // UnixNano timestamp of the last eviction scan
+    long long pool_entry_count;      // current number of entries in the client pool
+    long long pool_ttl_seconds;      // current TTL (seconds)
+    long long pool_scan_interval_seconds; // current scan interval (seconds)
+} PoolStats;
+
+void           GetPoolStats(PoolStats* stats);
 void           SetPoolTTL(int seconds);
 void           SetPoolScanInterval(int seconds);
 void           SetPoolMaxEntries(int entries);
@@ -1850,7 +1860,7 @@ def _compute_cache_key_hash(r: dict) -> str:
     The format matches Go's buildCacheKey exactly — same field order,
     same separators, same sort order for maps, same hex encoding.
 
-    FORMAT VERSION: 5
+    FORMAT VERSION: 7
     If you change the hash format below, increment the version AND update
     Go's buildCacheKey / buildCacheKeyFromConfig in cffi_binding/main.go
     and the corresponding test in test_cache_key_parity.py.  Format drift
@@ -1921,6 +1931,16 @@ def _compute_cache_key_hash(r: dict) -> str:
         r.get("tcp_ip_id_mode") or "",
     )).encode("utf-8"))
 
+    # Format version 6: client-construction flags that were missing from the
+    # key.  with_debug is load-bearing rather than cosmetic -- the debug path in
+    # client.go replaces resp.Body with a charset-decoded copy, so two sessions
+    # that differ only in this flag must not share a pooled client or the same
+    # request returns different bytes depending on which one ran first.
+    update(("|dbg=%d|cp=%d" % (
+        _as_int(r.get("with_debug")),
+        _as_int(r.get("catch_panics")),
+    )).encode("utf-8"))
+
     # ── Pseudo-header orders ──────────────────────────────────────────
     ph = r["pseudo_header_order"]
     if ph:
@@ -1936,12 +1956,23 @@ def _compute_cache_key_hash(r: dict) -> str:
     else:
         update(b"#<default>")
 
-    # ── Default / connect headers (sorted by key) ─────────────────────
-    for prefix, key in (("~dh:", "default_headers"), ("~ch:", "connect_headers")):
-        headers = r[key]
-        if headers:
-            for k, v in sorted(headers.items()):
-                update(f"{prefix}{k}={v}".encode("utf-8"))
+    # ── Connect headers (sorted by key) ───────────────────────────────
+    #
+    # default_headers is deliberately NOT keyed (format version 7).  The
+    # profile default block is folded into the per-request headers by
+    # _merge_default_headers, and the engine only falls back to the
+    # client-level copy when the request carries no headers at all - which the
+    # merge guarantees cannot happen while there are defaults to fold.  Keying
+    # it minted one pooled HttpClient per unique header block, so a per-request
+    # `default_headers=` (or a rotating User-Agent) grew the pool without bound
+    # until the cap reclaimed it.
+    #
+    # connect_headers stays keyed: the engine reads it at dial time for the
+    # proxy CONNECT request, so it is genuine transport state.
+    headers = r["connect_headers"]
+    if headers:
+        for k, v in sorted(headers.items()):
+            update(f"~ch:{k}={v}".encode("utf-8"))
 
     # ── Certificate pinning (sorted by host) ──────────────────────────
     cp = r["certificate_pinning_hosts"]
@@ -3699,6 +3730,38 @@ class Session:
         lib.ClearClientPool()
 
     @staticmethod
+    def get_pool_stats() -> Dict[str, int]:
+        """Return Go client-pool counters as a dict.
+
+        Keys: ``pool_entry_count`` (distinct pooled HttpClients right now),
+        ``pool_ttl_seconds``, ``pool_scan_interval_seconds``,
+        ``total_evictions`` (cumulative), ``last_eviction_count`` and
+        ``last_eviction_time`` (UnixNano of the most recent scan).
+
+        Exposes what was previously invisible from Python: a request pattern
+        that mints a distinct cache key per call grows the pool, and this is
+        how that is detected without guessing from RSS.
+        """
+        ffi, lib = _get_ffi()
+        getter = getattr(lib, "GetPoolStats", None)
+        if getter is None:
+            raise RuntimeError(
+                "get_pool_stats requires a native tls-client library rebuilt "
+                "from current source (the loaded binary predates the "
+                "GetPoolStats export; see UPSTREAM_SYNC.md)."
+            )
+        stats = ffi.new("PoolStats*")
+        getter(stats)
+        return {
+            "pool_entry_count": int(stats.pool_entry_count),
+            "pool_ttl_seconds": int(stats.pool_ttl_seconds),
+            "pool_scan_interval_seconds": int(stats.pool_scan_interval_seconds),
+            "total_evictions": int(stats.total_evictions),
+            "last_eviction_count": int(stats.last_eviction_count),
+            "last_eviction_time": int(stats.last_eviction_time),
+        }
+
+    @staticmethod
     def set_pool_ttl(seconds: int) -> None:
         """Set the TTL for cached HttpClient entries (default 300 s = 5 min).
 
@@ -3805,11 +3868,25 @@ def _cancel_timeout_handle(future, timeout_handle) -> None:
     closed the timer can never fire anyway — a stray ``_on_zombie_timeout``
     pops a missing entry and returns — so the ``RuntimeError`` raised by a
     dead loop is swallowed.
+
+    A caller already running on the loop thread cancels inline: deferring
+    there would leave the timer armed until the next loop iteration, so a
+    ``_drop_pending_request()`` would return with its timer still live and
+    a callback (``close()``, ``request_async`` failure) would keep the
+    Handle scheduled past the point it is documented to be disarmed.
     """
     if timeout_handle is None or future is None:
         return
+    loop = future.get_loop()
     try:
-        future.get_loop().call_soon_threadsafe(timeout_handle.cancel)
+        running_loop = asyncio.get_running_loop()
+    except RuntimeError:
+        running_loop = None  # not on any loop thread — must defer
+    if running_loop is loop:
+        timeout_handle.cancel()
+        return
+    try:
+        loop.call_soon_threadsafe(timeout_handle.cancel)
     except RuntimeError:
         pass  # event loop already closed — graceful shutdown
 
@@ -4443,10 +4520,18 @@ class AsyncSession:
         # Per-request client_identifier override: pair the request with the
         # profile's default headers unless the caller manages headers
         # explicitly (see the sync path in Session.execute_request).
+        #
+        # The comparison uses the snapshot this request already resolved from,
+        # never the live session default.  Reading the live value here is a
+        # TOCTOU race: a concurrent ``session.client_identifier = ...`` landing
+        # between the snapshot and this test can make the two compare equal,
+        # skipping the re-pairing and sending the *snapshot profile's* headers
+        # (e.g. a Chrome User-Agent) alongside the override's TLS fingerprint
+        # (e.g. Safari) - a mismatch that is trivially detectable server-side.
         if (
             explicit_default_headers is None
             and not self._session._headers_customized
-            and resolved["client_identifier"] != self._session.defaults.get("client_identifier")
+            and resolved["client_identifier"] != defaults.get("client_identifier")
         ):
             resolved["default_headers"] = _clone_default_value(
                 DEFAULT_HEADERS.get(resolved["client_identifier"])

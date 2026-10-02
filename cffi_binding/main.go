@@ -523,48 +523,48 @@ func readBodyToCHeap(body io.Reader, contentLength int64) (*C.char, int, error) 
 // ---------------------------------------------------------------------------
 
 type requestConfig struct {
-	method                   string
-	url                      string
-	body                     []byte
-	proxy                    string
-	clientIdentifier         string
-	headers                  http.Header
-	headerOrder              []string
-	pseudoHeaderOrder        []string
-	h3PseudoHeaderOrder      []string
-	timeoutSeconds           int
-	timeoutMilliseconds      int
-	followRedirects          bool
-	insecureSkipVerify       bool
-	forceHttp1               bool
-	withRandomTLSExtOrder    bool
-	withProtocolRacing       bool
-	serverNameOverwrite      string
-	requestHostOverride      string
-	localAddress             string
-	maxIdleConns             int
-	maxIdleConnsPerHost      int
-	maxConnsPerHost          int
-	maxResponseHeaderBytes   int
-	writeBufferSize          int
-	readBufferSize           int
-	idleConnTimeoutSeconds   int
-	disableKeepAlives        bool
-	disableCompression       bool
-	allowEmptyCookies        bool
-	disableHTTP3             bool
-	disableIPv4              bool
-	disableIPv6              bool
-	tcpTTL                   int
-	tcpWindowSize            int
-	tcpWindowScale           int
-	tcpMSS                   int
+	method                 string
+	url                    string
+	body                   []byte
+	proxy                  string
+	clientIdentifier       string
+	headers                http.Header
+	headerOrder            []string
+	pseudoHeaderOrder      []string
+	h3PseudoHeaderOrder    []string
+	timeoutSeconds         int
+	timeoutMilliseconds    int
+	followRedirects        bool
+	insecureSkipVerify     bool
+	forceHttp1             bool
+	withRandomTLSExtOrder  bool
+	withProtocolRacing     bool
+	serverNameOverwrite    string
+	requestHostOverride    string
+	localAddress           string
+	maxIdleConns           int
+	maxIdleConnsPerHost    int
+	maxConnsPerHost        int
+	maxResponseHeaderBytes int
+	writeBufferSize        int
+	readBufferSize         int
+	idleConnTimeoutSeconds int
+	disableKeepAlives      bool
+	disableCompression     bool
+	allowEmptyCookies      bool
+	disableHTTP3           bool
+	disableIPv4            bool
+	disableIPv6            bool
+	tcpTTL                 int
+	tcpWindowSize          int
+	tcpWindowScale         int
+	tcpMSS                 int
 	// ABI 3: deeper TCP fingerprint controls.  Negative values mean "unset".
-	tcpDontFragment          int
-	tcpTOS                   int
-	tcpNoDelay               int
-	tcpWindowClamp           int
-	tcpIPIDMode              string
+	tcpDontFragment int
+	tcpTOS          int
+	tcpNoDelay      int
+	tcpWindowClamp  int
+	tcpIPIDMode     string
 	// ABI 3: extension-order policy and destination-aware header ordering.
 	extensionPermuteMode     int
 	extensionPermutePrefix   int
@@ -1230,10 +1230,24 @@ func buildCacheKeyFromConfig(cfg *requestConfig) string {
 	// suppression and the deep TCP fingerprint fields.  header_order_by_dest /
 	// header_order_dest and the ABI 2.1 cookie_crumb are per-request wire
 	// behaviour that does not change the transport, so they are not keyed.
+	// Format version 6 appends the client-construction flags (see below).
 	fmt.Fprintf(h, "|epm=%d|epp=%d|hdpf=%d|df=%d|tos=%d|nd=%d|wc=%d|ipid=%s",
 		cfg.extensionPermuteMode, cfg.extensionPermutePrefix,
 		b2i(cfg.h2DisablePriorityFrames), cfg.tcpDontFragment, cfg.tcpTOS,
 		cfg.tcpNoDelay, cfg.tcpWindowClamp, cfg.tcpIPIDMode)
+	// Format version 6.  These two are client-construction inputs that were
+	// missing from the key, so a client built with one setting was handed to a
+	// request that asked for the other:
+	//   * with_debug -- WithDebug() is passed to buildClientFromConfig and
+	//     turns on the request/response trace, which is a property of the
+	//     client rather than of a single request.  It used to decide the
+	//     response bytes as well (the debug path rewrote resp.Body); that is
+	//     fixed, but the flag still must not be shared, or a session created
+	//     for tracing silently reuses a client that does not trace.
+	//   * catch_panics -- WithCatchPanics() changes panic recovery.
+	// Both are bools stored as %d, matching the convention above.
+	fmt.Fprintf(h, "|dbg=%d|cp=%d", b2i(cfg.withDebug), b2i(cfg.catchPanics))
+
 	if len(cfg.pseudoHeaderOrder) > 0 {
 		for _, s := range cfg.pseudoHeaderOrder {
 			fmt.Fprintf(h, ":%s", s)
@@ -1249,16 +1263,25 @@ func buildCacheKeyFromConfig(cfg *requestConfig) string {
 		fmt.Fprint(h, "#<default>")
 	}
 	// Sort map keys for deterministic cache keys
-	sortedHeaderKeys := make([]string, 0, len(cfg.defaultHeaders))
-	for k := range cfg.defaultHeaders {
-		sortedHeaderKeys = append(sortedHeaderKeys, k)
-	}
-	sort.Strings(sortedHeaderKeys)
-	for _, k := range sortedHeaderKeys {
-		for _, v := range cfg.defaultHeaders[k] {
-			fmt.Fprintf(h, "~dh:%s=%s", k, v)
-		}
-	}
+	// Format version 7: cfg.defaultHeaders is deliberately NOT keyed.
+	//
+	// Python folds the profile default headers into the per-request header
+	// block before calling (see _merge_default_headers), and the engine only
+	// reads config.defaultHeaders when req.Header is empty (client.go:
+	// `if len(req.Header) == 0 { req.Header = c.config.defaultHeaders.Clone() }`).
+	// Because the merge always yields a non-empty block whenever there are
+	// defaults to fold, the client-level copy is unreachable for the headers
+	// actually sent.  Keying it therefore bought nothing and cost a great deal:
+	// a caller passing a distinct default_headers block per request (the
+	// requests-style `headers=` idiom, or a rotating UA) minted a distinct
+	// cache key each time, so the pool filled with one HttpClient - each with
+	// its own cookie jar and idle-connection pool - per unique header block.
+	// Measured: ~125 MB RSS after 3200 unique blocks, against ~53 MB when the
+	// same workload varies a per-request header instead.
+	//
+	// cfg.connectHeaders is different and MUST stay keyed: the engine reads it
+	// at dial time for the proxy CONNECT request (connect.go), so it is real
+	// transport state.
 	sortedConnectKeys := make([]string, 0, len(cfg.connectHeaders))
 	for k := range cfg.connectHeaders {
 		sortedConnectKeys = append(sortedConnectKeys, k)
@@ -1388,6 +1411,7 @@ func buildCacheKeyFromConfig(cfg *requestConfig) string {
 			fmt.Fprintf(h, "|hp:%d,%d,%d", hp.streamDep, int(hp.exclusive), hp.weight)
 		}
 	}
+
 	return fmt.Sprintf("%x", h.Sum(nil))
 }
 

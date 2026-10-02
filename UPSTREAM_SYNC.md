@@ -24,12 +24,40 @@ must be preserved when resolving future upstream conflicts:
   dropped. `html/charset` links the entire `x/text/encoding` registry through
   `htmlindex`, including both directions of the CJK conversion tables, for a
   transcode that only ever runs when `with_debug` is set. The replacement
-  decodes the same labels from the decode halves only, which removes ~283 KB
-  from the linux/amd64 shared library (14,095,224 → 13,812,184 bytes, −2.0%).
+  removes ~110 KB from the linux/amd64 shared library (14,095,224 →
+  13,984,760 bytes, −0.8%).
   The `charset_lean.go` switch must keep calling `X.NewDecoder()` directly:
   storing those methods as values (a map of method values, an
   `encoding.Encoding` table) keeps the interface itabs — and with them the
   encode tables — linked, which gives back most of the saving.
+
+  **The debug preview no longer rewrites the response.** Upstream hands the
+  charset-decoded bytes back as `resp.Body`; that made `with_debug` change the
+  payload the caller received, not just the log line. A binary body went
+  through the windows-1252 fallback (which rewrites every byte in 0x80-0x9F),
+  so an image came back longer than the server sent it, and a text body became
+  UTF-8 while `Content-Type` still named the original charset, so a client
+  decoding by the header (`Response.text`) decoded it twice and produced
+  mojibake. `client.go` now keeps the original bytes on `resp.Body` and sends
+  only the log line through `decodeBodyForLog`; `isTextualContentType` keeps
+  binary payloads out of the decoder so the log does not fill with replacement
+  characters. Pinned by `python_tests/test_requests_behaviour.py`
+  (`test_debug_session_returns_the_exact_response_bytes`,
+  `test_debug_session_decodes_text_exactly_once`,
+  `test_debug_and_plain_sessions_agree_on_the_body`).
+
+  The replacement is a **behavioural** drop-in, not a subset: it reproduces
+  `html/charset.DetermineEncoding` in full — the WHATWG label table generated
+  from `x/text/encoding/htmlindex`, the BOM sniff, the `<meta>` prescan (via
+  `x/net/html`'s tokenizer, ~24 KB), the UTF-8 validity probe and the
+  windows-1252 fallback — including the distinction between `encoding.Nop`
+  (detected UTF-8, body passed through) and a real UTF-8 decoder (explicit
+  label, invalid bytes become U+FFFD). `TestCharsetLeanMatchesUpstream` in
+  `charset_lean_test.go` imports the real `html/charset` and diffs the two
+  across every label and detection path; keep it passing when touching either
+  file. Note the earlier decode-only subset silently diverged on
+  `iso-8859-1`/`latin1`/`us-ascii`/`ascii`/`cp819`/`iso-ir-100` (htmlindex maps
+  those to windows-1252, not ISO-8859-1) and on `<meta>`-declared charsets.
 - `roundtripper.go`: the QUIC/HTTP-3 transport construction was split out of
   this file into `roundtripper_http3.go`. `http3.NextProtoH3` references were
   replaced by the local `nextProtoH3` identifier.
@@ -61,6 +89,15 @@ must be preserved when resolving future upstream conflicts:
   stale library that predates the export.
 - `extension_permute.go` (new), `header_order.go` (new),
   `tcp_fingerprint.go`, `tcp_socket_unix.go`, `tcp_socket_windows.go`,
+  **Concurrency overlay (2026-10-02):** `tls_client/_core.py`'s async request
+  path resolved its per-request `client_identifier` override against the *live*
+  session default instead of the snapshot the request was built from. A
+  concurrent `session.client_identifier = ...` landing in that window made the
+  two compare equal, skipping the header re-pairing and sending the snapshot
+  profile's User-Agent with the override's TLS fingerprint. Both paths now read
+  the snapshot. Pinned by
+  `test_async_override_pairs_headers_with_the_resolved_identifier`.
+
   `client_options.go`, `client.go`, `roundtripper.go`: the ABI 3 fingerprint
   layer. `extension_permute.go` implements Chromium's per-handshake extension
   shuffle (GREASE/padding/pre_shared_key pinned since Chrome 106);
@@ -125,7 +162,7 @@ sentinel with a one-time `RuntimeWarning`, so requests still succeed. Use
 `_require_abi3()` directly only when the caller genuinely cannot proceed
 without the feature.
 
-The cache-key format is version 5. In addition to the ABI 2 / 2.1 fields, the
+The cache-key format is version 6. In addition to the ABI 2 / 2.1 fields, the
 extension-order policy (`epm`/`epp`), PRIORITY-frame suppression (`hdpf`) and
 the deep TCP fingerprint (`df`/`tos`/`nd`/`wc`/`ipid`) participate.
 `header_order_by_dest`, `header_order_dest` and `cookie_crumb` are per-request
@@ -133,6 +170,28 @@ wire behaviour and are deliberately **not** keyed. Parity is pinned by
 `python_tests/test_cache_key_parity.py` and
 `cffi_binding/cachekey_parity_test.go` (TestCacheKeyParityWithPython) —
 update BOTH sides together or these tests will fail.
+
+**Format version 7 (2026-10-02)** removes `default_headers` (`~dh:`) from the
+key. The profile default block is folded into the per-request headers by
+`_merge_default_headers`, and the engine only reads the client-level copy when
+`req.Header` is empty (`client.go`), which that merge makes unreachable. Keying
+it minted one pooled `HttpClient` per unique block, so a per-request
+`default_headers=` (or a rotating User-Agent) grew the pool until the cap
+reclaimed it — measured at ~125 MB RSS after 3200 unique blocks versus ~53 MB
+when the same workload varied a per-request header instead.
+`connect_headers` (`~ch:`) **stays** keyed: the engine reads it at dial time for
+the proxy CONNECT request, so it is genuine transport state. Pinned by
+`test_unique_default_headers_do_not_grow_the_client_pool`.
+
+**Format version 6 (2026-10-02)** appends the client-construction flags
+`with_debug` (`dbg`) and `catch_panics` (`cp`). Both are passed to
+`buildClientFromConfig`, and `with_debug` is not cosmetic: the debug path in
+`client.go` *replaces* `resp.Body` with a charset-decoded copy, so the flag
+decides what bytes a response body holds. Leaving them out of the key let a
+pooled client built with one setting serve a request that asked for the other,
+making the same request return different bytes depending on which session ran
+first. The fields are emitted right after the ABI 3 block and before the
+pseudo-header orders; the Go and Python emitters must stay in that order.
 
 **ABI 2 (2026-09-12).** The bundled shared library exports `GetAbiVersion()`
 (returning 3). `RequestOptions` gained `disable_session_tickets`,
@@ -180,7 +239,7 @@ cross-language drift, all of which run in CI's `verify-generated` job:
 
 | Test | What it locks down |
 | --- | --- |
-| `test_cache_key_parity` | Python `_compute_cache_key_hash` ≡ Go `buildCacheKeyFromConfig` (format v5). Pinned vectors are mirrored in `cffi_binding/cachekey_parity_test.go`. |
+| `test_cache_key_parity` | Python `_compute_cache_key_hash` ≡ Go `buildCacheKeyFromConfig` (format v7). Pinned vectors are mirrored in `cffi_binding/cachekey_parity_test.go`. |
 | `test_cdef_parity` | `_core.py`'s CDEF struct layout ≡ the CDEF derived from `main.go`. |
 | `test_export_parity` | Every symbol the CDEF declares is `//export`ed by every build variant's compiled files (and by each generated header, when fresh). |
 | `test_session_signature_parity` | `AsyncSession.__init__` accepts exactly the same parameters as `Session.__init__`. |

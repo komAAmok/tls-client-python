@@ -138,6 +138,24 @@ def _pop_chunked_header(headers):
     return False
 
 
+def _has_set_cookie(headers):
+    """True when the response carried at least one Set-Cookie header.
+
+    Used to decide whether the engine's host-blind cookie map may be consulted
+    as a fallback: it is only a substitute for a *missing* header block, never
+    for one the cookie policy deliberately rejected.
+    """
+    for name, value in (headers or {}).items():
+        if str(name).lower() != "set-cookie":
+            continue
+        if isinstance(value, (list, tuple)):
+            if any(item for item in value):
+                return True
+        elif value:
+            return True
+    return False
+
+
 def _transport_error(error, request):
     """Map a native engine error onto the matching requests exception type."""
     message = str(error)
@@ -233,13 +251,20 @@ class TLSClientAdapter(BaseAdapter):
         # no domain or path information, so a cookie the policy had just
         # rejected - a Domain attribute naming another host, an expired
         # Max-Age, a Secure cookie arriving over http - would be merged straight
-        # back in and could then be replayed to the wrong host.  Keep the map
-        # only as a fallback for when the header block is unavailable.
+        # back in and could then be replayed to the wrong host.
+        #
+        # The fallback therefore keys off whether the header block was present
+        # at all, NOT off whether the jar came back empty.  An empty jar is the
+        # *expected* result when the policy rejected every cookie, so testing
+        # the jar would re-add exactly the cookies the policy just refused -
+        # which is how a cross-host Domain, a Max-Age=0 and a past Expires all
+        # came back to life.
         response.cookies = extract_cookies(native.headers, response.url)
-        if not response.cookies:
+        if not _has_set_cookie(native.headers):
             host = urlparse(response.url).hostname
-            for name, value in (native.cookies or {}).items():
-                response.cookies.set(name, value, domain=host)
+            if host:
+                for name, value in (native.cookies or {}).items():
+                    response.cookies.set(name, value, domain=host)
         response.elapsed = timedelta(seconds=time.monotonic() - started)
         response.request, response.connection = request, self
         response.used_protocol = native.used_protocol

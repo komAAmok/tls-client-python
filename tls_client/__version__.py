@@ -16,8 +16,8 @@ keeps working.
 __title__ = "tls_client"
 __description__ = "High-performance Python binding for bogdanfinn/tls-client via CFFI."
 __url__ = "https://github.com/komAAmok/tls-client-python"
-__version__ = "1.16.0.6"
-__build__ = 0x011606
+__version__ = "1.16.0.7"
+__build__ = 0x011607
 __author__ = "komAAmok"
 __author_email__ = ""
 __license__ = "MIT"

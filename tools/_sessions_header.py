@@ -477,6 +477,17 @@ class SessionRedirectMixin:
             for header in ("Content-Length", "Content-Type", "Transfer-Encoding"):
                 prepared.headers.pop(header, None)
             prepared.body = None
+        elif prepared._body_position is not None and (
+            "Content-Length" in prepared.headers
+            or "Transfer-Encoding" in prepared.headers
+        ):
+            # 307/308 preserve the method and the body, so a file-like body
+            # must be rewound before the next hop: the adapter already read it
+            # to completion while sending the first request, and copy() shares
+            # the same object.  Without this the replay silently sent an empty
+            # body.  A body that cannot be rewound raises UnrewindableBodyError
+            # rather than sending nothing, matching requests.
+            rewind_body(prepared)
         prepared.headers.pop("Cookie", None)
         extract_cookies_to_jar(prepared._cookies, request, response.raw)
         merge_cookies(prepared._cookies, self.cookies)

@@ -13,8 +13,9 @@ import (
 // python_tests/test_cache_key_parity.py holds the same constants on the
 // Python side.  If either side drifts, these tests fail BEFORE production
 // cache keys diverge and silently poison the client pool.
-// Format version: 5 (ABI 3 — extension permutation, PRIORITY-frame
-// suppression and the deep TCP fingerprint).
+// Format version: 7 (ABI 3 — extension permutation, PRIORITY-frame
+// suppression and the deep TCP fingerprint — plus the client-construction
+// flags added in v6: with_debug and catch_panics).
 func TestCacheKeyParityWithPython(t *testing.T) {
 	const testPEM = "-----BEGIN CERTIFICATE-----\nAAE=\n-----END CERTIFICATE-----\n"
 
@@ -44,7 +45,7 @@ func TestCacheKeyParityWithPython(t *testing.T) {
 		tcpWindowClamp:          0,
 		tcpIPIDMode:             "random",
 	}
-	const wantFull = "a2c79b647bc79f4cdb78ad3e2bbbda85ead64047d0c6bfa08b8c680fcba0f07d"
+	const wantFull = "1ef1c474e0ac74370beaa9a14b2d17012bf63605a43df4ee3960135667d73218"
 	if got := buildCacheKeyFromConfig(full); got != wantFull {
 		t.Fatalf("full vector mismatch:\n got  %s\n want %s", got, wantFull)
 	}
@@ -61,7 +62,7 @@ func TestCacheKeyParityWithPython(t *testing.T) {
 		tcpTOS:          -1,
 		tcpNoDelay:      -1,
 	}
-	const wantMinimal = "fcdf48ebf9e03e1ff1d0b5c15be5f2da2f5e96e7bfd94cff94c3cc74ab7dca98"
+	const wantMinimal = "b5169ec1a12e836561889ea08641775aae56603dce0ddd680d8f0c29d74d8d9b"
 	if got := buildCacheKeyFromConfig(minimal); got != wantMinimal {
 		t.Fatalf("minimal vector mismatch:\n got  %s\n want %s", got, wantMinimal)
 	}

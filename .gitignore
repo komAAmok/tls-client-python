@@ -1,6 +1,7 @@
 ﻿.idea
 example/Example
 venv
+.venv
 mise.local.toml
 
 # Python build artifacts

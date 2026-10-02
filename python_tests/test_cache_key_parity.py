@@ -4,8 +4,9 @@ The constants here are pinned against the Go-side test
 ``cffi_binding/cachekey_parity_test.go`` (TestCacheKeyParityWithPython).
 Both sides must produce byte-identical hashes for the same logical config
 or the pre-computed cache-key hash will silently diverge from the Go
-fallback and poison the client pool.  Format version: 5 (ABI 3 — extension
-permutation, PRIORITY-frame suppression and the deep TCP fingerprint).
+fallback and poison the client pool.  Format version: 7 (ABI 3 — extension
+permutation, PRIORITY-frame suppression and the deep TCP fingerprint — plus
+the client-construction flags added in v6: with_debug and catch_panics).
 """
 
 import unittest
@@ -67,7 +68,7 @@ class CacheKeyParityTests(unittest.TestCase):
     def test_full_vector(self):
         self.assertEqual(
             _compute_cache_key_hash(_FULL),
-            "a2c79b647bc79f4cdb78ad3e2bbbda85ead64047d0c6bfa08b8c680fcba0f07d",
+            "1ef1c474e0ac74370beaa9a14b2d17012bf63605a43df4ee3960135667d73218",
         )
 
     def test_minimal_vector(self):
@@ -76,7 +77,7 @@ class CacheKeyParityTests(unittest.TestCase):
         # so this vector matches Go's buildCacheKeyFromConfig byte for byte.
         self.assertEqual(
             _compute_cache_key_hash(_MINIMAL),
-            "fcdf48ebf9e03e1ff1d0b5c15be5f2da2f5e96e7bfd94cff94c3cc74ab7dca98",
+            "b5169ec1a12e836561889ea08641775aae56603dce0ddd680d8f0c29d74d8d9b",
         )
 
     def test_abi2_fields_participate(self):

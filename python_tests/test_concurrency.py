@@ -122,6 +122,25 @@ def _rss_mb():
         return None
 
 
+class _RecordingHandler(BaseHTTPRequestHandler):
+    """Records each request's headers so a test can assert on what was sent."""
+
+    protocol_version = "HTTP/1.1"
+    records = []
+
+    def do_GET(self):
+        type(self).records.append({k.lower(): v for k, v in self.headers.items()})
+        body = b'{"ok":true}'
+        self.send_response(200)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+
+    def log_message(self, *args):
+        pass
+
+
 def _process_worker(args):
     port, count = args
     from tls_client._core import Session
@@ -389,6 +408,105 @@ class NativeConcurrencyTests(unittest.TestCase):
             ]
             for future in futures:
                 self.assertEqual(future.result(timeout=90), 800)
+
+    def test_unique_default_headers_do_not_grow_the_client_pool(self):
+        """A per-request default_headers block must not mint a pooled client.
+
+        The profile default block is folded into the per-request headers by
+        _merge_default_headers, and the engine only reads the client-level copy
+        when the request carries no headers at all.  Keying default_headers
+        therefore bought nothing and cost a lot: every unique block produced a
+        distinct cache key, so the pool filled with one HttpClient (each with
+        its own cookie jar and idle-connection pool) per block - measured at
+        ~125 MB RSS after 3200 unique blocks, against ~53 MB when the same
+        workload varies a per-request header instead.
+        """
+        session = Session(timeout=10)
+        Session.clear_client_pool()
+        try:
+            for index in range(200):
+                session.get(_url(), default_headers={"User-Agent": "UA-%d" % index})
+            stats = Session.get_pool_stats()
+        except RuntimeError as exc:  # library predates the GetPoolStats export
+            self.skipTest(str(exc))
+        finally:
+            Session.clear_client_pool()
+        self.assertLessEqual(
+            stats["pool_entry_count"],
+            1,
+            "200 unique default_headers blocks created %d pooled clients; "
+            "default_headers is folded into the request headers, so it must "
+            "not participate in the client cache key"
+            % stats["pool_entry_count"],
+        )
+
+    def test_pool_stats_reports_what_the_cache_key_controls(self):
+        """get_pool_stats exposes the pool, so growth is measurable, not guessed."""
+        try:
+            before = Session.get_pool_stats()
+        except RuntimeError as exc:
+            self.skipTest(str(exc))
+        for key in (
+            "pool_entry_count",
+            "pool_ttl_seconds",
+            "pool_scan_interval_seconds",
+            "total_evictions",
+        ):
+            self.assertIn(key, before)
+        Session.clear_client_pool()
+        self.assertEqual(Session.get_pool_stats()["pool_entry_count"], 0)
+        session = Session(timeout=10)
+        session.get(_url())
+        self.assertEqual(Session.get_pool_stats()["pool_entry_count"], 1)
+        # A distinct fingerprint is a distinct transport, so it IS a new client.
+        session.get(_url(), client_identifier="safari_16_0")
+        self.assertEqual(Session.get_pool_stats()["pool_entry_count"], 2)
+
+    def test_async_override_pairs_headers_with_the_resolved_identifier(self):
+        """The async auto-pairing must read the request snapshot, not live state.
+
+        Reading the live session default is a TOCTOU race: a concurrent
+        ``session.client_identifier = ...`` landing between the snapshot and
+        the comparison can make the two compare equal, which skips the
+        re-pairing and sends the snapshot profile's headers alongside the
+        override's TLS fingerprint (a Chrome User-Agent with a Safari
+        handshake, which is trivially detectable).
+        """
+        seen = []
+        handler = _RecordingHandler
+        server = ThreadingHTTPServer(("127.0.0.1", 0), handler)
+        handler.records = seen
+        thread = threading.Thread(target=server.serve_forever, daemon=True)
+        thread.start()
+        url = "http://127.0.0.1:%d/" % server.server_address[1]
+        try:
+            session = AsyncSession(client_identifier="chrome_120", timeout=10)
+            snapshot = session._session._snapshot_selected_defaults
+
+            def racing_snapshot(names):
+                # Take the snapshot, then let a setter land before the caller
+                # reaches the auto-pairing comparison.
+                result = snapshot(names)
+                session._session.defaults["client_identifier"] = "safari_16_0"
+                return result
+
+            session._session._snapshot_selected_defaults = racing_snapshot
+
+            async def scenario():
+                await session.get(url, client_identifier="safari_16_0")
+
+            asyncio.run(scenario())
+        finally:
+            server.shutdown()
+            server.server_close()
+        self.assertTrue(seen, "the test server recorded no request")
+        user_agent = seen[0].get("user-agent", "")
+        self.assertIn(
+            "Version/",
+            user_agent,
+            "async override sent %r; a Safari TLS fingerprint must not go out "
+            "with a Chrome User-Agent" % user_agent,
+        )
 
     def test_rss_growth_is_bounded(self):
         start = _rss_mb()
