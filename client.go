@@ -16,7 +16,6 @@ import (
 	"github.com/bogdanfinn/fhttp/httputil"
 	"github.com/bogdanfinn/tls-client/bandwidth"
 	"github.com/bogdanfinn/tls-client/profiles"
-	"golang.org/x/net/html/charset"
 	"golang.org/x/net/proxy"
 )
 
@@ -670,8 +669,14 @@ func (c *httpClient) do(req *http.Request) (resp *http.Response, err error) {
 				respBodyBytes = nil
 			} else {
 				bodyReader = io.MultiReader(bytes.NewReader(firstByte[:n]), resp.Body)
-				// Automatically detect the correct charset
-				bodyReader, err = charset.NewReader(bodyReader, resp.Header.Get("Content-Type"))
+				// Automatically detect the correct charset.
+				// LOCAL OVERLAY: charset_lean.go replaces
+				// golang.org/x/net/html/charset here.  That package links
+				// the whole legacy codec registry, including both
+				// directions of the CJK conversion tables, for a
+				// debug-only transcode.  The replacement decodes the same
+				// labels without dragging in the encode halves.
+				bodyReader, err = newCharsetReader(bodyReader, resp.Header.Get("Content-Type"))
 				if err != nil {
 					return nil, err
 				}

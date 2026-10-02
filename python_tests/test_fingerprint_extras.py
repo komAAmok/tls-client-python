@@ -88,10 +88,24 @@ class RegistryTests(unittest.TestCase):
     def test_cycle_detection(self):
         from tls_client.fingerprints import registry
 
+        # The registry is module-global, so the deliberately-cyclic fixtures
+        # must not outlive this test: anything that walks every registered
+        # preset (resolve() over list_presets()) would otherwise trip over
+        # them and fail somewhere else entirely.
+        added = {"cyc_a", "cyc_b"}
+        self.addCleanup(self._unregister_presets, added)
+
         registry.register({"name": "cyc_a", "based_on": "cyc_b"})
         registry.register({"name": "cyc_b", "based_on": "cyc_a"})
         with self.assertRaises(ValueError):
             resolve("cyc_a")
+
+    @staticmethod
+    def _unregister_presets(names):
+        from tls_client.fingerprints import registry
+
+        for name in names:
+            registry._PRESETS.pop(name, None)
 
     def test_load_preset_file(self):
         import json

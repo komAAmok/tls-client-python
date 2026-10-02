@@ -37,8 +37,31 @@ class _EchoHandler(BaseHTTPRequestHandler):
 
     def _drain(self):
         """Consume the request body so a keep-alive connection stays framed."""
+        if "chunked" in self.headers.get("Transfer-Encoding", "").lower():
+            self._body = self._read_chunked()
+            return
         length = int(self.headers.get("Content-Length", 0) or 0)
         self._body = self.rfile.read(length) if length else b""
+
+    def _read_chunked(self):
+        """Read a chunked request body (RFC 9112 section 7.1)."""
+        body = bytearray()
+        while True:
+            size_line = self.rfile.readline(65536).strip()
+            if not size_line:
+                break
+            try:
+                size = int(size_line.split(b";")[0], 16)
+            except ValueError:
+                break
+            if size == 0:
+                # Consume the trailer section that terminates the body.
+                while self.rfile.readline(65536).strip():
+                    pass
+                break
+            body += self.rfile.read(size)
+            self.rfile.readline(65536)
+        return bytes(body)
 
     def _payload(self, extra=None):
         body = getattr(self, "_body", b"")
@@ -55,7 +78,10 @@ class _EchoHandler(BaseHTTPRequestHandler):
     def _send(self, status, payload, headers=None):
         self.send_response(status)
         for name, value in (headers or {}).items():
-            self.send_header(name, value)
+            # A list means a repeated header (several Set-Cookie lines).
+            values = value if isinstance(value, (list, tuple)) else [value]
+            for item in values:
+                self.send_header(name, item)
         self.send_header("Content-Type", "application/json")
         self.send_header("Content-Length", str(len(payload)))
         self.end_headers()
@@ -65,6 +91,18 @@ class _EchoHandler(BaseHTTPRequestHandler):
     def _route(self):
         path = self.path.split("?")[0]
         self._drain()
+        if path == "/hostile-cookie":
+            self._send(
+                200,
+                b"ok",
+                {
+                    "Set-Cookie": [
+                        "cross=1; Domain=attacker.test; Path=/",
+                        "plain=1; Path=/",
+                    ]
+                },
+            )
+            return
         if path == "/redirect":
             self._send(302, b"", {"Location": "/final", "Set-Cookie": "hop=1; Path=/"})
             return
@@ -171,6 +209,45 @@ class RequestPreparationTests(unittest.TestCase):
             method="GET", url="https://e.test/p", params=[("t", "a"), ("t", "b")]
         ).prepare()
         self.assertEqual(prepared.url, "https://e.test/p?t=a&t=b")
+
+    def test_bytes_params_are_accepted(self):
+        """A bytes params value is already an encoded query string.
+
+        It used to reach urlunsplit() still as bytes, and mixing str with bytes
+        there raises "Cannot mix str and non-str arguments".
+        """
+        prepared = Request(
+            method="GET", url="https://e.test/p", params=b"a=1&b=2"
+        ).prepare()
+        self.assertEqual(prepared.url, "https://e.test/p?a=1&b=2")
+
+    def test_bytes_params_append_to_an_existing_query(self):
+        prepared = Request(
+            method="GET", url="https://e.test/p?z=0", params=b"a=1"
+        ).prepare()
+        self.assertEqual(prepared.url, "https://e.test/p?z=0&a=1")
+
+    def test_str_params_are_accepted(self):
+        prepared = Request(
+            method="GET", url="https://e.test/p", params="a=1"
+        ).prepare()
+        self.assertEqual(prepared.url, "https://e.test/p?a=1")
+
+    def test_iterable_body_without_a_length_declares_chunked(self):
+        prepared = Request(
+            method="POST", url="https://e.test/p", data=iter([b"aa", b"bb"])
+        ).prepare()
+        self.assertEqual(prepared.headers["Transfer-Encoding"], "chunked")
+        self.assertIsNone(prepared.headers.get("Content-Length"))
+
+    def test_file_like_body_declares_its_length(self):
+        import io as _io
+
+        prepared = Request(
+            method="POST", url="https://e.test/p", data=_io.BytesIO(b"streamed")
+        ).prepare()
+        self.assertEqual(prepared.headers["Content-Length"], "8")
+        self.assertIsNone(prepared.headers.get("Transfer-Encoding"))
 
     def test_form_data_urlencodes_and_sets_content_type(self):
         prepared = Request(
@@ -416,6 +493,43 @@ class SessionSemanticsTests(_ServerCase):
         self.assertEqual(payload["body"], "a=1")
         payload = session.post(self.base + "/echo", json={"a": 1}).json()
         self.assertEqual(json.loads(payload["body"]), {"a": 1})
+
+    def test_iterable_body_is_uploaded(self):
+        """An iterable body is sent once, with framing the peer can parse.
+
+        The body is materialised into bytes for the engine, but the streaming
+        path had already set Transfer-Encoding: chunked.  Keeping both made the
+        engine chunk-encode an already length-delimited body, and the peer
+        waited for chunks that never came - every such upload timed out.
+        """
+        response = Session().post(self.base + "/echo", data=iter([b"aa", b"bb"]))
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.json()["body"], "aabb")
+
+    def test_iterable_body_is_not_double_framed(self):
+        """The uploaded request must carry exactly one framing header."""
+        response = Session().post(self.base + "/echo", data=iter([b"xy"]))
+        headers = response.json()["headers"]
+        self.assertEqual(headers.get("content-length"), "2")
+        self.assertNotIn("transfer-encoding", headers)
+
+    def test_generator_body_is_uploaded(self):
+        def chunks():
+            yield b"one"
+            yield b"two"
+
+        response = Session().post(self.base + "/echo", data=chunks())
+        self.assertEqual(response.json()["body"], "onetwo")
+
+    def test_file_like_body_is_uploaded_with_its_length(self):
+        import io as _io
+
+        response = Session().post(
+            self.base + "/echo", data=_io.BytesIO(b"file-body")
+        )
+        payload = response.json()
+        self.assertEqual(payload["body"], "file-body")
+        self.assertEqual(payload["headers"].get("content-length"), "9")
 
     def test_get_accepts_a_params_list(self):
         payload = Session().get(
@@ -833,6 +947,139 @@ class CookieJarBehaviourTests(_ServerCase):
         response = Session().get(self.base + "/redirect", allow_redirects=False)
         self.assertIsInstance(response.cookies, RequestsCookieJar)
         self.assertEqual(response.cookies.get("hop"), "1")
+
+
+class CookiePolicyTests(_ServerCase):
+    """Set-Cookie attributes are enforced, not merely recorded.
+
+    The Go engine runs with an empty jar of its own, so this jar is the only
+    cookie store and it is the only thing standing between a hostile response
+    and a replayed credential.
+    """
+
+    def test_cross_domain_cookie_is_rejected(self):
+        """A Domain attribute naming another host must be refused.
+
+        Accepting it would let any site plant a cookie for any other site.
+        """
+        response = Session().get(self.base + "/hostile-cookie")
+        self.assertIsNone(response.cookies.get("cross"))
+        self.assertEqual(response.cookies.get("plain"), "1")
+
+    def test_cross_domain_cookie_never_reaches_the_session_jar(self):
+        session = Session()
+        session.get(self.base + "/hostile-cookie")
+        self.assertIsNone(session.cookies.get("cross"))
+        self.assertNotIn("attacker.test", session.cookies.list_domains())
+
+    def test_engine_cookie_map_cannot_reinject_a_rejected_cookie(self):
+        """The adapter must not merge the engine's host-blind cookie map back in.
+
+        The engine reports a name->value map with no domain or path, so merging
+        it unconditionally would resurrect exactly the cookies the policy just
+        rejected.
+        """
+        session = Session()
+        response = session.get(self.base + "/hostile-cookie")
+        self.assertNotIn("cross", dict(response.cookies.items()))
+        self.assertEqual(sorted(response.cookies.items()), [("plain", "1")])
+
+    def test_expired_cookie_is_not_stored(self):
+        jar = tls_client.cookies.extract_cookies(
+            {"Set-Cookie": ["gone=1; Max-Age=0; Path=/"]}, "http://h.test/"
+        )
+        self.assertIsNone(jar.get("gone"))
+
+    def test_secure_cookie_is_not_sent_over_http(self):
+        jar = RequestsCookieJar()
+        jar.set("s", "1", secure=True, domain="h.test", path="/")
+        self.assertEqual(tls_client.cookies.cookie_header(jar, "http://h.test/"), "")
+        self.assertEqual(
+            tls_client.cookies.cookie_header(jar, "https://h.test/"), "s=1"
+        )
+
+    def test_expired_cookie_is_not_sent(self):
+        import time
+
+        jar = RequestsCookieJar()
+        jar.set("old", "1", expires=int(time.time()) - 60, domain="h.test", path="/")
+        self.assertEqual(tls_client.cookies.cookie_header(jar, "http://h.test/"), "")
+
+    def test_cookie_for_another_domain_is_not_sent(self):
+        jar = RequestsCookieJar()
+        jar.set("other", "1", domain="evil.test", path="/")
+        self.assertEqual(tls_client.cookies.cookie_header(jar, "http://h.test/"), "")
+
+    def test_path_scoping_is_respected(self):
+        jar = RequestsCookieJar()
+        jar.set("deep", "1", domain="h.test", path="/deep")
+        jar.set("root", "2", domain="h.test", path="/")
+        self.assertEqual(
+            tls_client.cookies.cookie_header(jar, "http://h.test/"), "root=2"
+        )
+        self.assertIn(
+            "deep=1", tls_client.cookies.cookie_header(jar, "http://h.test/deep/x")
+        )
+
+    def test_httponly_and_secure_flags_are_preserved(self):
+        jar = tls_client.cookies.extract_cookies(
+            {"Set-Cookie": ["f=1; HttpOnly; Secure; Path=/"]}, "https://h.test/"
+        )
+        cookie = next(iter(jar))
+        self.assertTrue(cookie.secure)
+        self.assertIn("HttpOnly", cookie._rest)
+
+    def test_same_host_domain_attribute_is_accepted(self):
+        """A Domain attribute matching the origin is legitimate."""
+        jar = tls_client.cookies.extract_cookies(
+            {"Set-Cookie": ["good=1; Domain=h.test; Path=/"]}, "http://h.test/x"
+        )
+        self.assertEqual(jar.get("good"), "1")
+
+    def test_parent_domain_cookie_is_accepted(self):
+        jar = tls_client.cookies.extract_cookies(
+            {"Set-Cookie": ["up=1; Domain=h.test; Path=/"]}, "http://sub.h.test/x"
+        )
+        self.assertEqual(jar.get("up"), "1")
+
+    def test_multiple_set_cookie_headers_are_all_considered(self):
+        jar = tls_client.cookies.extract_cookies(
+            {
+                "Set-Cookie": [
+                    "a=1; Path=/",
+                    "bad=1; Domain=evil.test; Path=/",
+                    "b=2; Path=/",
+                ]
+            },
+            "http://h.test/",
+        )
+        self.assertEqual(sorted(jar.items()), [("a", "1"), ("b", "2")])
+
+    def test_bytes_set_cookie_values_are_accepted(self):
+        """Header values may arrive as bytes; the email parser takes str only."""
+        jar = tls_client.cookies.extract_cookies(
+            {"Set-Cookie": b"a=1; Path=/"}, "http://h.test/"
+        )
+        self.assertEqual(jar.get("a"), "1")
+
+    def test_malformed_input_yields_an_empty_jar_not_an_exception(self):
+        """extract_cookies is public API and must not raise on junk."""
+        for headers in (
+            {},
+            {"X-Other": "1"},
+            {"Set-Cookie": [""]},
+            {"Set-Cookie": ["=;;;"]},
+        ):
+            with self.subTest(headers=headers):
+                jar = tls_client.cookies.extract_cookies(headers, "http://h.test/")
+                self.assertIsInstance(jar, RequestsCookieJar)
+
+    def test_cookie_header_never_raises_for_odd_urls(self):
+        jar = RequestsCookieJar()
+        jar.set("a", "1")
+        for url in ("not a url", "file:///x", "", "http://[::1]:9/x"):
+            with self.subTest(url=url):
+                self.assertIsInstance(tls_client.cookies.cookie_header(jar, url), str)
 
 
 class TLSSurfaceTests(_ServerCase):

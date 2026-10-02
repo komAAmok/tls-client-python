@@ -23,8 +23,8 @@ sys.path.insert(0, str(ROOT))
 
 from tls_client._core import Session as NativeSession
 
-HEADER = open(str(ROOT / "tools" / "_sessions_header.py"), encoding="utf-8").read()
-BODY = open(str(ROOT / "tools" / "_sessions_body.py"), encoding="utf-8").read()
+HEADER_PATH = ROOT / "tools" / "_sessions_header.py"
+BODY_PATH = ROOT / "tools" / "_sessions_body.py"
 
 
 def _render(annotation) -> str:
@@ -97,7 +97,10 @@ def build() -> str:
             "        trust_env: bool = True,",
         )
     )
-    return (HEADER + BODY).replace("__INIT_PARAMS__", "\n".join(lines))
+    template = HEADER_PATH.read_text(encoding="utf-8") + BODY_PATH.read_text(
+        encoding="utf-8"
+    )
+    return template.replace("__INIT_PARAMS__", "\n".join(lines))
 
 
 def main() -> int:

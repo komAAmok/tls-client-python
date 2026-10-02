@@ -113,6 +113,14 @@ jobs:
         run: |
           python3 -m unittest python_tests.test_abi3_fingerprints -v
 
+      # Guards the binary-size work: x/net/html/charset must not be linked back
+      # in (it drags the whole x/text/encoding registry, encode tables and all,
+      # into a debug-only transcode) and the lean reader must keep calling
+      # NewDecoder() directly so the compiler devirtualises the call and drops
+      # the CJK encode tables.
+      - name: Check the binary size guards hold
+        run: python3 -m unittest python_tests.test_binary_size_guard -v
+
       # The loader names the file it will dlopen from (sys.platform,
       # platform.machine(), libc).  If any build step writes a name the loader
       # would not compute, the wheel ships a payload that is present but

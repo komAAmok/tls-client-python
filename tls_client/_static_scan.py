@@ -617,10 +617,23 @@ SCANS = (
 
 
 def run(scans: Sequence[Tuple[str, Any]] = SCANS) -> Report:
-    """Run every scan and return the aggregated report."""
+    """Run every scan and return the aggregated report.
+
+    A scan that raises is recorded as a failed check rather than propagating:
+    the checks import the very objects they are validating, so a missing name
+    surfaces as ImportError/AttributeError.  Letting that escape would turn a
+    real compatibility break into a crash with no report, and would hide every
+    scan queued behind it.
+    """
     report = Report()
-    for _, function in scans:
-        function(report)
+    for name, function in scans:
+        try:
+            function(report)
+        except Exception as exc:
+            report.check(
+                False,
+                "scan %r raised %s: %s" % (name, type(exc).__name__, exc),
+            )
     return report
 
 

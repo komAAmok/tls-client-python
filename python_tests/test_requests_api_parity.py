@@ -20,6 +20,7 @@ import inspect
 import os
 import sys
 import unittest
+import warnings
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -99,6 +100,92 @@ class StaticScanTests(unittest.TestCase):
         report.check(False, "planted")
         self.assertFalse(report.ok())
         self.assertEqual(report.problems, ["planted"])
+
+    def test_a_raising_scan_is_reported_not_propagated(self):
+        """A scan that raises must become a failed check.
+
+        The checks import the objects they validate, so a removed name shows up
+        as an ImportError.  Letting that escape would replace a clear "this name
+        is gone" report with a bare traceback and exit code 1 either way.
+        """
+
+        def exploding(report):
+            raise ImportError("cannot import name 'to_key_val_list' from 'tls_client.utils'")
+
+        report = _static_scan.run((("exploding", exploding),))
+        self.assertFalse(report.ok())
+        self.assertEqual(len(report.problems), 1)
+        self.assertIn("exploding", report.problems[0])
+        self.assertIn("ImportError", report.problems[0])
+
+    def test_a_raising_scan_does_not_hide_the_ones_after_it(self):
+        def exploding(report):
+            raise KeyError("codes")
+
+        report = _static_scan.run(
+            (("exploding", exploding), ("status codes", _static_scan.scan_status_codes))
+        )
+        self.assertGreater(report.checked, 1)
+        self.assertFalse(report.ok())
+
+
+class GeneratorToolingTests(unittest.TestCase):
+    """The code generators must not leak resources or emit stale output."""
+
+    def _load(self, name, record_warnings=False):
+        import importlib.util
+
+        path = ROOT / "tools" / ("%s.py" % name)
+        spec = importlib.util.spec_from_file_location("_probe_%s" % name, path)
+        module = importlib.util.module_from_spec(spec)
+        if not record_warnings:
+            spec.loader.exec_module(module)
+            return module
+
+        with warnings.catch_warnings(record=True) as caught:
+            warnings.simplefilter("always")
+            spec.loader.exec_module(module)
+            if hasattr(module, "build"):
+                module.build()
+        return module, [
+            item for item in caught if issubclass(item.category, ResourceWarning)
+        ]
+
+    def test_generators_do_not_leak_file_handles(self):
+        """Reading the templates must go through a context manager.
+
+        The templates used to be read in module-level open() calls whose result
+        was never closed.  CPython only reclaims them when the last reference
+        drops, so the symptom is a ResourceWarning per handle - which is exactly
+        what a strict test run or a leak-checking deployment turns into an
+        error.
+        """
+        leaks = {}
+        for name in ("gen_sessions", "gen_requests_surface"):
+            _, warnings_seen = self._load(name, record_warnings=True)
+            if warnings_seen:
+                leaks[name] = [str(item.message) for item in warnings_seen]
+        self.assertEqual(
+            leaks, {}, "generator modules leaked file handles: %s" % leaks
+        )
+
+    def test_generated_session_module_is_current(self):
+        module = self._load("gen_sessions")
+        current = (ROOT / "tls_client" / "sessions.py").read_text(encoding="utf-8")
+        self.assertEqual(
+            current,
+            module.build(),
+            "tls_client/sessions.py is stale; run tools/gen_sessions.py",
+        )
+
+    def test_generated_surface_module_is_current(self):
+        module = self._load("gen_requests_surface")
+        current = (ROOT / "tls_client" / "_tls_surface.py").read_text(encoding="utf-8")
+        self.assertEqual(
+            current,
+            module.build(),
+            "tls_client/_tls_surface.py is stale; run tools/gen_requests_surface.py",
+        )
 
 
 class ModuleLayoutTests(unittest.TestCase):

@@ -18,6 +18,18 @@ must be preserved when resolving future upstream conflicts:
 
 - `client.go`, `client_options.go`, `profiles/profiles.go`: TCP/IP fingerprint
   overrides plus the local request/proxy locking and panic-to-error behavior.
+  **2026-10-02 (binary size):** the debug body-preview in `client.go` now calls
+  the local `newCharsetReader` (`charset_lean.go`) instead of
+  `golang.org/x/net/html/charset.NewReader`, and the `html/charset` import was
+  dropped. `html/charset` links the entire `x/text/encoding` registry through
+  `htmlindex`, including both directions of the CJK conversion tables, for a
+  transcode that only ever runs when `with_debug` is set. The replacement
+  decodes the same labels from the decode halves only, which removes ~283 KB
+  from the linux/amd64 shared library (14,095,224 → 13,812,184 bytes, −2.0%).
+  The `charset_lean.go` switch must keep calling `X.NewDecoder()` directly:
+  storing those methods as values (a map of method values, an
+  `encoding.Encoding` table) keeps the interface itabs — and with them the
+  encode tables — linked, which gives back most of the saving.
 - `roundtripper.go`: the QUIC/HTTP-3 transport construction was split out of
   this file into `roundtripper_http3.go`. `http3.NextProtoH3` references were
   replaced by the local `nextProtoH3` identifier.

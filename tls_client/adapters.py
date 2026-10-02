@@ -4,10 +4,11 @@ import io
 import time
 from datetime import timedelta
 from http.client import responses as reason_phrases
+from urllib.parse import urlparse
 
 from tls_client import exceptions
 from tls_client._core import _load_client_certificates, _resolve_proxy_url
-from tls_client.cookies import extract_cookies_to_jar  # noqa: F401
+from tls_client.cookies import extract_cookies, extract_cookies_to_jar  # noqa: F401
 from tls_client.exceptions import (  # noqa: F401
     ConnectionError,
     ConnectTimeout,
@@ -121,6 +122,22 @@ def _body_bytes(value):
     )
 
 
+def _pop_chunked_header(headers):
+    """Remove a chunked Transfer-Encoding header; return True when removed.
+
+    The header block is case-insensitive, so the stored key is looked up rather
+    than assumed, and the lookup and the delete happen together so there is no
+    window in which the key could be missing.
+    """
+    for key in list(headers):
+        if key.lower() != "transfer-encoding":
+            continue
+        if "chunked" in str(headers[key]).lower():
+            del headers[key]
+            return True
+    return False
+
+
 def _transport_error(error, request):
     """Map a native engine error onto the matching requests exception type."""
     message = str(error)
@@ -168,10 +185,22 @@ class TLSClientAdapter(BaseAdapter):
         options.update(_timeout_options(timeout))
         if tls_options:
             options.update(tls_options)
+
+        # An iterable/file body is materialised into bytes here because the
+        # engine takes a flat buffer.  Once materialised the body has a known
+        # length, so a Transfer-Encoding header inherited from the streaming
+        # path is both wrong and fatal: the engine would chunk-encode a body
+        # that already declares chunked framing, and the peer would wait for
+        # chunks that never arrive.  Replace it with Content-Length.
+        body = _body_bytes(request.body)
+        headers = dict(request.headers.items())
+        if body is not None and _pop_chunked_header(headers):
+            headers["Content-Length"] = str(len(body))
+
         options.update(
-            body=_body_bytes(request.body),
+            body=body,
             follow_redirects=False,
-            headers=dict(request.headers.items()),
+            headers=headers,
             proxy=proxy,
             verify=bool(verify),
         )
@@ -199,12 +228,18 @@ class TLSClientAdapter(BaseAdapter):
         response.url = native.url or request.url
         response.reason = native.reason or reason_phrases.get(native.status_code, "")
         response.encoding = get_encoding_from_headers(response.headers)
-        from tls_client.cookies import extract_cookies
-
+        # The jar is built from the raw Set-Cookie headers so the cookie policy
+        # runs.  The engine also reports a name->value map, but that map carries
+        # no domain or path information, so a cookie the policy had just
+        # rejected - a Domain attribute naming another host, an expired
+        # Max-Age, a Secure cookie arriving over http - would be merged straight
+        # back in and could then be replayed to the wrong host.  Keep the map
+        # only as a fallback for when the header block is unavailable.
         response.cookies = extract_cookies(native.headers, response.url)
-        for name, value in (native.cookies or {}).items():
-            if response.cookies.get(name) is None:
-                response.cookies.set(name, value)
+        if not response.cookies:
+            host = urlparse(response.url).hostname
+            for name, value in (native.cookies or {}).items():
+                response.cookies.set(name, value, domain=host)
         response.elapsed = timedelta(seconds=time.monotonic() - started)
         response.request, response.connection = request, self
         response.used_protocol = native.used_protocol

@@ -381,6 +381,12 @@ class PreparedRequest(RequestEncodingMixin, RequestHooksMixin):
         if host is not None and "." in host:
             host = host.lower()
 
+        # A str/bytes params value is already an encoded query string; decode
+        # bytes so the url assembly below never mixes str and bytes (requests
+        # does the same via to_native_string).
+        if isinstance(params, (str, bytes)):
+            params = to_native_string(params)
+
         if params:
             enc_params = self._encode_params(params)
             if enc_params:

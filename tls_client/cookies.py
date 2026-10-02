@@ -12,9 +12,10 @@ import copy
 import threading
 import time
 from collections.abc import MutableMapping
+from email.message import Message as HTTPMessage
 from http.cookiejar import Cookie, CookieJar
-from http.cookies import Morsel, SimpleCookie
-from urllib.parse import urlparse, urlsplit, urlunparse
+from http.cookies import Morsel
+from urllib.parse import urlparse, urlunparse
 
 from tls_client._internal_utils import to_native_string
 
@@ -523,28 +524,48 @@ def extract_cookies_to_jar(jar, request, response):
 def cookie_header(jar, url):
     """Return the Cookie header value a jar would send to *url*, or an empty string.
 
-    The Go engine owns the transport and therefore the cookie jar; this helper
-    renders a jar into a header string for the requests-compatible facade.
+    The Go engine runs with an empty jar of its own, so this jar is the only
+    cookie store in play and it has to apply the same policy the standard
+    library would: a Secure cookie must not travel over plain http, an expired
+    cookie must not be sent, a cookie scoped to another domain or to a path the
+    request does not reach must stay behind.  Delegating to
+    ``CookieJar.add_cookie_header`` is what guarantees that.
     """
-    parsed = urlsplit(url)
-    host = (parsed.hostname or "").lower()
-    path = parsed.path or "/"
-    pairs = []
-    for cookie in jar:
-        domain = (cookie.domain or "").lstrip(".").lower()
-        if domain and host != domain and not host.endswith("." + domain):
-            continue
-        if cookie.path and not path.startswith(cookie.path):
-            continue
-        pairs.append("%s=%s" % (cookie.name, cookie.value))
-    return "; ".join(pairs)
+    request = MockRequest(_UrlOnlyRequest(url))
+    try:
+        jar.add_cookie_header(request)
+    except Exception:
+        # A malformed cookie or an exotic custom jar must not break the request;
+        # fall back to sending nothing rather than guessing.
+        return ""
+    return request.get_new_headers().get("Cookie") or ""
+
+
+class _UrlOnlyRequest:
+    """Minimal PreparedRequest stand-in for the cookie policy machinery.
+
+    ``add_cookie_header`` needs ``url`` and ``headers``; nothing else is read.
+    """
+
+    __slots__ = ("headers", "url")
+
+    def __init__(self, url):
+        self.url = url
+        self.headers = {}
 
 
 def extract_cookies(headers, url):
-    """Build a RequestsCookieJar from raw response headers and the request URL."""
-    parsed = urlsplit(url)
-    host = (parsed.hostname or "").lower()
+    """Build a RequestsCookieJar from raw response headers and the request URL.
+
+    The Set-Cookie attributes are interpreted by ``CookieJar.extract_cookies``
+    rather than assigned directly, because that is what enforces the policy:
+    a Domain attribute naming a host the response did not come from is rejected
+    (otherwise any site could plant cookies for any other site), a Max-Age=0 or
+    past Expires deletes instead of resurrecting, and Secure/HttpOnly land in
+    the cookie's flags.
+    """
     jar = RequestsCookieJar()
+
     values = []
     for name, value in (headers or {}).items():
         if str(name).lower() == "set-cookie":
@@ -552,21 +573,24 @@ def extract_cookies(headers, url):
             break
     if not isinstance(values, (list, tuple)):
         values = [values]
+
+    # RFC 6265 allows repeated Set-Cookie headers; fold them into one
+    # HTTPMessage so the policy sees each cookie separately.  Header values may
+    # arrive as bytes (urllib3 does that for some transports) and the email
+    # module only accepts str.
+    message = HTTPMessage()
     for value in values:
         if not value:
             continue
-        parsed_cookie = SimpleCookie()
-        try:
-            parsed_cookie.load(value)
-        except Exception:
-            continue
-        for name, morsel in parsed_cookie.items():
-            jar.set(
-                name,
-                morsel.value,
-                domain=morsel["domain"] or host,
-                path=morsel["path"] or "/",
-            )
+        message.add_header("Set-Cookie", to_native_string(value))
+    if not message.get_all("Set-Cookie"):
+        return jar
+
+    try:
+        jar.extract_cookies(MockResponse(message), MockRequest(_UrlOnlyRequest(url)))
+    except Exception:
+        # The policy rejected something malformed; the jar keeps what it took.
+        pass
     return jar
 
 
