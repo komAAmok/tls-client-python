@@ -140,9 +140,13 @@ must be preserved when resolving future upstream conflicts:
   captured Chrome majors that have no hand-written header block
   (`chrome_100`, `chrome_113`, `chrome_121`, …), which also made their
   fingerprint presets unusable. The allowlist now unions the header table with
-  the full captured range 99…153, and `python_tests/test_supported_identifiers.py`
-  pins that every engine-registered identifier is accepted and every Chrome
-  preset can be applied.
+  `fingerprints.chrome_full.CAPTURED_CHROME_MAJORS`, which
+  `tools/gen_chrome_fingerprint_presets.py` emits from
+  `tools/_chrome_captures.json` — so a new capture widens the allowlist with no
+  Python edit. `python_tests/test_supported_identifiers.py` pins both
+  directions: every capture is accepted, and nothing is accepted that the
+  engine has not registered (a too-wide allowlist would turn a clean
+  `ValueError` into an engine error at request time).
 - `tls_client/websocket.py` + `cffi_binding/main.go`: `WebsocketOptions`
   gained `enable_compression` (ABI 4, append-only) so upstream's
   `WithEnableCompression` is reachable from Python as `WebSocket(..., compression=True)`.
@@ -153,7 +157,9 @@ must be preserved when resolving future upstream conflicts:
 - `tools/_sessions_body.py`: the requests-compatible `Session` forwards
   `stream_to_file` to the native session. It previously existed only on
   `NativeSession`, so the documented call raised `AttributeError` from the
-  class the docs point at.
+  class the docs point at. `python_tests/test_facade_surface_parity.py` now
+  walks both classes per instance, so the next native method that is not
+  re-exposed fails a test instead of shipping.
 
 ## Upstream v1.16.0 → v1.18.1 delta and how it was reconciled
 
