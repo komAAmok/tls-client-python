@@ -476,6 +476,12 @@ def _register(registry) -> None:
 
 # Number of captured Chrome majors exposed by this module.
 CAPTURED_MAJORS = %d
+
+# The captured majors themselves, in ascending order.  This is the source of
+# truth for "which chrome_<major> identifiers exist"; tls_client._core derives
+# its SUPPORTED_CLIENT_IDENTIFIERS from it so the Python allowlist cannot drift
+# from the capture table.
+CAPTURED_CHROME_MAJORS = %r
 '''
 
 
@@ -546,7 +552,7 @@ def build_module(captures: Dict[str, Dict[str, Any]]) -> str:
     for name in presets:
         lines.append(_emit_preset(name, presets[name]))
     lines.append("}")
-    lines.append(FOOTER % len(majors))
+    lines.append(FOOTER % (len(majors), tuple(majors)))
     return "\n".join(lines) + "\n"
 
 

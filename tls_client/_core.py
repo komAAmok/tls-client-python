@@ -127,12 +127,20 @@ ClientIdentifiers: TypeAlias = Literal[
 # engine has the profile.
 #
 # The default-header table stays the *source of header defaults*; it is no
-# longer the source of truth for "is this identifier real".
-_CAPTURED_CHROME_MAJORS = frozenset(
-    "chrome_%d" % major for major in range(99, 154)
-) | frozenset("chrome_%d_PSK" % major for major in range(99, 154))
+# longer the source of truth for "is this identifier real".  The captured range
+# comes from the generated preset module, which is written by
+# tools/gen_chrome_fingerprint_presets.py from tools/_chrome_captures.json -- so
+# adding a capture updates the allowlist automatically, and
+# test_supported_identifiers fails if the two ever disagree.
+from tls_client.fingerprints.chrome_full import CAPTURED_CHROME_MAJORS as _CAPTURED
 
-SUPPORTED_CLIENT_IDENTIFIERS = frozenset(DEFAULT_HEADERS) | _CAPTURED_CHROME_MAJORS
+_CAPTURED_CHROME_IDENTIFIERS = frozenset(
+    "chrome_%d%s" % (major, suffix)
+    for major in _CAPTURED
+    for suffix in ("", "_PSK")
+)
+
+SUPPORTED_CLIENT_IDENTIFIERS = frozenset(DEFAULT_HEADERS) | _CAPTURED_CHROME_IDENTIFIERS
 
 
 # ---------------------------------------------------------------------------
