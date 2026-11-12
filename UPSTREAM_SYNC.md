@@ -135,6 +135,25 @@ must be preserved when resolving future upstream conflicts:
   `tests/header_order_test.go`, and related test files: local BrowserLeaks
   endpoint adaptation.
 - `.gitignore` and `Readme.md`: union/local project versions, respectively.
+- `tls_client/_core.py` + `tools/_sessions_body.py`: the identifier allowlist
+  is no longer `frozenset(DEFAULT_HEADERS)`. That derivation rejected the 35
+  captured Chrome majors that have no hand-written header block
+  (`chrome_100`, `chrome_113`, `chrome_121`, …), which also made their
+  fingerprint presets unusable. The allowlist now unions the header table with
+  the full captured range 99…153, and `python_tests/test_supported_identifiers.py`
+  pins that every engine-registered identifier is accepted and every Chrome
+  preset can be applied.
+- `tls_client/websocket.py` + `cffi_binding/main.go`: `WebsocketOptions`
+  gained `enable_compression` (ABI 4, append-only) so upstream's
+  `WithEnableCompression` is reachable from Python as `WebSocket(..., compression=True)`.
+  Without it every client looked like one that does not offer
+  `permessage-deflate`, which is itself a handshake-level difference.
+  Pinned by `python_tests/test_websocket_compression.py`, which reads the
+  upgrade request off a local socket.
+- `tools/_sessions_body.py`: the requests-compatible `Session` forwards
+  `stream_to_file` to the native session. It previously existed only on
+  `NativeSession`, so the documented call raised `AttributeError` from the
+  class the docs point at.
 
 ## Upstream v1.16.0 → v1.18.1 delta and how it was reconciled
 

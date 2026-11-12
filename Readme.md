@@ -6,12 +6,18 @@
 > **Requests 兼容层：** 请求 API 的完整清单、兼容契约与生成式约束见
 > [`docs/REQUESTS_API.md`](docs/REQUESTS_API.md)。静态扫描入口：
 > `python3 -m tls_client._static_scan`。
+>
+> **开发文档：** 环境搭建、原生库构建、ABI 演进规则、生成链与常见陷阱见
+> [`docs/DEVELOPMENT.md`](docs/DEVELOPMENT.md)。
 
 [![PyPI version](https://img.shields.io/pypi/v/tls-client-python)](https://pypi.org/project/tls-client-python/)
 [![Python](https://img.shields.io/pypi/pyversions/tls-client-python)](https://pypi.org/project/tls-client-python/)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 
 **CFFI-based, high-performance Python binding for [`tls-client`](https://github.com/bogdanfinn/tls-client) — drop-in compatible with [`requests`](https://github.com/psf/requests) and [`Python-Tls-Client`](https://github.com/FlorianREGAZ/Python-Tls-Client).**
+
+> **Engine: upstream `tls-client` v1.18.1** · package `1.18.1.0` · native ABI **4**
+> (Go 1.27, utls 1.8.2 with ML-KEM/ML-DSA, fhttp 0.7.3).
 ---
 
 ## What is TLS Fingerprinting?
@@ -40,7 +46,7 @@ For a deep dive, see [this excellent article on TLS fingerprinting](https://http
 | 🔌 **WebSocket** | TLS-fingerprinted WebSocket (HTTP/1.1 handshake) — `WebSocket` |
 | 🛡️ **Panic-proof** | All Go panics caught and surfaced as Python exceptions |
 | ⚙️ **Custom TLS** | Full 26-field custom TLS client configuration |
-| 🔬 **Chrome 99–154 Captures** | Byte-exact profiles for **every** Chrome major 99…154, recovered from live handshakes |
+| 🔬 **Chrome 99–153 Captures** | Byte-exact profiles for **every** captured Chrome major 99…153 (55 majors), recovered from live handshakes — plus the hand-written 154 |
 | 🎲 **Per-Handshake Extension Shuffle** | Chromium's unseeded extension rotation, with GREASE/padding/PSK pinned (`ABI 3`) |
 | 🧭 **Destination-Aware Header Order** | Header order selected by `Sec-Fetch-Dest` — navigation vs sub-resource (`ABI 3`) |
 | 🌐 **Deep TCP Fingerprint** | DF bit, TOS, Nagle, window clamp and IP-ID mode (`ABI 3`) |
@@ -48,8 +54,8 @@ For a deep dive, see [this excellent article on TLS fingerprinting](https://http
 | 🧹 **Clean Close** | `HttpClient.Close()` releases HTTP/3 UDP sockets, not just idle TCP conns — the binding uses it on every pool eviction |
 | 🎯 **Fingerprint Presets** | Coherent per-OS bundles: identifier + headers + header order + TCP fingerprint (`tls_client.fingerprints`) |
 | 🧭 **Request Contexts** | Browser-coherent `Sec-Fetch-*`, Client Hints and RFC 9218 `Priority` headers (`RequestContext`) |
-| 🔏 **Trust Anchors / ECH** | Chrome 152 `0xCA34` trust anchors and automatic ECH config resolution over DoH |
-| 🪶 **Full-fidelity build** | A single full build (QUIC/HTTP-3 + the complete profile catalogue) |
+| 🔏 **Trust Anchors / ECH** | Chrome 144+ `0xCA34` trust anchors — shuffled per process up to Chrome 153, **sorted from 154** — and automatic ECH config resolution over DoH |
+| 🪶 **Full-fidelity build** | A single full build (QUIC/HTTP-3 + the complete profile catalogue), 14.1 MB on linux/amd64 |
 
 > **macOS TCP fingerprinting:** macOS derives TCP MSS during `connect` and
 > rejects `TCP_MAXSEG` in the pre-connect socket hook. The MSS hint is therefore
@@ -178,32 +184,41 @@ The complete, runtime-validated list is exported as
 `tls_client.SUPPORTED_CLIENT_IDENTIFIERS`. It is also used for IDE/type
 checking through `ClientIdentifiers`.
 
-### 🌐 Chrome — 79 Profiles (captured 99–153 + hand-written)
+### 🌐 Chrome — 113 registered identifiers (55 captures + hand-written)
 
-The full Chrome range **99 through 153** is available, recovered from live
-handshakes rather than hand-transcribed. Every major ships as both
-`chrome_<major>` and `chrome_<major>_PSK`:
+Two layers share the `chrome_*` namespace:
 
-| Identifier | Notes |
-|-----------|-------|
-| `chrome_99` — `chrome_154` | **Byte-exact captures, every major 99…154** |
-| `chrome_99_PSK` — `chrome_153_PSK` | Same, with PSK key exchange |
+**1. Captured profiles — every major 99…153.** Recovered from live handshakes
+rather than hand-transcribed, registered by the engine under both
+`chrome_<major>` and `chrome_<major>_PSK`. The captures pin the real
+per-version cipher list, extension order, supported groups, signature
+algorithms, JA3/JA4 and HTTP/2 Akamai fingerprint — so `chrome_111`,
+`chrome_121`, `chrome_137` reproduce the wire bytes of that exact release,
+including the per-milestone extension-order reshuffles.
 
-The captures pin the real per-version cipher list, extension order, supported
-groups, signature algorithms, JA3/JA4 and HTTP/2 Akamai fingerprint — so
-`chrome_111`, `chrome_121`, `chrome_137` etc. reproduce the wire bytes of that
-exact release, including the per-milestone extension-order reshuffles.
-
-Hand-written profiles with PSK / Post-Quantum / trust-anchor refinements
-(`chrome_116_PSK_PQ`, `chrome_130_PSK`, `chrome_144`, `chrome_146`,
-`chrome_150`, `chrome_152`, …) remain authoritative where they exist.
+**2. Hand-written profiles** with PSK / Post-Quantum / trust-anchor
+refinements. These stay authoritative for their version, and the newest
+upstream milestone (`chrome_154`) exists only here:
 
 | Identifier | Notes |
 |-----------|-------|
-| `chrome_116_PSK_PQ` | Chrome 116 with PSK + Post-Quantum |
-| `chrome_130_PSK` · `chrome_131_PSK` · `chrome_133_PSK` | PSK variants |
-| `chrome_144` · `chrome_146` · `chrome_150` · `chrome_152` | standard + PSK |
-| `chrome_146` | **default identifier** (standard & PSK) |
+| `chrome_154` · `chrome_154_PSK` | newest upstream profile; **sorted** trust anchors |
+| `chrome_153` · `chrome_153_PSK` | last milestone with per-process **shuffled** anchors |
+| `chrome_152` · `chrome_152_PSK` | standard + PSK |
+| `chrome_150` · `chrome_150_PSK` | standard + PSK |
+| `chrome_146` · `chrome_146_PSK` | standard + PSK |
+| `chrome_144` · `chrome_144_PSK` | standard + PSK |
+| `chrome_133` · `chrome_133_PSK` · `chrome_131` · `chrome_131_PSK` | standard + PSK |
+| `chrome_130_PSK` | PSK only |
+| `chrome_116_PSK` · `chrome_116_PSK_PQ` | PSK / Post-Quantum |
+
+`chrome_120` is the default `client_identifier`.
+
+> The engine registers all 165 chrome entries (`MappedTLSClients`), and
+> `tls_client.SUPPORTED_CLIENT_IDENTIFIERS` accepts every one of them —
+> including the 35 captured majors that have no hand-written header block
+> (`chrome_100`, `chrome_113`, `chrome_121`, …).  Those still get coherent
+> headers through the matching preset, which carries its own User-Agent.
 
 ### 🦊 Firefox — 16 Profiles
 
@@ -217,12 +232,13 @@ Hand-written profiles with PSK / Post-Quantum / trust-anchor refinements
 | `firefox_147` · `firefox_147_PSK` | Firefox 147 (standard & PSK) |
 | `firefox_148` | Firefox 148 |
 
-### 🍏 Safari — 10 Profiles
+### 🍏 Safari — 11 Profiles
 
 | Identifier | Device |
 |-----------|--------|
 | `safari_15_6_1` | Safari 15.6.1 (macOS) |
 | `safari_16_0` | Safari 16.0 (macOS) |
+| `safari_27_2` | Safari 27.2 (macOS 27.2) — `1.18.1` capture |
 | `safari_ipad_15_6` | Safari 15.6 (iPadOS) |
 | `safari_ios_15_5` · `safari_ios_15_6` | Safari iOS 15.5–15.6 |
 | `safari_ios_16_0` · `safari_ios_17_0` | Safari iOS 16 · 17 |
@@ -461,11 +477,43 @@ session = Session()
 apply(session, "chrome_150_linux")   # identifier + headers + permute + TCP
 ```
 
+### Transport Health Checks (ABI 4)
+
+Three timeouts that decide when a *connection* is written off, as opposed to
+when a request is. Zero keeps the previous behaviour for the first two; the
+third defaults to "no timeout", which is what most callers already had.
+
+```python
+session = Session(
+    client_identifier="chrome_154",
+
+    # Send an HTTP/2 PING when no frame has arrived for this long, so idle
+    # connections survive servers that reap them. 0 disables the check.
+    h2_read_idle_timeout_ms=25000,
+
+    # Close the connection when that PING is not acknowledged in time.
+    # 0 keeps the engine default of 15 s.
+    h2_ping_timeout_ms=15000,
+
+    # Give up waiting for response headers this long after the request body
+    # was written (HTTP/1.1 and HTTP/2). 0 means no timeout.
+    response_header_timeout_ms=45000,
+)
+```
+
+All three are also per-request overrides. On a library older than ABI 4 they
+are simply ignored — the request proceeds without the health check rather
+than failing, because omitting them only restores the pre-1.18.1 behaviour.
+
 ### WebSocket (TLS-fingerprinted)
 
 WebSocket connections reuse the same TLS fingerprint, connection pool and
 header ordering as regular requests.  The handshake is forced to HTTP/1.1
 (as the WebSocket upgrade requires it).
+
+`compression=True` offers `permessage-deflate` in the handshake and
+transparently compresses/decompresses messages once the server accepts it —
+which is what browsers and iOS `URLSession` do.
 
 ```python
 from tls_client import WebSocket, TEXT, BINARY
@@ -578,8 +626,8 @@ Or, if you prefer crypto:
 | `patch(url, **kwargs)` | HTTP PATCH |
 | `execute_request(method, url, **kwargs)` | Generic request with full options |
 | `typed_request(Request)` | Strongly-typed request |
-| `stream_to_file(method, url, path)` | Stream response body to disk |
-| `clear_client_pool()` | Close idle connections (static) |
+| `stream_to_file(method, url, path, **kw)` | Stream the response body straight to disk; metadata still on the response |
+| `clear_client_pool()` | Class method — close every pooled client (also exported at module level) |
 
 ### Response
 

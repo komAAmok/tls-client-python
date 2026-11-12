@@ -113,10 +113,26 @@ ClientIdentifiers: TypeAlias = Literal[
     "okhttp4_android_12", "okhttp4_android_13",
 ]
 
-# Runtime counterpart of ``ClientIdentifiers``.  Keeping this derived from
-# the header/profile table lets callers fail fast instead of silently sending
-# a request with an unknown fingerprint.
-SUPPORTED_CLIENT_IDENTIFIERS = frozenset(DEFAULT_HEADERS)
+# Runtime counterpart of ``ClientIdentifiers``.
+#
+# It has to cover every identifier the **engine** accepts, not just the ones
+# that happen to have an entry in the default-header table: the captured
+# Chrome profiles (`chrome_99`..`chrome_153`) are registered into the engine's
+# MappedTLSClients by profiles/chrome_captured_registry.go, and most of them
+# have no hand-written header block.  Deriving the allowlist from
+# DEFAULT_HEADERS alone therefore rejected 35 of the 55 captured majors
+# (`chrome_100`, `chrome_113`, `chrome_121`, ...), which in turn made the
+# matching `tls_client.fingerprints` presets unusable: `apply(s, "chrome_121_windows")`
+# raised ValueError even though the preset carries its own User-Agent and the
+# engine has the profile.
+#
+# The default-header table stays the *source of header defaults*; it is no
+# longer the source of truth for "is this identifier real".
+_CAPTURED_CHROME_MAJORS = frozenset(
+    "chrome_%d" % major for major in range(99, 154)
+) | frozenset("chrome_%d_PSK" % major for major in range(99, 154))
+
+SUPPORTED_CLIENT_IDENTIFIERS = frozenset(DEFAULT_HEADERS) | _CAPTURED_CHROME_MAJORS
 
 
 # ---------------------------------------------------------------------------
@@ -1234,6 +1250,7 @@ typedef struct {
     int   read_buffer_size;
     int   write_buffer_size;
     int   handshake_timeout_milliseconds;
+    int   enable_compression;
 } WebsocketOptions;
 
 typedef struct {

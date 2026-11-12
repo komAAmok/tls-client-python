@@ -153,6 +153,11 @@ class WebSocket:
         Per-frame buffer sizes (0 = engine default).
     handshake_timeout_milliseconds:
         Handshake timeout (0 = engine default).
+    compression:
+        Offer ``permessage-deflate`` in the handshake and transparently
+        compress/decompress messages once the server accepts it.  Browsers and
+        iOS ``URLSession`` always offer it, so a client that does not is
+        distinguishable at the upgrade.
     """
 
     def __init__(
@@ -165,6 +170,7 @@ class WebSocket:
         read_buffer_size: int = 0,
         write_buffer_size: int = 0,
         handshake_timeout_milliseconds: int = 0,
+        compression: bool = False,
     ) -> None:
         if client_identifier not in _core.SUPPORTED_CLIENT_IDENTIFIERS:
             raise ValueError("unsupported client_identifier %r" % client_identifier)
@@ -195,6 +201,7 @@ class WebSocket:
         opts.read_buffer_size = read_buffer_size
         opts.write_buffer_size = write_buffer_size
         opts.handshake_timeout_milliseconds = handshake_timeout_milliseconds
+        opts.enable_compression = 1 if compression else 0
 
         err = ffi.new("char **")
         ws_id = lib.WebsocketNew(opts, err)

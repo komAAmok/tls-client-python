@@ -860,6 +860,23 @@ class Session(TLSOptionsMixin, TLSVerbMixin, SessionRedirectMixin):
         """
         return self.request(method, url, **kwargs)
 
+    def stream_to_file(self, method, url, output_path, **kwargs):
+        """Send a request and stream the response body straight to disk.
+
+        The native engine has this exact method; the facade adds nothing to it
+        except the requests-style option translation, so callers that use the
+        requests-compatible class keep the streaming capability instead of
+        having to drop down to `NativeSession`.
+
+        ```python
+        resp = session.stream_to_file(
+            "GET", "https://example.com/big.bin", "/tmp/big.bin"
+        )
+        print(resp.status_code)   # response metadata is still populated
+        ```
+        """
+        return self._native.stream_to_file(method, url, output_path, **kwargs)
+
     def typed_request(self, request, **kwargs):
         """Send a Request, a PreparedRequest or a mapping describing one."""
         if isinstance(request, PreparedRequest):

@@ -206,6 +206,9 @@ typedef struct {
     int   read_buffer_size;
     int   write_buffer_size;
     int   handshake_timeout_milliseconds;
+    // ABI 4: offer permessage-deflate in the handshake (upstream 1.18.1
+    // WithEnableCompression).  Append-only, like every other ABI change.
+    int   enable_compression;
 } WebsocketOptions;
 
 typedef struct {
@@ -2380,6 +2383,9 @@ func WebsocketNew(opts *C.WebsocketOptions, errMsg **C.char) (id C.uintptr_t) {
 	}
 	if int(opts.handshake_timeout_milliseconds) > 0 {
 		wsOpts = append(wsOpts, tls_client.WithHandshakeTimeoutMilliseconds(int(opts.handshake_timeout_milliseconds)))
+	}
+	if int(opts.enable_compression) != 0 {
+		wsOpts = append(wsOpts, tls_client.WithEnableCompression())
 	}
 
 	ws, err := tls_client.NewWebsocket(nil, wsOpts...)
