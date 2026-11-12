@@ -402,6 +402,12 @@ func (r *Request) ProtoAtLeast(major, minor int) bool {
 		r.ProtoMajor == major && r.ProtoMinor >= minor
 }
 
+// emptyHeaderValue reports whether a header that is present carries nothing:
+// no value at all, or one empty string.
+func emptyHeaderValue(vv []string) bool {
+	return len(vv) == 0 || vv[0] == ""
+}
+
 // UserAgent returns the client's User-Agent, if sent in the request.
 func (r *Request) UserAgent() string {
 	return r.Header.Get("User-Agent")
@@ -615,22 +621,44 @@ func (r *Request) write(w io.Writer, usingProxy bool, extraHeaders Header, waitF
 		return err
 	}
 
-	// Host and User-Agent are written through the header map (so that they
-	// participate in the configured header order), which means the map has
-	// to exist: a zero-value Request has a nil Header.
-	if r.Header == nil {
-		r.Header = make(Header)
+	// Host, User-Agent and the transfer headers are written through a copy of
+	// the header map, so that they participate in the configured header order
+	// without changing r.Header.
+	header := r.Header.Clone()
+	if header == nil {
+		header = make(Header)
 	}
 
-	if _, ok := r.Header["Host"]; !ok {
-		if _, ok := r.Header["host"]; !ok {
-			r.Header.Set("Host", host)
+	if _, ok := header["Host"]; !ok {
+		if _, ok := header["host"]; !ok {
+			header.Set("Host", host)
 		}
 	}
 
-	// if user agent field is not present, add it
-	if uaCap, uaLow := r.Header["User-Agent"], r.Header["user-agent"]; uaCap == nil && uaLow == nil {
-		r.Header.Set("User-Agent", "Go-http-client/1.1")
+	// If no User-Agent is given, Go's own goes out. One set to nil or to the
+	// empty string means none, as in net/http and as the HTTP/2 path here
+	// already does; it used to go out as an empty "User-Agent:" line.
+	var exclude map[string]bool
+	uaCap, hasCap := header["User-Agent"]
+	uaLow, hasLow := header["user-agent"]
+	switch {
+	case !hasCap && !hasLow:
+		header.Set("User-Agent", "Go-http-client/1.1")
+	default:
+		exclude = make(map[string]bool, 2)
+		if hasCap && emptyHeaderValue(uaCap) {
+			exclude["User-Agent"] = true
+		}
+		if hasLow && emptyHeaderValue(uaLow) {
+			exclude["user-agent"] = true
+		}
+		// Only the first User-Agent goes out, as over HTTP/2.
+		if len(uaCap) > 1 {
+			header["User-Agent"] = uaCap[:1]
+		}
+		if len(uaLow) > 1 {
+			header["user-agent"] = uaLow[:1]
+		}
 	}
 
 	// Process Body,ContentLength,Close,Trailer
@@ -638,12 +666,12 @@ func (r *Request) write(w io.Writer, usingProxy bool, extraHeaders Header, waitF
 	if err != nil {
 		return err
 	}
-	err = tw.addHeaders(&r.Header, trace)
+	err = tw.addHeaders(&header)
 	if err != nil {
 		return err
 	}
 
-	err = r.Header.write(w, trace)
+	err = header.writeSubset(w, exclude, trace)
 	if err != nil {
 		return err
 	}

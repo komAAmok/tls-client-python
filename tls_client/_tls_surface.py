@@ -65,6 +65,9 @@ TLS_SESSION_OPTION_NAMES = (
     "preface_ping_idle_ms",
     "hpack_indexing_policy",
     "cookie_crumb",
+    "h2_read_idle_timeout_ms",
+    "h2_ping_timeout_ms",
+    "response_header_timeout_ms",
     "extension_permute_mode",
     "extension_permute_prefix",
     "h2_disable_priority_frames",
@@ -123,6 +126,9 @@ TLS_SESSION_OPTION_DEFAULTS = {
     "preface_ping_idle_ms": 0,
     "hpack_indexing_policy": '',
     "cookie_crumb": False,
+    "h2_read_idle_timeout_ms": 0,
+    "h2_ping_timeout_ms": 0,
+    "response_header_timeout_ms": 0,
     "extension_permute_mode": 0,
     "extension_permute_prefix": 0,
     "h2_disable_priority_frames": False,
@@ -181,6 +187,9 @@ TLS_REQUEST_OPTION_NAMES = (
     "preface_ping_idle_ms",
     "hpack_indexing_policy",
     "cookie_crumb",
+    "h2_read_idle_timeout_ms",
+    "h2_ping_timeout_ms",
+    "response_header_timeout_ms",
     "extension_permute_mode",
     "extension_permute_prefix",
     "h2_disable_priority_frames",
@@ -632,6 +641,33 @@ class TLSOptionsMixin:
         self._set_tls_option("cookie_crumb", value)
 
     @property
+    def h2_read_idle_timeout_ms(self) -> int:
+        """HTTP/2 PING 健康检查间隔 (ABI 4) / H2 health-check interval."""
+        return self._get_tls_option("h2_read_idle_timeout_ms")
+
+    @h2_read_idle_timeout_ms.setter
+    def h2_read_idle_timeout_ms(self, value: int) -> None:
+        self._set_tls_option("h2_read_idle_timeout_ms", value)
+
+    @property
+    def h2_ping_timeout_ms(self) -> int:
+        """H2 健康检查 PING 应答超时 (ABI 4) / H2 health ping timeout."""
+        return self._get_tls_option("h2_ping_timeout_ms")
+
+    @h2_ping_timeout_ms.setter
+    def h2_ping_timeout_ms(self, value: int) -> None:
+        self._set_tls_option("h2_ping_timeout_ms", value)
+
+    @property
+    def response_header_timeout_ms(self) -> int:
+        """等待响应头超时 (ABI 4) / Response header timeout."""
+        return self._get_tls_option("response_header_timeout_ms")
+
+    @response_header_timeout_ms.setter
+    def response_header_timeout_ms(self, value: int) -> None:
+        self._set_tls_option("response_header_timeout_ms", value)
+
+    @property
     def extension_permute_mode(self) -> int:
         """扩展乱序策略: 0=off, 1=chrome, 2=all, 3=prefix (ABI 3)."""
         return self._get_tls_option("extension_permute_mode")
@@ -790,6 +826,9 @@ class TLSVerbMixin:
         preface_ping_idle_ms: Optional[Any] = None,
         hpack_indexing_policy: Optional[Any] = None,
         cookie_crumb: Optional[Any] = None,
+        h2_read_idle_timeout_ms: Optional[Any] = None,
+        h2_ping_timeout_ms: Optional[Any] = None,
+        response_header_timeout_ms: Optional[Any] = None,
         extension_permute_mode: Optional[Any] = None,
         extension_permute_prefix: Optional[Any] = None,
         h2_disable_priority_frames: Optional[Any] = None,
@@ -892,6 +931,9 @@ class TLSVerbMixin:
         preface_ping_idle_ms: Optional[Any] = None,
         hpack_indexing_policy: Optional[Any] = None,
         cookie_crumb: Optional[Any] = None,
+        h2_read_idle_timeout_ms: Optional[Any] = None,
+        h2_ping_timeout_ms: Optional[Any] = None,
+        response_header_timeout_ms: Optional[Any] = None,
         extension_permute_mode: Optional[Any] = None,
         extension_permute_prefix: Optional[Any] = None,
         h2_disable_priority_frames: Optional[Any] = None,
@@ -967,6 +1009,9 @@ class TLSVerbMixin:
             preface_ping_idle_ms=preface_ping_idle_ms,
             hpack_indexing_policy=hpack_indexing_policy,
             cookie_crumb=cookie_crumb,
+            h2_read_idle_timeout_ms=h2_read_idle_timeout_ms,
+            h2_ping_timeout_ms=h2_ping_timeout_ms,
+            response_header_timeout_ms=response_header_timeout_ms,
             extension_permute_mode=extension_permute_mode,
             extension_permute_prefix=extension_permute_prefix,
             h2_disable_priority_frames=h2_disable_priority_frames,
@@ -1044,6 +1089,9 @@ class TLSVerbMixin:
         preface_ping_idle_ms: Optional[Any] = None,
         hpack_indexing_policy: Optional[Any] = None,
         cookie_crumb: Optional[Any] = None,
+        h2_read_idle_timeout_ms: Optional[Any] = None,
+        h2_ping_timeout_ms: Optional[Any] = None,
+        response_header_timeout_ms: Optional[Any] = None,
         extension_permute_mode: Optional[Any] = None,
         extension_permute_prefix: Optional[Any] = None,
         h2_disable_priority_frames: Optional[Any] = None,
@@ -1120,6 +1168,9 @@ class TLSVerbMixin:
             preface_ping_idle_ms=preface_ping_idle_ms,
             hpack_indexing_policy=hpack_indexing_policy,
             cookie_crumb=cookie_crumb,
+            h2_read_idle_timeout_ms=h2_read_idle_timeout_ms,
+            h2_ping_timeout_ms=h2_ping_timeout_ms,
+            response_header_timeout_ms=response_header_timeout_ms,
             extension_permute_mode=extension_permute_mode,
             extension_permute_prefix=extension_permute_prefix,
             h2_disable_priority_frames=h2_disable_priority_frames,
@@ -1197,6 +1248,9 @@ class TLSVerbMixin:
         preface_ping_idle_ms: Optional[Any] = None,
         hpack_indexing_policy: Optional[Any] = None,
         cookie_crumb: Optional[Any] = None,
+        h2_read_idle_timeout_ms: Optional[Any] = None,
+        h2_ping_timeout_ms: Optional[Any] = None,
+        response_header_timeout_ms: Optional[Any] = None,
         extension_permute_mode: Optional[Any] = None,
         extension_permute_prefix: Optional[Any] = None,
         h2_disable_priority_frames: Optional[Any] = None,
@@ -1273,6 +1327,9 @@ class TLSVerbMixin:
             preface_ping_idle_ms=preface_ping_idle_ms,
             hpack_indexing_policy=hpack_indexing_policy,
             cookie_crumb=cookie_crumb,
+            h2_read_idle_timeout_ms=h2_read_idle_timeout_ms,
+            h2_ping_timeout_ms=h2_ping_timeout_ms,
+            response_header_timeout_ms=response_header_timeout_ms,
             extension_permute_mode=extension_permute_mode,
             extension_permute_prefix=extension_permute_prefix,
             h2_disable_priority_frames=h2_disable_priority_frames,
@@ -1349,6 +1406,9 @@ class TLSVerbMixin:
         preface_ping_idle_ms: Optional[Any] = None,
         hpack_indexing_policy: Optional[Any] = None,
         cookie_crumb: Optional[Any] = None,
+        h2_read_idle_timeout_ms: Optional[Any] = None,
+        h2_ping_timeout_ms: Optional[Any] = None,
+        response_header_timeout_ms: Optional[Any] = None,
         extension_permute_mode: Optional[Any] = None,
         extension_permute_prefix: Optional[Any] = None,
         h2_disable_priority_frames: Optional[Any] = None,
@@ -1424,6 +1484,9 @@ class TLSVerbMixin:
             preface_ping_idle_ms=preface_ping_idle_ms,
             hpack_indexing_policy=hpack_indexing_policy,
             cookie_crumb=cookie_crumb,
+            h2_read_idle_timeout_ms=h2_read_idle_timeout_ms,
+            h2_ping_timeout_ms=h2_ping_timeout_ms,
+            response_header_timeout_ms=response_header_timeout_ms,
             extension_permute_mode=extension_permute_mode,
             extension_permute_prefix=extension_permute_prefix,
             h2_disable_priority_frames=h2_disable_priority_frames,
@@ -1499,6 +1562,9 @@ class TLSVerbMixin:
         preface_ping_idle_ms: Optional[Any] = None,
         hpack_indexing_policy: Optional[Any] = None,
         cookie_crumb: Optional[Any] = None,
+        h2_read_idle_timeout_ms: Optional[Any] = None,
+        h2_ping_timeout_ms: Optional[Any] = None,
+        response_header_timeout_ms: Optional[Any] = None,
         extension_permute_mode: Optional[Any] = None,
         extension_permute_prefix: Optional[Any] = None,
         h2_disable_priority_frames: Optional[Any] = None,
@@ -1573,6 +1639,9 @@ class TLSVerbMixin:
             preface_ping_idle_ms=preface_ping_idle_ms,
             hpack_indexing_policy=hpack_indexing_policy,
             cookie_crumb=cookie_crumb,
+            h2_read_idle_timeout_ms=h2_read_idle_timeout_ms,
+            h2_ping_timeout_ms=h2_ping_timeout_ms,
+            response_header_timeout_ms=response_header_timeout_ms,
             extension_permute_mode=extension_permute_mode,
             extension_permute_prefix=extension_permute_prefix,
             h2_disable_priority_frames=h2_disable_priority_frames,
@@ -1648,6 +1717,9 @@ class TLSVerbMixin:
         preface_ping_idle_ms: Optional[Any] = None,
         hpack_indexing_policy: Optional[Any] = None,
         cookie_crumb: Optional[Any] = None,
+        h2_read_idle_timeout_ms: Optional[Any] = None,
+        h2_ping_timeout_ms: Optional[Any] = None,
+        response_header_timeout_ms: Optional[Any] = None,
         extension_permute_mode: Optional[Any] = None,
         extension_permute_prefix: Optional[Any] = None,
         h2_disable_priority_frames: Optional[Any] = None,
@@ -1722,6 +1794,9 @@ class TLSVerbMixin:
             preface_ping_idle_ms=preface_ping_idle_ms,
             hpack_indexing_policy=hpack_indexing_policy,
             cookie_crumb=cookie_crumb,
+            h2_read_idle_timeout_ms=h2_read_idle_timeout_ms,
+            h2_ping_timeout_ms=h2_ping_timeout_ms,
+            response_header_timeout_ms=response_header_timeout_ms,
             extension_permute_mode=extension_permute_mode,
             extension_permute_prefix=extension_permute_prefix,
             h2_disable_priority_frames=h2_disable_priority_frames,
@@ -1799,6 +1874,9 @@ class TLSVerbMixin:
         preface_ping_idle_ms: Optional[Any] = None,
         hpack_indexing_policy: Optional[Any] = None,
         cookie_crumb: Optional[Any] = None,
+        h2_read_idle_timeout_ms: Optional[Any] = None,
+        h2_ping_timeout_ms: Optional[Any] = None,
+        response_header_timeout_ms: Optional[Any] = None,
         extension_permute_mode: Optional[Any] = None,
         extension_permute_prefix: Optional[Any] = None,
         h2_disable_priority_frames: Optional[Any] = None,
@@ -1875,6 +1953,9 @@ class TLSVerbMixin:
             preface_ping_idle_ms=preface_ping_idle_ms,
             hpack_indexing_policy=hpack_indexing_policy,
             cookie_crumb=cookie_crumb,
+            h2_read_idle_timeout_ms=h2_read_idle_timeout_ms,
+            h2_ping_timeout_ms=h2_ping_timeout_ms,
+            response_header_timeout_ms=response_header_timeout_ms,
             extension_permute_mode=extension_permute_mode,
             extension_permute_prefix=extension_permute_prefix,
             h2_disable_priority_frames=h2_disable_priority_frames,

@@ -16,6 +16,7 @@ const (
 type Encoder struct {
 	// indexingDecision, when set, overrides the default index/no-index
 	// decision for every field (see SetIndexingDecision).
+	// LOCAL PATCH: Chromium HPACK indexing fidelity.
 	indexingDecision func(HeaderField) bool
 	dynTab dynamicTable
 	// minSize is the minimum table size set by
@@ -135,16 +136,9 @@ func (e *Encoder) SetMaxDynamicTableSizeLimit(v uint32) {
 }
 
 // shouldIndex reports whether f should be indexed.
-// SetIndexingDecision installs a custom indexing decision hook.  When set,
-// the hook runs first and a false result forces the field to be encoded as
-// "without indexing" regardless of the default policy.  This lets callers
-// reproduce browser-specific HPACK indexing behaviour (e.g. Chromium never
-// indexes cookie/authorization/set-cookie).
-func (e *Encoder) SetIndexingDecision(f func(HeaderField) bool) {
-	e.indexingDecision = f
-}
-
 func (e *Encoder) shouldIndex(f HeaderField) bool {
+	// LOCAL PATCH: a caller-supplied hook runs first and a false result
+	// forces "without indexing" regardless of the default policy.
 	if e.indexingDecision != nil && !e.indexingDecision(f) {
 		return false
 	}
@@ -252,6 +246,15 @@ func encodeTypeByte(indexing, sensitive bool) byte {
 		return 0x40
 	}
 	return 0
+}
+
+// SetIndexingDecision installs a custom indexing decision hook.  When set,
+// the hook runs first and a false result forces the field to be encoded as
+// "without indexing" regardless of the default policy.  This lets callers
+// reproduce browser-specific HPACK indexing behaviour (e.g. Chromium never
+// indexes cookie/authorization/set-cookie).
+func (e *Encoder) SetIndexingDecision(f func(HeaderField) bool) {
+	e.indexingDecision = f
 }
 
 // IndexingChrome reproduces Chromium's HPACK indexing behaviour for the

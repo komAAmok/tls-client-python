@@ -1,11 +1,10 @@
 # Upstream synchronization marker
 
 - Upstream remote: `https://github.com/bogdanfinn/tls-client.git`
-- Upstream branch: `upstream/master`
-- Last synchronized upstream commit: `34718e1b514b446b95bc68dc4f096247e69c7939`
-- Previous common base: `b790a311273f26051935641120de169e497e5943`
-- Sync date: `2026-09-11`
-- Pre-sync recovery branch: `backup/pre-upstream-20260911`
+- Upstream tag: `v1.18.1` (`9525980ec9f9f83d402aff06436a1e3db17e730a`)
+- Previous sync point: upstream `v1.16.0` (`23b44420627619a30d09be5b6250e6cf2e350cf2`)
+- Sync date: `2026-11-12`
+- Pre-sync recovery tag: `backup/pre-upstream-20261112`
 
 The merge commit containing this file is the boundary between imported
 upstream history and this project's local Python/CFFI layer. Keep upstream
@@ -137,6 +136,88 @@ must be preserved when resolving future upstream conflicts:
   endpoint adaptation.
 - `.gitignore` and `Readme.md`: union/local project versions, respectively.
 
+## Upstream v1.16.0 → v1.18.1 delta and how it was reconciled
+
+The upstream import was performed as a file-level three-way merge with
+`/tmp/up116` (v1.16.0, our previous sync base) as the common ancestor and
+`/tmp/up181` (v1.18.1) as the incoming side, so every upstream-owned file
+either took upstream verbatim (when our copy was untouched since v1.16.0) or
+was reconciled hunk by hunk against the documented overlay points above.
+Upstream history stays a real parent where it exists; nothing was squashed.
+
+### Upstream changes carried in
+
+| Area | Change |
+| --- | --- |
+| `go.mod` | `go 1.27`; fhttp 0.6.9 → **0.7.3**, utls 1.7.8 → **1.8.2-barnius**, quic-go-utls 1.0.10 → 1.0.13, websocket 1.5.6 → 1.5.9, x/net 0.48 → 0.59, x/text 0.32 → 0.42, klauspost/compress 1.18.2 → 1.20.1, brotli 1.2.0 → 1.2.7, + `molecule-man/go-brrr` |
+| `trust_anchors/` (new package) | the Chrome Root Store anchor list plus `Split`/`Encode`/`Sort`/`Shuffle`/`BuildPayload`. Chrome 154+ **sorts** the 0xCA34 IDs (stable per process) while ≤153 shuffles per process. `profiles.BuildTrustAnchorsPayload` is now a deprecated shim over `trust_anchors.BuildPayload`. |
+| `profiles/extension_data.go`, `profiles/grease.go` | **deleted upstream**; the capture and the GREASE-signature helper moved into `trust_anchors/` and into `tls.GREASE_PLACEHOLDER` (utls resolves it in `ApplyPreset`). Nothing local referenced either symbol. |
+| `profiles/internal_browser_profiles.go` | Chrome 154 / 154_PSK added (byte-identical ClientHello to 152, sorted anchors); `profiles/contributed_browser_profiles.go` gains Safari 27.2. Both registered in `MappedTLSClients`. |
+| `client.go` / `client_options.go` | `HttpClient.Close()` (releases HTTP/3 UDP sockets — `CloseIdleConnections` does not); `WithCertificatePinner` (custom `CertificatePinner`, takes precedence over `WithCertificatePinning`); `TransportOptions.ReadIdleTimeout` / `PingTimeout` / `ResponseHeaderTimeout`. |
+| `roundtripper.go` | transport caching rewritten (`transportFor` + `discardStash`, only the setup dial may cache, HTTP/2 dial deadline `http2RedialTimeout`, `sanitizeRawQuery`, per-scheme port in `getDialTLSAddr`, IDNA `dialHost`/`dialAddr`). |
+| `connect.go` | SOCKS4 `DialContext` via goroutine+select; CONNECT deadline = min(client timeout, ctx deadline) with `context.AfterFunc` abort; HTTPS proxy dialled through `tls.Dialer{NetDialer: &c.Dialer}` so `WithDialer`'s Control hook runs. |
+| `ja3.go` | `trust_anchors.BuildPayload` + `bytes.Clone` of the payload per handshake. |
+| `racer.go` | winner's transport is cached instead of rebuilt; losers' responses/transports are discarded (`discardRaceResults`); `racingAttempts` constant. |
+| `websocket_options.go` / `websocket.go` | `WithEnableCompression()` (permessage-deflate) wired to `EnableCompression`. |
+| `utils.go` | `sanitizeRawQuery` / `isValidRawQueryByte`. |
+| tests | upstream's own suite imported: `connect_deadlines_test.go`, `connect_headers_test.go`, `http2_ping_test.go`, `response_header_timeout_test.go`, `roundtripper_scheme_test.go`, `roundtripper_stash_test.go`, `tests/http2_redial_timeout_test.go`, `tests/chrome_trust_anchors_test.go`, `tests/testdata/chrome_root_store_v39.pb`, rewritten `tests/trust_anchors_test.go`/`tests/cookie_jar_test.go`/`tests/firefox_unsupported_group_test.go` (the last three are now hermetic httptest servers instead of live sites). |
+| `example/` | upstream split the single `example/main.go` into per-feature subdirectories. The legacy local `example/main.go` is retained as an overlay (it is not built by CI). |
+| `mise.toml`, `.github/workflows/build_workflow.yml` | Go pin 1.24.1 → 1.27.4 and `go-version`/`golang:1.27-alpine` accordingly — the new `go.mod` requires `go 1.27`. |
+
+### Overlay points that had to be re-applied by hand
+
+- `client.go`: the panic-to-error `do()`, the `mu sync.RWMutex` request/proxy
+  lock, the debug-body fix (original bytes to the caller, decoded view only to
+  the log) and the TCP-fingerprint wiring all survive; the two
+  `newRoundTripper` call sites were re-pointed at
+  `newRoundTripperWithPermute` **with upstream's new trailing
+  `certificatePinner` and `timeout` arguments**.
+  New in this sync: **`dialer.Control` is now chained, not replaced**
+  (`chainTcpControl` in `tcp_fingerprint.go`). Overwriting it dropped the
+  caller's `WithDialer` Control hook — socket tagging, fwmark, interface
+  binding — which upstream's new `TestAnHTTPSProxyUsesTheConfiguredDialer`
+  catches. The user hook runs first so its error aborts before any
+  fingerprint option is applied.
+- `roundtripper.go`: HTTP/3 construction stays split into
+  `roundtripper_http3.go` and `http3.NextProtoH3` stays aliased as
+  `nextProtoH3`. Upstream's rewritten caching (`transportFor`/`discardStash`)
+  is taken as-is; the local `H2*` knobs are wired into the new
+  `t2.SetT1(...)` block, and `newRoundTripperWithPermute` keeps the permuted
+  `ClientHelloID`. **The protocol racer now receives `rt.clientHelloId`**
+  (the permuted one), because upstream made the racer build its own HTTP/3
+  transport — passing the raw profile ID would have silently disabled the
+  per-handshake extension shuffle on every raced connection.
+- `profiles/profiles.go`: the whole `TcpFingerprint` block, `IntPtr`/`BoolPtr`,
+  `DefaultTcpFingerprints`, `clientToPlatform` and `GetTcpFingerprint` are
+  intact, with upstream's new registry rows (chrome_154/154_PSK,
+  safari_27_2) merged in and its deprecated `BuildTrustAnchorsPayload` shim
+  added.
+- `profiles/contributed_browser_profiles.go`: both additions kept —
+  upstream's `Safari_27_2` and the local `Firefox_148`.
+- `third_party/fhttp/` re-vendored to **v0.7.3** and the four engine patches
+  rebuilt on the new source (see below).
+- `roundtripper_setup_test.go`: re-synced to upstream (it calls
+  `getTransport`, whose signature changed to return the stashed conn).
+
+### `third_party/fhttp` overlay re-applied on v0.7.3
+
+The vendored copy is pristine fhttp **v0.7.3** plus exactly four patches, each
+marked `LOCAL PATCH` in the source:
+
+1. `http2/hpack/encode.go`: `Encoder.SetIndexingDecision` +
+   `IndexingChrome` (never index authorization / cookie / set-cookie /
+   content-length / age).
+2. `http2/transport.go`: `Transport.MaxDataFrameSize` (DATA-frame payload cap).
+3. `http2/transport.go`: `Transport.PrefacePingIdleMs` (Chromium-style PING
+   before the first HEADERS on an idle connection).
+4. `http2/transport.go`: `Transport.DisablePriorityFrames` (suppresses
+   `WritePriority` and the HEADERS PRIORITY flag).
+
+v0.7.3 already ships `SetT1`, `ReadIdleTimeout`, `PingTimeout`,
+`firstStreamID` and the `content-length`/`"gzip, deflate, br, zstd"`
+corrections, so upstream's new `t2.SetT1(rt.buildHttp1Transport())` and the
+transitive `ResponseHeaderTimeout` work unchanged.
+
 ## Python binary ABI boundary
 
 **ABI 3 (2026-09-12): the deep-fingerprint layer.** The bundled shared
@@ -192,6 +273,32 @@ pooled client built with one setting serve a request that asked for the other,
 making the same request return different bytes depending on which session ran
 first. The fields are emitted right after the ABI 3 block and before the
 pseudo-header orders; the Go and Python emitters must stay in that order.
+
+**ABI 4 (2026-11-12): upstream 1.18.1 transport health checks.**
+`GetAbiVersion()` returns 4 and `RequestOptions` gained three appended ints:
+`h2_read_idle_timeout_milliseconds`, `h2_ping_timeout_milliseconds`,
+`response_header_timeout_milliseconds`. They map onto the new
+`TransportOptions.ReadIdleTimeout` / `PingTimeout` / `ResponseHeaderTimeout`.
+Python exposes them as `h2_read_idle_timeout_ms`, `h2_ping_timeout_ms` and
+`response_header_timeout_ms` — session-level defaults plus per-request
+overrides — and they degrade silently (no warning) on an ABI-3 library, since
+omitting them only restores the older "no health check" behaviour.
+
+Unlike the ABI 2 gate (which raises) and the ABI 3 gate (which warns), ABI 4
+fields are absent from the struct entirely on an older library, so they are
+simply not written; the Python wrapper keeps the CDEF append-only and the
+struct layout check in `test_cdef_parity` verifies the tail.
+
+The cache-key format is now **version 8**: ABI 4 appends
+`|rit=<ms>|pit=<ms>|rht=<ms>` immediately after the version-6
+`|dbg=…|cp=…` pair (both sides must be updated together —
+`python_tests/test_cache_key_parity.py` and
+`cffi_binding/cachekey_parity_test.go` pin the same vectors).
+
+The binding also now calls `HttpClient.Close()` instead of
+`CloseIdleConnections()` on pool eviction (TTL scan, LRU cap, explicit
+`ClearClientPool`), so an evicted client releases its HTTP/3 UDP sockets and
+reader goroutines instead of leaking them.
 
 **ABI 2 (2026-09-12).** The bundled shared library exports `GetAbiVersion()`
 (returning 3). `RequestOptions` gained `disable_session_tickets`,

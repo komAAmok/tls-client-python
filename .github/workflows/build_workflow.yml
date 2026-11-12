@@ -71,7 +71,7 @@ jobs:
       - name: Set up Go
         uses: actions/setup-go@v5
         with:
-          go-version: "1.24"
+          go-version: "1.27"
           cache: true
 
       - name: Check generated Go profiles are current
@@ -188,7 +188,7 @@ jobs:
       - name: Set up Go
         uses: actions/setup-go@v5
         with:
-          go-version: "1.24"
+          go-version: "1.27"
           cache: true
 
       - name: Install Clang (Linux)
@@ -305,7 +305,7 @@ jobs:
       - name: Set up Go
         uses: actions/setup-go@v5
         with:
-          go-version: "1.24"
+          go-version: "1.27"
           cache: true
 
       - name: Set up Python
@@ -416,7 +416,7 @@ jobs:
       - name: Set up Go
         uses: actions/setup-go@v5
         with:
-          go-version: "1.24"
+          go-version: "1.27"
           cache: true
 
       - name: Set up Python
@@ -501,17 +501,17 @@ jobs:
         include:
           - goarch: amd64
             plat: musllinux_1_1_x86_64
-            image: golang:1.24-alpine
+            image: golang:1.27-alpine
             pkgs: "gcc musl-dev git binutils"
             goarm: ""
           - goarch: arm64
             plat: musllinux_1_1_aarch64
-            image: arm64v8/golang:1.24-alpine
+            image: arm64v8/golang:1.27-alpine
             pkgs: "gcc musl-dev git binutils"
             goarm: ""
           - goarch: arm
             plat: musllinux_1_1_armv7l
-            image: arm32v7/golang:1.24-alpine
+            image: arm32v7/golang:1.27-alpine
             pkgs: "gcc musl-dev git binutils"
             goarm: "7"
     steps:

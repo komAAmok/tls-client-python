@@ -88,6 +88,26 @@ func tcpControl(fp *profiles.TcpFingerprint) func(string, string, syscall.RawCon
 	}
 }
 
+// chainTcpControl wraps an existing net.Dialer.Control with the TCP fingerprint
+// hook.  A caller-supplied Control (WithDialer) must keep running: it may carry
+// socket tagging, interface binding or fwmark rules.  The user hook runs first
+// so a failure there aborts the dial before any fingerprint option is applied.
+func chainTcpControl(existing func(string, string, syscall.RawConn) error, fp *profiles.TcpFingerprint) func(string, string, syscall.RawConn) error {
+	fpControl := tcpControl(fp)
+	if fpControl == nil {
+		return existing
+	}
+	if existing == nil {
+		return fpControl
+	}
+	return func(network string, address string, c syscall.RawConn) error {
+		if err := existing(network, address, c); err != nil {
+			return err
+		}
+		return fpControl(network, address, c)
+	}
+}
+
 // applySocketOptions applies the TCP fingerprint parameters to the given socket fd.
 // Errors from unsupported options are silently ignored (the fingerprint is best-effort).
 func applySocketOptions(fd int, fp *profiles.TcpFingerprint) error {

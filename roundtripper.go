@@ -4,21 +4,28 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"net"
 	"strings"
 	"sync"
 	"time"
+	"unicode"
 
 	http "github.com/bogdanfinn/fhttp"
 	"github.com/bogdanfinn/fhttp/http2"
 	"github.com/bogdanfinn/tls-client/bandwidth"
 	"github.com/bogdanfinn/tls-client/profiles"
 	tls "github.com/bogdanfinn/utls"
+	"golang.org/x/net/idna"
 	"golang.org/x/net/proxy"
 )
 
 const defaultIdleConnectionTimeout = 90 * time.Second
 const CHROME_MAX_FIELD_SECTION_SIZE = 262144
+
+// firefoxClientName is the Client of every Firefox ClientHelloID, the ones of
+// utls and the ones of the profiles in this module.
+const firefoxClientName = "Firefox"
 
 var errProtocolNegotiated = errors.New("protocol negotiated")
 
@@ -72,6 +79,10 @@ type roundTripper struct {
 	disableHttp3 bool
 	proxyURL     string
 
+	// http2RedialTimeout bounds a dial the HTTP/2 transport makes on its own,
+	// which carries no request context. See dialTLSHTTP2.
+	http2RedialTimeout time.Duration
+
 	// racer handles HTTP/3 racing (nil if racing is disabled)
 	racer *protocolRacer
 
@@ -90,6 +101,7 @@ type roundTripper struct {
 
 // http3Config contains all parameters needed to build an HTTP/3 transport
 type http3Config struct {
+	clientHelloId          tls.ClientHelloID
 	clientSessionCache     tls.ClientSessionCache
 	insecureSkipVerify     bool
 	serverNameOverwrite    string
@@ -181,6 +193,34 @@ func (rt *roundTripper) CloseIdleConnections() {
 	}
 }
 
+// Close closes and forgets every cached transport. CloseIdleConnections is not
+// enough for HTTP/3: an HTTP/3 transport owns a UDP socket and the goroutines
+// reading it, and only Close releases them.
+func (rt *roundTripper) Close() {
+	rt.cachedTransportsLck.Lock()
+	defer rt.cachedTransportsLck.Unlock()
+
+	for addr, transport := range rt.cachedTransports {
+		closeTransport(transport)
+		delete(rt.cachedTransports, addr)
+	}
+
+	rt.cachedKindsLck.Lock()
+	clear(rt.cachedKinds)
+	rt.cachedKindsLck.Unlock()
+}
+
+func closeTransport(transport http.RoundTripper) {
+	if closer, ok := transport.(io.Closer); ok {
+		_ = closer.Close()
+		return
+	}
+
+	if idler, ok := transport.(interface{ CloseIdleConnections() }); ok {
+		idler.CloseIdleConnections()
+	}
+}
+
 func (rt *roundTripper) getHttp3Settings() map[uint64]uint64 {
 	if len(rt.http3Settings) == 0 {
 		return nil
@@ -201,29 +241,36 @@ func (rt *roundTripper) getHttp3Settings() map[uint64]uint64 {
 }
 
 func (rt *roundTripper) RoundTrip(req *http.Request) (*http.Response, error) {
+	// A raw byte that is invalid in a URI query ends up verbatim in the HTTP/1
+	// request line and the HTTP/2 :path. url.Parse keeps it, a literal space
+	// for example then breaks the request line. Browsers never send these
+	// bytes unencoded, so fix the query up here for every protocol.
+	if req.URL != nil {
+		req.URL.RawQuery = sanitizeRawQuery(req.URL.RawQuery)
+	}
+
 	addr := rt.getDialTLSAddr(req)
 
 	if rt.racer != nil && !rt.forceHttp1 && !rt.disableHttp3 && strings.ToLower(req.URL.Scheme) == "https" {
-		return rt.racer.race(req, addr, rt.getTransport)
+		return rt.racer.race(req, addr, func(req *http.Request, addr string) error {
+			_, err := rt.getTransport(req, addr)
+			return err
+		})
 	}
 
-	rt.cachedTransportsLck.Lock()
-	if _, ok := rt.cachedTransports[addr]; !ok {
-		if err := rt.getTransport(req, addr); err != nil {
-			rt.cachedTransportsLck.Unlock()
-
-			if errors.Is(err, ErrBadPinDetected) && rt.badPinHandlerFunc != nil {
-				rt.badPinHandlerFunc(req)
-			}
-
-			return nil, err
+	t, stashed, err := rt.transportFor(req, addr)
+	if err != nil {
+		if errors.Is(err, ErrBadPinDetected) && rt.badPinHandlerFunc != nil {
+			rt.badPinHandlerFunc(req)
 		}
-	}
 
-	t := rt.cachedTransports[addr]
-	rt.cachedTransportsLck.Unlock()
+		return nil, err
+	}
 
 	resp, err := t.RoundTrip(req)
+	if stashed != nil {
+		rt.discardStash(addr, stashed)
+	}
 	if err != nil && errors.Is(err, errProtocolChanged) {
 		rt.dropCachedTransport(addr, t)
 	}
@@ -231,27 +278,60 @@ func (rt *roundTripper) RoundTrip(req *http.Request) (*http.Response, error) {
 	return resp, err
 }
 
-func (rt *roundTripper) getTransport(req *http.Request, addr string) error {
+// transportFor returns the cached transport for addr, building it if missing,
+// and the connection the setup dial stashed (nil if none).
+func (rt *roundTripper) transportFor(req *http.Request, addr string) (t http.RoundTripper, stashed net.Conn, err error) {
+	rt.cachedTransportsLck.Lock()
+	defer rt.cachedTransportsLck.Unlock()
+
+	if t, ok := rt.cachedTransports[addr]; ok {
+		return t, nil, nil
+	}
+
+	stashed, err = rt.getTransport(req, addr)
+	if err != nil {
+		return nil, nil, err
+	}
+
+	return rt.cachedTransports[addr], stashed, nil
+}
+
+// discardStash closes stashed if the transport never took it, e.g. because it
+// rejected the request before dialing.
+func (rt *roundTripper) discardStash(addr string, stashed net.Conn) {
+	rt.Lock()
+	defer rt.Unlock()
+
+	if rt.cachedConnections[addr] == stashed {
+		delete(rt.cachedConnections, addr)
+		_ = stashed.Close()
+	}
+}
+
+// getTransport builds and caches the transport for addr. For https it does so
+// with a setup dial and returns the connection that dial stashed for the
+// transport's first dial.
+func (rt *roundTripper) getTransport(req *http.Request, addr string) (net.Conn, error) {
 	switch strings.ToLower(req.URL.Scheme) {
 	case "http":
 		rt.cachedTransports[addr] = rt.buildHttp1Transport()
-		return nil
+		return nil, nil
 	case "https":
 	default:
-		return fmt.Errorf("invalid URL scheme: [%v]", req.URL.Scheme)
+		return nil, fmt.Errorf("invalid URL scheme: [%v]", req.URL.Scheme)
 	}
 
-	_, err := rt.dialTLSSetup(req.Context(), "tcp", addr)
-	switch err {
-	case errProtocolNegotiated:
-	case nil:
-		// Should never happen.
-		panic("dialTLS returned no error when determining cachedTransports")
-	default:
-		return err
+	conn, err := rt.dialTLSSetup(req.Context(), "tcp", addr)
+	if errors.Is(err, errProtocolNegotiated) {
+		return conn, nil
+	}
+	if err == nil {
+		_ = conn.Close()
+
+		return nil, fmt.Errorf("tls-client: setup dial for %s returned a connection without building a transport", addr)
 	}
 
-	return nil
+	return nil, err
 }
 
 // dialTLS is the transport's own DialTLSContext, so it runs whenever a cached
@@ -263,7 +343,7 @@ func (rt *roundTripper) dialTLS(ctx context.Context, network, addr string) (net.
 
 // dialTLSSetup is the first dial for an address, made by getTransport while the
 // caller holds cachedTransportsLck. It is the only path allowed to put a
-// transport in the cache.
+// transport in the cache. Returns the stashed connection with errProtocolNegotiated.
 func (rt *roundTripper) dialTLSSetup(ctx context.Context, network, addr string) (net.Conn, error) {
 	return rt.dialTLSWithSetup(ctx, network, addr, true)
 }
@@ -276,15 +356,21 @@ func (rt *roundTripper) dialTLSSetup(ctx context.Context, network, addr string) 
 // with no lock held at all: writing the map there raced with the read in
 // RoundTrip, on two different mutexes.
 func (rt *roundTripper) dialTLSWithSetup(ctx context.Context, network, addr string, setup bool) (net.Conn, error) {
+	// Transports dial the punycode form of internationalized hosts.
+	addr = dialAddr(addr)
+
 	rt.Lock()
 	defer rt.Unlock()
 
-	// If we have the connection from when we determined the HTTPS
-	// cachedTransports to use, return that.
+	// A stash found by a setup dial is stale.
 	if conn := rt.cachedConnections[addr]; conn != nil {
 		delete(rt.cachedConnections, addr)
 
-		return conn, nil
+		if !setup {
+			return conn, nil
+		}
+
+		_ = conn.Close()
 	}
 
 	if network == "tcp" && rt.disableIPV6 {
@@ -406,22 +492,19 @@ func (rt *roundTripper) dialTLSWithSetup(ctx context.Context, network, addr stri
 
 		if rt.transportOptions != nil {
 			t2.DisableCompression = rt.transportOptions.DisableCompression
+			t2.ReadIdleTimeout = rt.transportOptions.ReadIdleTimeout
+			t2.PingTimeout = rt.transportOptions.PingTimeout
+			// The HTTP/2 transport reads ResponseHeaderTimeout and
+			// DisableKeepAlives from its HTTP/1 transport.
+			t2.SetT1(rt.buildHttp1Transport())
 
-			t1 := t2.GetT1()
-			if t1 != nil {
-				t1.DisableKeepAlives = rt.transportOptions.DisableKeepAlives
-				t1.DisableCompression = rt.transportOptions.DisableCompression
-				t1.MaxIdleConns = rt.transportOptions.MaxIdleConns
-				t1.MaxIdleConnsPerHost = rt.transportOptions.MaxIdleConnsPerHost
-				t1.MaxConnsPerHost = rt.transportOptions.MaxConnsPerHost
-				// Only set MaxResponseHeaderBytes if > 0 (HTTP/1.1 transport doesn't understand -1)
-				if rt.transportOptions.MaxResponseHeaderBytes > 0 {
-					t1.MaxResponseHeaderBytes = rt.transportOptions.MaxResponseHeaderBytes
-				}
-				t1.WriteBufferSize = rt.transportOptions.WriteBufferSize
-				t1.ReadBufferSize = rt.transportOptions.ReadBufferSize
-				t1.IdleConnTimeout = idleConnectionTimeout
+			// LOCAL OVERLAY: H2 frame-level fingerprint realism.
+			if rt.transportOptions.H2MaxDataFrameSize > 0 {
+				t2.MaxDataFrameSize = rt.transportOptions.H2MaxDataFrameSize
 			}
+			t2.PrefacePingIdleMs = rt.transportOptions.H2PrefacePingIdleMs
+			t2.HPACKIndexingPolicy = rt.transportOptions.H2HPACKIndexingPolicy
+			t2.DisablePriorityFrames = rt.transportOptions.H2DisablePriorityFrames
 		}
 
 		if rt.pseudoHeaderOrder == nil {
@@ -456,20 +539,13 @@ func (rt *roundTripper) dialTLSWithSetup(ctx context.Context, network, addr stri
 		}
 
 		t2.Priorities = rt.priorities
-		if rt.transportOptions != nil {
-			if rt.transportOptions.H2MaxDataFrameSize > 0 {
-				t2.MaxDataFrameSize = rt.transportOptions.H2MaxDataFrameSize
-			}
-			t2.PrefacePingIdleMs = rt.transportOptions.H2PrefacePingIdleMs
-			t2.HPACKIndexingPolicy = rt.transportOptions.H2HPACKIndexingPolicy
-			t2.DisablePriorityFrames = rt.transportOptions.H2DisablePriorityFrames
-		}
 
 		t2.PushHandler = &http2.DefaultPushHandler{}
 		rt.cachedTransports[addr] = &t2
 		rt.setCachedKind(addr, transportHTTP2)
 	case nextProtoH3:
 		t3, err := buildHTTP3Transport(&http3Config{
+			clientHelloId:          rt.clientHelloId,
 			clientSessionCache:     rt.clientSessionCache,
 			insecureSkipVerify:     rt.insecureSkipVerify,
 			serverNameOverwrite:    rt.serverNameOverwrite,
@@ -495,7 +571,7 @@ func (rt *roundTripper) dialTLSWithSetup(ctx context.Context, network, addr stri
 	// actual request (should be near-immediate).
 	rt.cachedConnections[addr] = conn
 
-	return nil, errProtocolNegotiated
+	return conn, errProtocolNegotiated
 }
 
 func (rt *roundTripper) dial(ctx context.Context, network, addr string) (net.Conn, error) {
@@ -536,13 +612,37 @@ func (rt *roundTripper) buildHttp1Transport() *http.Transport {
 		}
 		t.WriteBufferSize = rt.transportOptions.WriteBufferSize
 		t.ReadBufferSize = rt.transportOptions.ReadBufferSize
+		t.ResponseHeaderTimeout = rt.transportOptions.ResponseHeaderTimeout
 	}
 
 	return t
 }
 
+// dialTLSHTTP2 is the HTTP/2 transport's own dialer. The transport calls it
+// without a request context whenever it needs a new connection, and every
+// request for the address waits on that dial, past the client's timeout. So the
+// dial gets a deadline here; without one, a proxy that answers CONNECT and then
+// sends nothing stalls the handshake, which holds rt's lock, and with it every
+// later request on the client.
+//
+// The context is cancelled only when the deadline passes, never after a dial
+// that finished in time. A tunnel through an HTTP/2 proxy is a stream that lives
+// as long as the context it was dialed with, so cancelling that context would
+// reset the tunnel under the connection just returned.
 func (rt *roundTripper) dialTLSHTTP2(network, addr string, _ *tls.Config) (net.Conn, error) {
-	return rt.dialTLS(context.Background(), network, addr)
+	ctx, cancel := context.WithCancel(context.Background())
+	timer := time.AfterFunc(rt.http2RedialTimeout, cancel)
+
+	conn, err := rt.dialTLS(ctx, network, addr)
+	if !timer.Stop() {
+		if err == nil {
+			_ = conn.Close()
+		}
+
+		return nil, fmt.Errorf("tls-client: HTTP/2 dial to %s did not finish within %s: %w", addr, rt.http2RedialTimeout, context.DeadlineExceeded)
+	}
+
+	return conn, err
 }
 
 // dialTLSForWebsocket establishes a TLS connection for WebSocket use.
@@ -601,27 +701,64 @@ func (rt *roundTripper) dialTLSForWebsocket(ctx context.Context, network, addr s
 	return conn, nil
 }
 
+// getDialTLSAddr is the address a request dials, and the key its transport is
+// cached under. A URL that names no port gets the default for its scheme.
+//
+// It used to get 443 either way, so http://host/ and https://host/ shared a
+// key: a redirect from an https page to a plain http URL found the HTTP/2
+// transport the first request had cached, and that transport refuses any
+// scheme but https before it dials.
 func (rt *roundTripper) getDialTLSAddr(req *http.Request) string {
-	host := req.URL.Hostname()
-	port := req.URL.Port()
-	if port != "" {
+	host := dialHost(req.URL.Hostname())
+	if port := req.URL.Port(); port != "" {
 		return net.JoinHostPort(host, port)
 	}
+	if strings.EqualFold(req.URL.Scheme, "http") {
+		return net.JoinHostPort(host, "80")
+	}
+
 	return net.JoinHostPort(host, "443")
 }
 
-func newRoundTripper(clientProfile profiles.ClientProfile, transportOptions *TransportOptions, serverNameOverwrite string, insecureSkipVerify, withRandomTlsExtensionOrder, forceHttp1, disableHttp3, disableSessionTickets, enableH3Racing bool, certificatePins map[string][]string, badPinHandlerFunc BadPinHandlerFunc, disableIPV6, disableIPV4 bool, bandwidthTracker bandwidth.BandwidthTracker, proxyURL string, dialer ...proxy.ContextDialer) (http.RoundTripper, error) {
-	return newRoundTripperWithPermute(clientProfile, transportOptions, serverNameOverwrite, insecureSkipVerify, extensionPermuteConfig{}, forceHttp1, disableHttp3, disableSessionTickets, enableH3Racing, certificatePins, badPinHandlerFunc, disableIPV6, disableIPV4, bandwidthTracker, proxyURL, dialer...)
+// dialHost returns the punycode form of a non-ASCII host, as fhttp dials it.
+func dialHost(host string) string {
+	if strings.IndexFunc(host, func(r rune) bool { return r > unicode.MaxASCII }) < 0 {
+		return host
+	}
+
+	if ascii, err := idna.Lookup.ToASCII(host); err == nil {
+		return ascii
+	}
+
+	return host
+}
+
+// dialAddr applies dialHost to the host of a host:port address.
+func dialAddr(addr string) string {
+	host, port, err := net.SplitHostPort(addr)
+	if err != nil {
+		return addr
+	}
+
+	return net.JoinHostPort(dialHost(host), port)
+}
+
+func newRoundTripper(clientProfile profiles.ClientProfile, transportOptions *TransportOptions, serverNameOverwrite string, insecureSkipVerify, withRandomTlsExtensionOrder, forceHttp1, disableHttp3, disableSessionTickets, enableH3Racing bool, certificatePins map[string][]string, badPinHandlerFunc BadPinHandlerFunc, certificatePinner CertificatePinner, disableIPV6, disableIPV4 bool, bandwidthTracker bandwidth.BandwidthTracker, proxyURL string, timeout time.Duration, dialer ...proxy.ContextDialer) (http.RoundTripper, error) {
+	return newRoundTripperWithPermute(clientProfile, transportOptions, serverNameOverwrite, insecureSkipVerify, extensionPermuteConfig{}, forceHttp1, disableHttp3, disableSessionTickets, enableH3Racing, certificatePins, badPinHandlerFunc, certificatePinner, disableIPV6, disableIPV4, bandwidthTracker, proxyURL, timeout, dialer...)
 }
 
 // newRoundTripperWithPermute is newRoundTripper with an explicit extension-order
 // policy.  The permutation is applied to the ClientHello spec on every
 // handshake, so two connections from one client carry different orders just
 // like Chromium.
-func newRoundTripperWithPermute(clientProfile profiles.ClientProfile, transportOptions *TransportOptions, serverNameOverwrite string, insecureSkipVerify bool, permute extensionPermuteConfig, forceHttp1, disableHttp3, disableSessionTickets, enableH3Racing bool, certificatePins map[string][]string, badPinHandlerFunc BadPinHandlerFunc, disableIPV6, disableIPV4 bool, bandwidthTracker bandwidth.BandwidthTracker, proxyURL string, dialer ...proxy.ContextDialer) (http.RoundTripper, error) {
-	pinner, err := NewCertificatePinner(certificatePins)
-	if err != nil {
-		return nil, fmt.Errorf("can not instantiate certificate pinner: %w", err)
+func newRoundTripperWithPermute(clientProfile profiles.ClientProfile, transportOptions *TransportOptions, serverNameOverwrite string, insecureSkipVerify bool, permute extensionPermuteConfig, forceHttp1, disableHttp3, disableSessionTickets, enableH3Racing bool, certificatePins map[string][]string, badPinHandlerFunc BadPinHandlerFunc, certificatePinner CertificatePinner, disableIPV6, disableIPV4 bool, bandwidthTracker bandwidth.BandwidthTracker, proxyURL string, timeout time.Duration, dialer ...proxy.ContextDialer) (http.RoundTripper, error) {
+	pinner := certificatePinner
+	if pinner == nil {
+		var err error
+		pinner, err = NewCertificatePinner(certificatePins)
+		if err != nil {
+			return nil, fmt.Errorf("can not instantiate certificate pinner: %w", err)
+		}
 	}
 
 	var clientSessionCache tls.ClientSessionCache
@@ -630,6 +767,13 @@ func newRoundTripperWithPermute(clientProfile profiles.ClientProfile, transportO
 
 	if withSessionResumption {
 		clientSessionCache = tls.NewLRUClientSessionCache(32)
+	}
+
+	// A timeout of 0 lifts the deadline on the request, for long downloads. It
+	// does not mean a handshake may take forever.
+	http2RedialTimeout := timeout
+	if http2RedialTimeout <= 0 {
+		http2RedialTimeout = time.Duration(DefaultTimeoutSeconds) * time.Second
 	}
 
 	rt := &roundTripper{
@@ -665,11 +809,15 @@ func newRoundTripperWithPermute(clientProfile profiles.ClientProfile, transportO
 		http3PseudoHeaderOrder:      clientProfile.GetHttp3PseudoHeaderOrder(),
 		http3SendGreaseFrames:       clientProfile.GetHttp3SendGreaseFrames(),
 		proxyURL:                    proxyURL,
+		http2RedialTimeout:          http2RedialTimeout,
 	}
 
 	// Create protocol racer if HTTP/3 racing is enabled
 	if enableH3Racing {
 		rt.racer = newProtocolRacer(
+			// LOCAL OVERLAY: the racer builds its own HTTP/3 transport, so it
+			// must carry the permuted ClientHelloID, not the raw profile one.
+			rt.clientHelloId,
 			clientSessionCache,
 			insecureSkipVerify,
 			serverNameOverwrite,

@@ -106,8 +106,29 @@ class CdefParityTests(unittest.TestCase):
         ]
         for cdef, label in ((CORE_CDEF, "core"), (self.binding_cdef, "binding")):
             fields = _struct_fields(cdef, "RequestOptions")
-            tail = fields[-len(abi3):]
-            self.assertEqual(tail, abi3, "%s RequestOptions ABI 3 tail mismatch" % label)
+            self.assertTrue(
+                fields[-len(abi3):] == abi3
+                or fields[-len(abi3) - 3:-3] == abi3,
+                "%s RequestOptions ABI 3 block mismatch: %r" % (label, fields[-len(abi3) - 3:]),
+            )
+
+    def test_abi4_fields_present_in_both(self):
+        """The ABI 4 transport health-check fields must be the struct tail.
+
+        They are appended after the ABI 3 block (append-only layout), so both
+        the hand-written CDEF in _core.py and the cdef derived from main.go's
+        cgo preamble must end with exactly these three fields in this order.
+        """
+        abi4 = [
+            "h2_read_idle_timeout_milliseconds",
+            "h2_ping_timeout_milliseconds",
+            "response_header_timeout_milliseconds",
+        ]
+        for cdef, label in ((CORE_CDEF, "core"), (self.binding_cdef, "binding")):
+            fields = _struct_fields(cdef, "RequestOptions")
+            self.assertEqual(
+                fields[-len(abi4):], abi4, "%s RequestOptions ABI 4 tail mismatch" % label
+            )
 
     def test_custom_tls_client_has_no_permute_fields(self):
         """Extension permutation is a RequestOptions policy, not a ClientHello field.

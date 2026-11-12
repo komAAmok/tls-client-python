@@ -172,6 +172,13 @@ typedef struct {
     int   tcp_no_delay;        // -1 = unset, 0 = off, 1 = on
     int   tcp_window_clamp;    // 0 = unset
     const char* tcp_ip_id_mode;
+    // ── ABI 4 additions (upstream 1.18.1 transport health checks) ──
+    // HTTP/2 PING health check: 0 = off.
+    int   h2_read_idle_timeout_milliseconds;
+    // Close an H2 conn whose health-check PING is unacknowledged: 0 = 15s.
+    int   h2_ping_timeout_milliseconds;
+    // Wait for response headers after the request is written: 0 = no timeout.
+    int   response_header_timeout_milliseconds;
 } RequestOptions;
 
 typedef struct {
@@ -377,7 +384,11 @@ func evictStaleEntries() {
 			continue
 		}
 		if pe.client != nil {
-			pe.client.CloseIdleConnections()
+			// Upstream 1.18.1 added HttpClient.Close(): it also releases the
+			// UDP sockets and reader goroutines of HTTP/3 transports, which
+			// CloseIdleConnections leaves running.  An evicted entry is never
+			// reused, so a full Close is the correct call here.
+			pe.client.Close()
 		}
 		clientPool.Delete(key)
 		poolEntryCount.Add(-1)
@@ -453,7 +464,8 @@ func evictLRUOverCapLocked(protectedKey string) {
 	for i := int64(0); i < over; i++ {
 		c := candidates[i]
 		if c.entry != nil && c.entry.client != nil {
-			c.entry.client.CloseIdleConnections()
+			// Upstream 1.18.1 Close(): also releases HTTP/3 UDP sockets.
+			c.entry.client.Close()
 		}
 		clientPool.Delete(c.key)
 		poolEntryCount.Add(-1)
@@ -597,6 +609,11 @@ type requestConfig struct {
 	h2MaxDataFrameSize int
 	prefacePingIdleMs  int
 	hpackIndexingPol   string
+
+	// ABI 4 additions (upstream 1.18.1 transport health checks)
+	h2ReadIdleTimeoutMs     int
+	h2PingTimeoutMs         int
+	responseHeaderTimeoutMs int
 }
 
 // requestConfigFromOptions converts C request options to the shared Go form.
@@ -650,6 +667,9 @@ func requestConfigFromOptions(opts *C.RequestOptions, copyBody bool) (cfg *reque
 		withDebug:                int(opts.with_debug) != 0,
 		streamOutputBlockSize:    int(opts.stream_output_block_size),
 		withDefaultBadPinHandler: int(opts.with_default_bad_pin_handler) != 0,
+		h2ReadIdleTimeoutMs:      int(opts.h2_read_idle_timeout_milliseconds),
+		h2PingTimeoutMs:          int(opts.h2_ping_timeout_milliseconds),
+		responseHeaderTimeoutMs:  int(opts.response_header_timeout_milliseconds),
 	}
 
 	// NOTE: the deferred recover MUST be registered AFTER the struct literal.
@@ -1247,6 +1267,11 @@ func buildCacheKeyFromConfig(cfg *requestConfig) string {
 	//   * catch_panics -- WithCatchPanics() changes panic recovery.
 	// Both are bools stored as %d, matching the convention above.
 	fmt.Fprintf(h, "|dbg=%d|cp=%d", b2i(cfg.withDebug), b2i(cfg.catchPanics))
+	// Format version 8: ABI 4 transport health-check timeouts.  They are
+	// client-construction inputs, so a pooled client built with one set of
+	// timeouts must not serve a request that asked for another.
+	fmt.Fprintf(h, "|rit=%d|pit=%d|rht=%d",
+		cfg.h2ReadIdleTimeoutMs, cfg.h2PingTimeoutMs, cfg.responseHeaderTimeoutMs)
 
 	if len(cfg.pseudoHeaderOrder) > 0 {
 		for _, s := range cfg.pseudoHeaderOrder {
@@ -1642,6 +1667,17 @@ func buildClientFromConfig(cfg *requestConfig) (tls_client.HttpClient, error) {
 	transportOpts.H2PrefacePingIdleMs = cfg.prefacePingIdleMs
 	transportOpts.H2HPACKIndexingPolicy = cfg.hpackIndexingPol
 	transportOpts.H2DisablePriorityFrames = cfg.h2DisablePriorityFrames
+	// ABI 4: upstream 1.18.1 transport health checks.  Milliseconds on the
+	// wire, time.Duration in the engine; 0 keeps the engine default.
+	if cfg.h2ReadIdleTimeoutMs > 0 {
+		transportOpts.ReadIdleTimeout = time.Duration(cfg.h2ReadIdleTimeoutMs) * time.Millisecond
+	}
+	if cfg.h2PingTimeoutMs > 0 {
+		transportOpts.PingTimeout = time.Duration(cfg.h2PingTimeoutMs) * time.Millisecond
+	}
+	if cfg.responseHeaderTimeoutMs > 0 {
+		transportOpts.ResponseHeaderTimeout = time.Duration(cfg.responseHeaderTimeoutMs) * time.Millisecond
+	}
 	// Default idle connection timeout of 30s — prevents unbounded
 	// connection-pool growth when the caller does not set it explicitly.
 	if cfg.idleConnTimeoutSeconds > 0 {
@@ -2101,10 +2137,11 @@ func ClearClientPool() {
 
 	clientPool.Range(func(key, value any) bool {
 		if entry, ok := value.(*poolEntry); ok {
-			entry.client.CloseIdleConnections()
+			// Upstream 1.18.1 Close(): releases HTTP/3 UDP sockets too.
+			entry.client.Close()
 		} else if client, ok := value.(tls_client.HttpClient); ok {
 			// Legacy cleanup: entries stored before poolEntry wrapper was introduced
-			client.CloseIdleConnections()
+			client.Close()
 		}
 		clientPool.Delete(key)
 		return true
@@ -2178,8 +2215,11 @@ func GetAbiVersion() C.int {
 	// (header_order_by_dest/dest), h2_disable_priority_frames and the deep
 	// TCP fingerprint fields (tcp_dont_fragment/tos/no_delay/window_clamp/
 	// ip_id_mode); CustomTlsClient gained extension_permute_mode/prefix.
+	// ABI 4: RequestOptions gained h2_read_idle_timeout_milliseconds,
+	// h2_ping_timeout_milliseconds and response_header_timeout_milliseconds
+	// (upstream 1.18.1 transport health checks).  Append-only again.
 	// Append-only struct evolution; consumers must verify via this export.
-	return 3
+	return 4
 }
 
 //export RequestAsync

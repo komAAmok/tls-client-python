@@ -138,15 +138,36 @@ class ShippedBinaryTests(unittest.TestCase):
         if not target.exists():
             self.skipTest("no committed linux/amd64 binary in this checkout")
         # Measured 13,984,760 bytes with the lean charset and 14,095,224 with
-        # html/charset.  The budget sits between them so a regression to the
-        # fat build fails while an ordinary dependency bump does not.
+        # html/charset — a ~110 KB gap that the budget sat inside, so a
+        # regression to the fat build failed while an ordinary dependency bump
+        # did not.
         #
         # The lean reader decodes every label html/charset does, so it is
         # larger than the decode-only subset it replaced (13,812,184): the
         # <meta> prescan needs x/net/html's tokenizer (~24 KB) and the label
         # table covers the whole htmlindex catalogue.  It still avoids the
         # ~260 KB of encode tables that referencing htmlindex directly pulls in.
-        budget = 14_050_000
+        #
+        # Upstream 1.18.1 sync re-baselines this number.  Measured 15,016,072
+        # bytes on linux/amd64 (+1,035,440, +7.4 %) for these reasons, none of
+        # them charset related:
+        #   * utls 1.7.8 -> 1.8.2-barnius: ML-KEM (X25519MLKEM768) and ML-DSA
+        #     signature algorithms, now referenced by the Chrome 152+ profiles;
+        #   * klauspost/compress 1.18.2 -> 1.20.1 plus upstream's
+        #     "gzip, deflate, br, zstd" Accept-Encoding, which links the zstd
+        #     decoder/encoder and its huff0/fse tables;
+        #   * golang.org/x/net 0.48 -> 0.59 and x/text 0.32 -> 0.42;
+        #   * the new trust_anchors package, which embeds the Chrome Root
+        #     Store anchor list for the 0xCA34 extension;
+        #   * new captures (Chrome 154, Safari 27.2) in the profile catalogue.
+        #
+        # The discriminator this test exists for is still exact: the budget is
+        # 15,100,000, which the fat build would exceed once the ~110 KB
+        # html/charset block is linked back on top of the new baseline
+        # (15,016,072 + 110,000 > 15,100,000).  The whitespace-free check in
+        # CharsetLeanTests above pins the actual property; this one catches the
+        # case where charset_lean.go is bypassed wholesale.
+        budget = 15_100_000
         size = target.stat().st_size
         self.assertLess(
             size,

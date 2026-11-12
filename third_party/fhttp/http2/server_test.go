@@ -1172,8 +1172,10 @@ func TestServer_MaxQueuedControlFrames(t *testing.T) {
 	st := newServerTester(t, nil)
 	defer st.Close()
 	st.greet()
+	// Logging the writes decodes each written frame again, which is most of the time spent sending this many.
+	st.fr.logWrites = false
 
-	const extraPings = 500000 // enough to fill the TCP buffers
+	const extraPings = 4000000 // enough to fill the TCP buffers, which the OS can size to several megabytes
 
 	for i := 0; i < maxQueuedControlFrames+extraPings; i++ {
 		pingData := [8]byte{1, 2, 3, 4, 5, 6, 7, 8}
@@ -1864,7 +1866,7 @@ func TestServerRejectsContentLengthWithSignNewRequests(t *testing.T) {
 			}
 			checkReq := func(r *http.Request) {
 				if r.ContentLength != tt.wantCL {
-					t.Fatalf("Got: %q\nWant: %q", r.ContentLength, tt.wantCL)
+					t.Fatalf("Got: %d\nWant: %d", r.ContentLength, tt.wantCL)
 				}
 			}
 			testServerRequest(t, writeReq, checkReq)
@@ -2557,6 +2559,10 @@ func testRejectTLS(t *testing.T, max uint16) {
 		// config whose Min is above its Max cannot handshake at all.
 		c.MinVersion = max
 		c.MaxVersion = max
+	}, func(ts *httptest.Server) {
+		// utls no longer accepts TLS 1.0 and 1.1 on the server side unless
+		// MinVersion is lowered explicitly.
+		ts.Config.TLSConfig = &tls.Config{MinVersion: max}
 	})
 	defer st.Close()
 	gf := st.wantGoAway()

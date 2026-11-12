@@ -13,9 +13,9 @@ import (
 // python_tests/test_cache_key_parity.py holds the same constants on the
 // Python side.  If either side drifts, these tests fail BEFORE production
 // cache keys diverge and silently poison the client pool.
-// Format version: 7 (ABI 3 — extension permutation, PRIORITY-frame
-// suppression and the deep TCP fingerprint — plus the client-construction
-// flags added in v6: with_debug and catch_panics).
+// Format version: 8 (ABI 4 — upstream 1.18.1 transport health-check timeouts
+// — on top of the ABI 3 block, the deep TCP fingerprint and the
+// client-construction flags added in v6).
 func TestCacheKeyParityWithPython(t *testing.T) {
 	const testPEM = "-----BEGIN CERTIFICATE-----\nAAE=\n-----END CERTIFICATE-----\n"
 
@@ -44,8 +44,12 @@ func TestCacheKeyParityWithPython(t *testing.T) {
 		tcpNoDelay:              1,
 		tcpWindowClamp:          0,
 		tcpIPIDMode:             "random",
+		// ABI 4 — upstream 1.18.1 transport health checks.
+		h2ReadIdleTimeoutMs:     20000,
+		h2PingTimeoutMs:         15000,
+		responseHeaderTimeoutMs: 45000,
 	}
-	const wantFull = "1ef1c474e0ac74370beaa9a14b2d17012bf63605a43df4ee3960135667d73218"
+	const wantFull = "1156e8d5d96ed5d1bc590373d571c2e629d1623f27c73c4d9122677e41be8b75"
 	if got := buildCacheKeyFromConfig(full); got != wantFull {
 		t.Fatalf("full vector mismatch:\n got  %s\n want %s", got, wantFull)
 	}
@@ -62,7 +66,7 @@ func TestCacheKeyParityWithPython(t *testing.T) {
 		tcpTOS:          -1,
 		tcpNoDelay:      -1,
 	}
-	const wantMinimal = "b5169ec1a12e836561889ea08641775aae56603dce0ddd680d8f0c29d74d8d9b"
+	const wantMinimal = "d8fe2f517f6b527236d55f3165f2b3d0f015b459137a96f256d131e0899fd31f"
 	if got := buildCacheKeyFromConfig(minimal); got != wantMinimal {
 		t.Fatalf("minimal vector mismatch:\n got  %s\n want %s", got, wantMinimal)
 	}
@@ -77,6 +81,13 @@ func TestCacheKeyParityWithPython(t *testing.T) {
 	permuted.extensionPermuteMode = 2
 	if buildCacheKeyFromConfig(&permuted) == buildCacheKeyFromConfig(minimal) {
 		t.Fatal("extension_permute_mode did not influence the cache key")
+	}
+
+	// ABI 4: the transport health-check timeouts participate.
+	slowPing := *minimal
+	slowPing.h2ReadIdleTimeoutMs = 30000
+	if buildCacheKeyFromConfig(&slowPing) == buildCacheKeyFromConfig(minimal) {
+		t.Fatal("h2_read_idle_timeout_ms did not influence the cache key")
 	}
 
 	// ABI 3: the -1 sentinel must not collide with a real 0 value.

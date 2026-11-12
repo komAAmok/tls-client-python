@@ -59,7 +59,7 @@ func TestGetTransportDoesNotPanicWhenOnlyTheKindSurvivedADrop(t *testing.T) {
 	addr := listener.Addr().String()
 
 	tripper, err := newRoundTripper(profiles.Chrome_133, nil, "", true, false, false, true, false, false,
-		nil, nil, false, false, bandwidth.NewNopeTracker(), "", proxy.Direct)
+		nil, nil, nil, false, false, bandwidth.NewNopeTracker(), "", 0, proxy.Direct)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -90,7 +90,7 @@ func TestGetTransportDoesNotPanicWhenOnlyTheKindSurvivedADrop(t *testing.T) {
 
 	// A panic here is the failure. An error is fine: the point is that the setup
 	// dial does not report success without caching a transport.
-	if err := rt.getTransport(req, addr); err != nil {
+	if _, err := rt.getTransport(req, addr); err != nil {
 		t.Fatalf("getTransport: %v", err)
 	}
 

@@ -2,6 +2,7 @@ package profiles
 
 import (
 	"github.com/bogdanfinn/fhttp/http2"
+	"github.com/bogdanfinn/tls-client/trust_anchors"
 	tls "github.com/bogdanfinn/utls"
 )
 
@@ -36,10 +37,13 @@ var MappedTLSClients = map[string]ClientProfile{
 	"chrome_150_PSK":         Chrome_150_PSK,
 	"chrome_152":             Chrome_152,
 	"chrome_152_PSK":         Chrome_152_PSK,
+	"chrome_154":             Chrome_154,
+	"chrome_154_PSK":         Chrome_154_PSK,
 	"brave_146":              Brave_146,
 	"brave_146_PSK":          Brave_146_PSK,
 	"safari_15_6_1":          Safari_15_6_1,
 	"safari_16_0":            Safari_16_0,
+	"safari_27_2":            Safari_27_2,
 	"safari_ipad_15_6":       Safari_Ipad_15_6,
 	"safari_ios_15_5":        Safari_IOS_15_5,
 	"safari_ios_15_6":        Safari_IOS_15_6,
@@ -328,4 +332,12 @@ func (c ClientProfile) GetHttp3PseudoHeaderOrder() []string {
 
 func (c ClientProfile) GetHttp3SendGreaseFrames() bool {
 	return c.http3SendGreaseFrames
+}
+
+// BuildTrustAnchorsPayload turns a captured trust_anchors payload into the data
+// for the extension.
+//
+// Deprecated: use trust_anchors.BuildPayload
+func BuildTrustAnchorsPayload(capture string) ([]byte, error) {
+	return trust_anchors.BuildPayload(capture)
 }

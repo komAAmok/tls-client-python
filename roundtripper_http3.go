@@ -119,10 +119,13 @@ func buildHTTP3Transport(cfg *http3Config) (http.RoundTripper, error) {
 	return t3, nil
 }
 
+// profileDefaultMaxResponseHeaderBytes keeps SETTINGS_MAX_FIELD_SECTION_SIZE out
+// of the HTTP/3 SETTINGS for Firefox only, because Firefox does not send it.
+// Every other profile, including the ones without own HTTP/3 settings, sends
+// the Chrome value.
 func profileDefaultMaxResponseHeaderBytes(cfg *http3Config) int {
-	if cfg.http3PriorityParam > 0 {
-		return CHROME_MAX_FIELD_SECTION_SIZE
+	if cfg.clientHelloId.Client == firefoxClientName {
+		return -1
 	}
-	return -1
+	return CHROME_MAX_FIELD_SECTION_SIZE
 }
-

@@ -148,6 +148,49 @@ def _register(registry) -> None:
         },
     })
 
+    # ── Chrome 153 / 154 (upstream 1.18.1 engine profiles) ──────────────
+    # Chrome 154 sends the Chrome 152 ClientHello and HTTP/2 fingerprint; the
+    # only change is the trust_anchors payload, which Chrome 154 sorts instead
+    # of shuffling per process.  Chrome 153 is the intermediate capture.
+    _sec_ch_ua_153 = (
+        '"Chromium";v="153", "Not?A_Brand";v="24", "Google Chrome";v="153"'
+    )
+    _sec_ch_ua_154 = (
+        '"Chromium";v="154", "Not?A_Brand";v="24", "Google Chrome";v="154"'
+    )
+
+    def _chrome_variant(name, version, sec_ch_ua, ua_platform, platform_hint,
+                        ident):
+        return {
+            "name": name,
+            "based_on": "chrome_152_base",
+            "client_identifier": ident,
+            "default_headers": _desktop_headers(
+                version, ua_platform, platform_hint, sec_ch_ua
+            ),
+        }
+
+    registry.register(_chrome_variant(
+        "chrome_153", "153", _sec_ch_ua_153,
+        "Windows NT 10.0; Win64; x64", '"Windows"', "chrome_153",
+    ))
+    registry.register(_chrome_variant(
+        "chrome_154", "154", _sec_ch_ua_154,
+        "Windows NT 10.0; Win64; x64", '"Windows"', "chrome_154",
+    ))
+    registry.register(_chrome_variant(
+        "chrome_154_macos", "154", _sec_ch_ua_154,
+        "Macintosh; Intel Mac OS X 10_15_7", '"macOS"', "chrome_154",
+    ))
+    registry.register(_chrome_variant(
+        "chrome_154_linux", "154", _sec_ch_ua_154,
+        "X11; Linux x86_64", '"Linux"', "chrome_154",
+    ))
+    registry.register(_chrome_variant(
+        "chrome_154_PSK", "154", _sec_ch_ua_154,
+        "Windows NT 10.0; Win64; x64", '"Windows"', "chrome_154_PSK",
+    ))
+
     # A shipped-identifier preset (works with pre-152 bundled binaries).
     registry.register({
         "name": "chrome_133_windows",

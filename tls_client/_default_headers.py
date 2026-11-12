@@ -296,12 +296,19 @@ DEFAULT_HEADERS: Dict[str, Dict[str, str]] = {
     "chrome_150_PSK": _chrome_psk("150", zstd=True),
     "chrome_152": _chrome_headers("152", zstd=True),
     "chrome_152_PSK": _chrome_psk("152", zstd=True),
+    # ── Chrome 153 / 154 (upstream 1.18.1 profiles) ───────────────────────
+    "chrome_153": _chrome_headers("153", zstd=True),
+    "chrome_153_PSK": _chrome_psk("153", zstd=True),
+    "chrome_154": _chrome_headers("154", zstd=True),
+    "chrome_154_PSK": _chrome_psk("154", zstd=True),
     # ── Brave 146  ────────────────────────────────────────────────────────
     "brave_146": _brave_headers("146"),
     "brave_146_PSK": _brave_headers("146"),
     # ── Safari macOS ──────────────────────────────────────────────────────
     "safari_15_6_1": _safari_macos("15.6.1"),
     "safari_16_0": _safari_macos("16.0"),
+    # Safari 27.2 on macOS 27.2 (upstream 1.18.1 capture).
+    "safari_27_2": _safari_macos("27.2"),
     # ── Safari iPad ───────────────────────────────────────────────────────
     "safari_ipad_15_6": _safari_ipad("15.6", "15.6"),
     # ── Safari iOS ────────────────────────────────────────────────────────

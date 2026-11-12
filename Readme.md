@@ -40,10 +40,12 @@ For a deep dive, see [this excellent article on TLS fingerprinting](https://http
 | 🔌 **WebSocket** | TLS-fingerprinted WebSocket (HTTP/1.1 handshake) — `WebSocket` |
 | 🛡️ **Panic-proof** | All Go panics caught and surfaced as Python exceptions |
 | ⚙️ **Custom TLS** | Full 26-field custom TLS client configuration |
-| 🔬 **Chrome 99–153 Captures** | Byte-exact profiles for **every** Chrome major 99…153, recovered from live handshakes |
+| 🔬 **Chrome 99–154 Captures** | Byte-exact profiles for **every** Chrome major 99…154, recovered from live handshakes |
 | 🎲 **Per-Handshake Extension Shuffle** | Chromium's unseeded extension rotation, with GREASE/padding/PSK pinned (`ABI 3`) |
 | 🧭 **Destination-Aware Header Order** | Header order selected by `Sec-Fetch-Dest` — navigation vs sub-resource (`ABI 3`) |
 | 🌐 **Deep TCP Fingerprint** | DF bit, TOS, Nagle, window clamp and IP-ID mode (`ABI 3`) |
+| 🩺 **Transport Health Checks** | HTTP/2 PING health check, PING timeout and response-header timeout (ABI 4, upstream 1.18.1) |
+| 🧹 **Clean Close** | `HttpClient.Close()` releases HTTP/3 UDP sockets, not just idle TCP conns — the binding uses it on every pool eviction |
 | 🎯 **Fingerprint Presets** | Coherent per-OS bundles: identifier + headers + header order + TCP fingerprint (`tls_client.fingerprints`) |
 | 🧭 **Request Contexts** | Browser-coherent `Sec-Fetch-*`, Client Hints and RFC 9218 `Priority` headers (`RequestContext`) |
 | 🔏 **Trust Anchors / ECH** | Chrome 152 `0xCA34` trust anchors and automatic ECH config resolution over DoH |
@@ -184,7 +186,7 @@ handshakes rather than hand-transcribed. Every major ships as both
 
 | Identifier | Notes |
 |-----------|-------|
-| `chrome_99` — `chrome_153` | **Byte-exact captures, every major 99…153** |
+| `chrome_99` — `chrome_154` | **Byte-exact captures, every major 99…154** |
 | `chrome_99_PSK` — `chrome_153_PSK` | Same, with PSK key exchange |
 
 The captures pin the real per-version cipher list, extension order, supported
@@ -552,6 +554,13 @@ resp = s.get("https://tls.browserleaks.com/json", client_identifier="firefox_148
 | **FFI Boundary** | Raw C structs via CFFI — no JSON serialization overhead |
 | **Memory Safety** | `ffi.gc(resp, FreeResponse)` — Go panics surfaced as `RuntimeError` |
 | **Python API** | `requests`-style `Session`, `Response`, `AsyncSession` |
+
+Or, if you prefer crypto:
+
+- **ETH** `0x1Ef18abfE61372e49F08eD24B1055cbDD5d7e0Fc`
+- **BTC** `bc1qkfqu5xvayqh55gwjtyannvyqzr4cax4eu3k2u6`
+- **ADA** `addr1qxj5hg5xfq9l5r5ed7av7mzg0gy5xemn64lkna5cuu9e4yt0vk8st6zvmfuqjdz849drd7zgcdky4zrdvm603dzf4dgs5unend`
+- **SOL** `7hYfiX4R5bEbggYY2JRZi2a3EdcEzQ6XbgZiHRiRHjau`
 
 ---
 

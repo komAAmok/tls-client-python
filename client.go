@@ -38,6 +38,7 @@ type HttpClient interface {
 	SetFollowRedirect(followRedirect bool)
 	GetFollowRedirect() bool
 	CloseIdleConnections()
+	Close()
 	Do(req *http.Request) (*http.Response, error)
 	Get(url string) (resp *http.Response, err error)
 	Head(url string) (resp *http.Response, err error)
@@ -215,7 +216,9 @@ func buildFromConfig(logger Logger, config *httpClientConfig) (*http.Client, pro
 	// Merge TCP fingerprint: auto-derived from profile + manual user override
 	tcpFp := MergeTcpFingerprint(config.clientProfile.GetTcpFingerprint(), config.tcpFingerprintOverride)
 	if tcpFp != nil && config.dialContext == nil {
-		config.dialer.Control = tcpControl(tcpFp)
+		// LOCAL OVERLAY: chain, never replace - WithDialer's Control hook
+		// carries socket tagging / fwmark / interface binding.
+		config.dialer.Control = chainTcpControl(config.dialer.Control, tcpFp)
 	}
 
 	var dialer proxy.ContextDialer
@@ -267,7 +270,7 @@ func buildFromConfig(logger Logger, config *httpClientConfig) (*http.Client, pro
 
 	clientProfile := config.clientProfile
 
-	transport, err := newRoundTripperWithPermute(clientProfile, config.transportOptions, config.serverNameOverwrite, config.insecureSkipVerify, config.extensionPermuteConfig(), config.forceHttp1, config.disableHttp3, config.disableSessionTickets, config.enableProtocolRacing, config.certificatePins, config.badPinHandler, config.disableIPV6, config.disableIPV4, bandwidthTracker, config.proxyUrl, dialer)
+	transport, err := newRoundTripperWithPermute(config.clientProfile, config.transportOptions, config.serverNameOverwrite, config.insecureSkipVerify, config.extensionPermuteConfig(), config.forceHttp1, config.disableHttp3, config.disableSessionTickets, config.enableProtocolRacing, config.certificatePins, config.badPinHandler, config.certificatePinner, config.disableIPV6, config.disableIPV4, bandwidthTracker, config.proxyUrl, config.timeout, dialer)
 	if err != nil {
 		return nil, nil, nil, clientProfile, err
 	}
@@ -288,6 +291,19 @@ func buildFromConfig(logger Logger, config *httpClientConfig) (*http.Client, pro
 // CloseIdleConnections closes all idle connections of the underlying http client.
 func (c *httpClient) CloseIdleConnections() {
 	c.Client.CloseIdleConnections()
+}
+
+// Close releases all connections and transports of the client, including the
+// UDP sockets of HTTP/3 transports which CloseIdleConnections keeps open.
+// The client stays usable and builds new transports on the next request.
+func (c *httpClient) Close() {
+	rt, ok := c.Transport.(*roundTripper)
+	if !ok {
+		c.Client.CloseIdleConnections()
+		return
+	}
+
+	rt.Close()
 }
 
 // GetDialer() returns the underlying Dialer
@@ -381,7 +397,8 @@ func (c *httpClient) GetProxy() string {
 func (c *httpClient) applyProxy() error {
 	tcpFp := MergeTcpFingerprint(c.config.clientProfile.GetTcpFingerprint(), c.config.tcpFingerprintOverride)
 	if tcpFp != nil && c.config.dialContext == nil {
-		c.config.dialer.Control = tcpControl(tcpFp)
+		// LOCAL OVERLAY: chain, never replace (see buildFromConfig).
+		c.config.dialer.Control = chainTcpControl(c.config.dialer.Control, tcpFp)
 	}
 
 	var dialer proxy.ContextDialer
@@ -415,7 +432,7 @@ func (c *httpClient) applyProxy() error {
 		}
 	}
 
-	transport, err := newRoundTripperWithPermute(c.config.clientProfile, c.config.transportOptions, c.config.serverNameOverwrite, c.config.insecureSkipVerify, c.config.extensionPermuteConfig(), c.config.forceHttp1, c.config.disableHttp3, c.config.disableSessionTickets, c.config.enableProtocolRacing, c.config.certificatePins, c.config.badPinHandler, c.config.disableIPV6, c.config.disableIPV4, c.bandwidthTracker, c.config.proxyUrl, dialer)
+	transport, err := newRoundTripperWithPermute(c.config.clientProfile, c.config.transportOptions, c.config.serverNameOverwrite, c.config.insecureSkipVerify, c.config.extensionPermuteConfig(), c.config.forceHttp1, c.config.disableHttp3, c.config.disableSessionTickets, c.config.enableProtocolRacing, c.config.certificatePins, c.config.badPinHandler, c.config.certificatePinner, c.config.disableIPV6, c.config.disableIPV4, c.bandwidthTracker, c.config.proxyUrl, c.config.timeout, dialer)
 	if err != nil {
 		return err
 	}

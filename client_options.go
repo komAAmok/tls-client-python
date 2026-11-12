@@ -25,6 +25,18 @@ type TransportOptions struct {
 	// IdleConnTimeout is the maximum amount of time an idle (keep-alive)
 	// connection will remain idle before closing itself. Zero means no limit.
 	IdleConnTimeout *time.Duration
+	// ReadIdleTimeout is the HTTP/2 health-check interval: a PING frame is sent
+	// when no frame has been received for this long, so an idle connection
+	// pings every ReadIdleTimeout. This keeps idle connections open on servers
+	// that close them after an idle period. Zero disables the health check.
+	ReadIdleTimeout time.Duration
+	// PingTimeout closes an HTTP/2 connection whose health-check PING is not
+	// acknowledged in time. Zero means 15 seconds.
+	PingTimeout time.Duration
+	// ResponseHeaderTimeout is the time to wait for a server's response
+	// headers after the request, including its body, has been written, over
+	// HTTP/1.1 and HTTP/2. Zero means no timeout.
+	ResponseHeaderTimeout time.Duration
 	// RootCAs is the set of root certificate authorities used to verify
 	// the remote server's certificate.
 	RootCAs                *x509.CertPool
@@ -81,6 +93,7 @@ type httpClientConfig struct {
 	cookieJar          http.CookieJar
 	customRedirectFunc func(req *http.Request, via []*http.Request) error
 	certificatePins    map[string][]string
+	certificatePinner  CertificatePinner
 	defaultHeaders     http.Header
 	connectHeaders     http.Header
 	badPinHandler      BadPinHandlerFunc
@@ -280,6 +293,30 @@ func WithCertificatePinning(certificatePins map[string][]string, handlerFunc Bad
 	}
 }
 
+// WithCertificatePinner supplies a custom CertificatePinner, used wherever the
+// built-in one is: on the TLS handshake of every HTTP/1.1 and HTTP/2 connection.
+//
+// It is the escape hatch for validation the built-in SPKI pinner cannot express:
+// checking the peer's subject or SAN entries, refusing issuers that belong to
+// interception tooling, or any other rule that needs to look at the certificate
+// rather than compare a hash. The pinner receives the same *tls.UConn the
+// built-in one does, so conn.ConnectionState() is available to it.
+//
+// HTTP/3 is not covered. Those transports are built from http3Config and carry
+// their own QUIC TLS stack, which never reaches Pin — this is true of
+// WithCertificatePinning today and is unchanged here. A client that enables
+// protocol racing can therefore complete an h3 connection without either pinner
+// running; covering it would need an interface that is not tied to *tls.UConn.
+// Callers that require the check on every connection should keep HTTP/3 off
+// (WithDisableHttp3).
+//
+// Takes precedence over WithCertificatePinning; the two are not combined.
+func WithCertificatePinner(pinner CertificatePinner) HttpClientOption {
+	return func(config *httpClientConfig) {
+		config.certificatePinner = pinner
+	}
+}
+
 // WithDebug configures a client to log debugging information.
 func WithDebug() HttpClientOption {
 	return func(config *httpClientConfig) {
@@ -384,6 +421,11 @@ func WithBandwidthTracker() HttpClientOption {
 }
 
 // WithConnectHeaders configures a client to use the specified headers for the CONNECT request.
+//
+// The client writes Host itself and, when no User-Agent is given, Go's own. The
+// headers go out in the order named under http.HeaderOrderKey, spelled either
+// way, and alphabetically when no order is given. Chrome sends three on a
+// CONNECT: Host, Proxy-Connection: keep-alive and User-Agent, in that order.
 func WithConnectHeaders(headers http.Header) HttpClientOption {
 	return func(config *httpClientConfig) {
 		config.connectHeaders = headers

@@ -72,6 +72,8 @@ ClientIdentifiers: TypeAlias = Literal[
     "chrome_146", "chrome_146_PSK",
     "chrome_150", "chrome_150_PSK",
     "chrome_152", "chrome_152_PSK",
+    "chrome_153", "chrome_153_PSK",
+    "chrome_154", "chrome_154_PSK",
         # ── Brave ──
     "brave_146", "brave_146_PSK",
         # ── Safari ──
@@ -81,6 +83,7 @@ ClientIdentifiers: TypeAlias = Literal[
     "safari_ios_17_0",
     "safari_ios_18_0", "safari_ios_18_5",
     "safari_ios_26_0",
+    "safari_27_2",
         # ── Firefox ──
     "firefox_102", "firefox_104", "firefox_105", "firefox_106",
     "firefox_108", "firefox_110",
@@ -459,6 +462,25 @@ class Request(TypedDict, total=False):
 
     IP fragmentation ID generation mode (e.g. ``"random"``, ``"zero"``,
     ``"increment"``).
+    """
+
+    # ABI 4 (upstream 1.18.1 transport health checks)
+    h2_read_idle_timeout_ms: Optional[int]
+    """HTTP/2 PING health-check interval (ms). ``0`` disables the check.
+
+    A PING goes out when no frame has arrived for this long, which keeps idle
+    connections alive on servers that reap them.
+    """
+    h2_ping_timeout_ms: Optional[int]
+    """Timeout for the health-check PING acknowledgement (ms).
+
+    ``0`` keeps the engine default of 15 seconds; the connection is closed
+    when it expires.
+    """
+    response_header_timeout_ms: Optional[int]
+    """Time to wait for response headers once the request has been written (ms).
+
+    Applies to HTTP/1.1 and HTTP/2. ``0`` means no timeout.
     """
 
 
@@ -850,6 +872,9 @@ _INT_REQUEST_KEYS = frozenset((
     "tcp_tos",
     "tcp_no_delay",
     "tcp_window_clamp",
+    "h2_read_idle_timeout_ms",
+    "h2_ping_timeout_ms",
+    "response_header_timeout_ms",
 ))
 
 # ABI 3 tri-state TCP fields.  Unlike the plain int fields above (where 0
@@ -942,6 +967,9 @@ SYNC_REQUEST_DEFAULT_KEYS = (
     "tcp_tos",
     "tcp_no_delay",
     "tcp_window_clamp",
+    "h2_read_idle_timeout_ms",
+    "h2_ping_timeout_ms",
+    "response_header_timeout_ms",
     "tcp_ip_id_mode",
 )
 
@@ -1005,6 +1033,9 @@ ASYNC_REQUEST_DEFAULT_KEYS = (
     "tcp_tos",
     "tcp_no_delay",
     "tcp_window_clamp",
+    "h2_read_idle_timeout_ms",
+    "h2_ping_timeout_ms",
+    "response_header_timeout_ms",
     "tcp_ip_id_mode",
 )
 
@@ -1173,6 +1204,9 @@ typedef struct {
     int   tcp_no_delay;
     int   tcp_window_clamp;
     const char* tcp_ip_id_mode;
+    int   h2_read_idle_timeout_milliseconds;
+    int   h2_ping_timeout_milliseconds;
+    int   response_header_timeout_milliseconds;
 } RequestOptions;
 
 typedef struct {
@@ -1939,6 +1973,15 @@ def _compute_cache_key_hash(r: dict) -> str:
     update(("|dbg=%d|cp=%d" % (
         _as_int(r.get("with_debug")),
         _as_int(r.get("catch_panics")),
+    )).encode("utf-8"))
+
+    # Format version 8: ABI 4 transport health-check timeouts (upstream
+    # 1.18.1).  Likewise client-construction inputs, so the same pooled client
+    # must not serve a request that asked for different timeouts.
+    update(("|rit=%d|pit=%d|rht=%d" % (
+        _as_int(r.get("h2_read_idle_timeout_ms")),
+        _as_int(r.get("h2_ping_timeout_ms")),
+        _as_int(r.get("response_header_timeout_ms")),
     )).encode("utf-8"))
 
     # ── Pseudo-header orders ──────────────────────────────────────────
@@ -2719,6 +2762,33 @@ class Session:
         self._set_default("hpack_indexing_policy", value)
 
     @property
+    def h2_read_idle_timeout_ms(self) -> int:
+        """HTTP/2 PING 健康检查间隔 (ABI 4) / H2 health-check interval."""
+        return int(self._get_default("h2_read_idle_timeout_ms") or 0)
+
+    @h2_read_idle_timeout_ms.setter
+    def h2_read_idle_timeout_ms(self, value: int) -> None:
+        self._set_default("h2_read_idle_timeout_ms", int(value or 0))
+
+    @property
+    def h2_ping_timeout_ms(self) -> int:
+        """H2 健康检查 PING 应答超时 (ABI 4) / H2 health ping timeout."""
+        return int(self._get_default("h2_ping_timeout_ms") or 0)
+
+    @h2_ping_timeout_ms.setter
+    def h2_ping_timeout_ms(self, value: int) -> None:
+        self._set_default("h2_ping_timeout_ms", int(value or 0))
+
+    @property
+    def response_header_timeout_ms(self) -> int:
+        """等待响应头超时 (ABI 4) / Response header timeout."""
+        return int(self._get_default("response_header_timeout_ms") or 0)
+
+    @response_header_timeout_ms.setter
+    def response_header_timeout_ms(self, value: int) -> None:
+        self._set_default("response_header_timeout_ms", int(value or 0))
+
+    @property
     def cookie_crumb(self) -> bool:
         """Cookie 拆分 (ABI 2.1) / Split cookies into crumbs."""
         return bool(self._get_default("cookie_crumb"))
@@ -2963,6 +3033,13 @@ class Session:
         hpack_indexing_policy: str = "",
         # Cookie 按对拆分 (ABI 2.1) / Split Cookie header per cookie-pair
         cookie_crumb: bool = False,
+        # ── ABI 4 — 上游 1.18.1 传输健康检查 / transport health checks ──
+        # HTTP/2 PING 健康检查间隔毫秒; 0 关闭 (ABI 4)
+        h2_read_idle_timeout_ms: int = 0,
+        # 健康检查 PING 应答超时毫秒; 0 = 引擎默认 15s (ABI 4)
+        h2_ping_timeout_ms: int = 0,
+        # 等待响应头超时毫秒, H1/H2 均生效; 0 = 不设超时 (ABI 4)
+        response_header_timeout_ms: int = 0,
         # ── ABI 3 — 细粒度指纹控制 / fine-grained fingerprint control ──
         # 扩展乱序策略: 0=off, 1=chrome, 2=all, 3=prefix (ABI 3)
         # Extension-order permutation policy (per-handshake, Chromium-style)
@@ -3068,6 +3145,10 @@ class Session:
             "tcp_no_delay": tcp_no_delay,
             "tcp_window_clamp": tcp_window_clamp,
             "tcp_ip_id_mode": tcp_ip_id_mode or "",
+            # ABI 4 transport health checks (upstream 1.18.1).
+            "h2_read_idle_timeout_ms": h2_read_idle_timeout_ms,
+            "h2_ping_timeout_ms": h2_ping_timeout_ms,
+            "response_header_timeout_ms": response_header_timeout_ms,
         }
         # True once the caller overrides the profile's default header block
         # (via the default_headers/headers property or constructor kwargs);
@@ -3242,6 +3323,13 @@ class Session:
         hpack_indexing_policy: Optional[str] = None,
         # 覆盖 Cookie 拆分 (ABI 2.1) / Override cookie crumble
         cookie_crumb: Optional[bool] = None,
+        # ── ABI 4 — 上游 1.18.1 传输健康检查 / transport health checks ──
+        # HTTP/2 PING 健康检查间隔毫秒; 0 关闭 (ABI 4)
+        h2_read_idle_timeout_ms: Optional[int] = None,
+        # 健康检查 PING 应答超时毫秒; 0 = 引擎默认 15s (ABI 4)
+        h2_ping_timeout_ms: Optional[int] = None,
+        # 等待响应头超时毫秒, H1/H2 均生效; 0 = 不设超时 (ABI 4)
+        response_header_timeout_ms: Optional[int] = None,
         # ── ABI 3 — 细粒度指纹控制 / fine-grained fingerprint control ──
         # 扩展乱序策略: 0=off, 1=chrome, 2=all, 3=prefix
         extension_permute_mode: Optional[int] = None,
@@ -3348,6 +3436,13 @@ class Session:
             "preface_ping_idle_ms": _val("preface_ping_idle_ms", preface_ping_idle_ms),
             "hpack_indexing_policy": _val("hpack_indexing_policy", hpack_indexing_policy),
             "cookie_crumb": _val("cookie_crumb", cookie_crumb, True),
+            "h2_read_idle_timeout_ms": _val(
+                "h2_read_idle_timeout_ms", h2_read_idle_timeout_ms
+            ),
+            "h2_ping_timeout_ms": _val("h2_ping_timeout_ms", h2_ping_timeout_ms),
+            "response_header_timeout_ms": _val(
+                "response_header_timeout_ms", response_header_timeout_ms
+            ),
             "tcp_ttl": _val("tcp_ttl", tcp_ttl),
             "tcp_window_size": _val("tcp_window_size", tcp_window_size),
             "tcp_window_scale": _val("tcp_window_scale", tcp_window_scale),
@@ -3546,6 +3641,10 @@ class Session:
             keep_alive.append(c_hip)
             opts.hpack_indexing_policy = c_hip
         opts.cookie_crumb = resolved["cookie_crumb"]
+        # ABI 4 transport health checks (upstream 1.18.1).
+        opts.h2_read_idle_timeout_milliseconds = resolved["h2_read_idle_timeout_ms"]
+        opts.h2_ping_timeout_milliseconds = resolved["h2_ping_timeout_ms"]
+        opts.response_header_timeout_milliseconds = resolved["response_header_timeout_ms"]
 
         # ABI 3 fields — extension-order policy, PRIORITY-frame suppression,
         # destination-aware header ordering and the deep TCP fingerprint.
@@ -4266,6 +4365,13 @@ class AsyncSession:
         hpack_indexing_policy: str = "",
         # Cookie 按对拆分 (ABI 2.1) / Split Cookie header per cookie-pair
         cookie_crumb: bool = False,
+        # ── ABI 4 — 上游 1.18.1 传输健康检查 / transport health checks ──
+        # HTTP/2 PING 健康检查间隔毫秒; 0 关闭 (ABI 4)
+        h2_read_idle_timeout_ms: int = 0,
+        # 健康检查 PING 应答超时毫秒; 0 = 引擎默认 15s (ABI 4)
+        h2_ping_timeout_ms: int = 0,
+        # 等待响应头超时毫秒, H1/H2 均生效; 0 = 不设超时 (ABI 4)
+        response_header_timeout_ms: int = 0,
         # ── ABI 3 — 细粒度指纹控制 / fine-grained fingerprint control ──
         # 扩展乱序策略: 0=off, 1=chrome, 2=all, 3=prefix (ABI 3)
         # Extension-order permutation policy (per-handshake, Chromium-style)
@@ -4348,6 +4454,9 @@ class AsyncSession:
             preface_ping_idle_ms=preface_ping_idle_ms,
             hpack_indexing_policy=hpack_indexing_policy,
             cookie_crumb=cookie_crumb,
+            h2_read_idle_timeout_ms=h2_read_idle_timeout_ms,
+            h2_ping_timeout_ms=h2_ping_timeout_ms,
+            response_header_timeout_ms=response_header_timeout_ms,
             extension_permute_mode=extension_permute_mode,
             extension_permute_prefix=extension_permute_prefix,
             h2_disable_priority_frames=h2_disable_priority_frames,
@@ -4488,6 +4597,9 @@ class AsyncSession:
             "preface_ping_idle_ms": _val("preface_ping_idle_ms"),
             "hpack_indexing_policy": _val("hpack_indexing_policy"),
             "cookie_crumb": _val("cookie_crumb", True),
+            "h2_read_idle_timeout_ms": _val("h2_read_idle_timeout_ms"),
+            "h2_ping_timeout_ms": _val("h2_ping_timeout_ms"),
+            "response_header_timeout_ms": _val("response_header_timeout_ms"),
             "tcp_ttl": _val("tcp_ttl"),
             "tcp_window_size": _val("tcp_window_size"),
             "tcp_window_scale": _val("tcp_window_scale"),
@@ -4579,6 +4691,10 @@ class AsyncSession:
             keep_alive.append(c_hip)
             opts.hpack_indexing_policy = c_hip
         opts.cookie_crumb = resolved["cookie_crumb"]
+        # ABI 4 transport health checks (upstream 1.18.1).
+        opts.h2_read_idle_timeout_milliseconds = resolved["h2_read_idle_timeout_ms"]
+        opts.h2_ping_timeout_milliseconds = resolved["h2_ping_timeout_ms"]
+        opts.response_header_timeout_milliseconds = resolved["response_header_timeout_ms"]
 
         # ABI 3 fields — extension-order policy, PRIORITY-frame suppression,
         # destination-aware header ordering and the deep TCP fingerprint.
@@ -4893,6 +5009,13 @@ class AsyncSession:
         hpack_indexing_policy: Optional[str] = None,
         # 覆盖 Cookie 拆分 (ABI 2.1) / Override cookie crumble
         cookie_crumb: Optional[bool] = None,
+        # ── ABI 4 — 上游 1.18.1 传输健康检查 / transport health checks ──
+        # HTTP/2 PING 健康检查间隔毫秒; 0 关闭 (ABI 4)
+        h2_read_idle_timeout_ms: Optional[int] = None,
+        # 健康检查 PING 应答超时毫秒; 0 = 引擎默认 15s (ABI 4)
+        h2_ping_timeout_ms: Optional[int] = None,
+        # 等待响应头超时毫秒, H1/H2 均生效; 0 = 不设超时 (ABI 4)
+        response_header_timeout_ms: Optional[int] = None,
         tcp_ttl: Optional[int] = None,
         tcp_window_size: Optional[int] = None,
         tcp_window_scale: Optional[int] = None,
@@ -4965,6 +5088,9 @@ class AsyncSession:
             preface_ping_idle_ms=preface_ping_idle_ms,
             hpack_indexing_policy=hpack_indexing_policy,
             cookie_crumb=cookie_crumb,
+            h2_read_idle_timeout_ms=h2_read_idle_timeout_ms,
+            h2_ping_timeout_ms=h2_ping_timeout_ms,
+            response_header_timeout_ms=response_header_timeout_ms,
             extension_permute_mode=extension_permute_mode,
             extension_permute_prefix=extension_permute_prefix,
             h2_disable_priority_frames=h2_disable_priority_frames,

@@ -4,7 +4,7 @@ The constants here are pinned against the Go-side test
 ``cffi_binding/cachekey_parity_test.go`` (TestCacheKeyParityWithPython).
 Both sides must produce byte-identical hashes for the same logical config
 or the pre-computed cache-key hash will silently diverge from the Go
-fallback and poison the client pool.  Format version: 7 (ABI 3 — extension
+fallback and poison the client pool.  Format version: 8 (ABI 4 — extension
 permutation, PRIORITY-frame suppression and the deep TCP fingerprint — plus
 the client-construction flags added in v6: with_debug and catch_panics).
 """
@@ -41,6 +41,9 @@ _FULL = {
     "h2_disable_priority_frames": 0,
     "tcp_dont_fragment": 0, "tcp_tos": 0, "tcp_no_delay": 1,
     "tcp_window_clamp": 0, "tcp_ip_id_mode": "random",
+    # ABI 4 — upstream 1.18.1 transport health checks.
+    "h2_read_idle_timeout_ms": 20000, "h2_ping_timeout_ms": 15000,
+    "response_header_timeout_ms": 45000,
 }
 
 _MINIMAL = dict(
@@ -56,6 +59,8 @@ _MINIMAL = dict(
     h2_disable_priority_frames=0,
     tcp_dont_fragment=-1, tcp_tos=-1, tcp_no_delay=-1,
     tcp_window_clamp=0, tcp_ip_id_mode="",
+    h2_read_idle_timeout_ms=0, h2_ping_timeout_ms=0,
+    response_header_timeout_ms=0,
     custom_tls_client={
         "ja3_string": "771,4865-4866-4867,0-23-65281,29-23-24,0",
         "connection_flow": 15663105,
@@ -68,7 +73,7 @@ class CacheKeyParityTests(unittest.TestCase):
     def test_full_vector(self):
         self.assertEqual(
             _compute_cache_key_hash(_FULL),
-            "1ef1c474e0ac74370beaa9a14b2d17012bf63605a43df4ee3960135667d73218",
+            "1156e8d5d96ed5d1bc590373d571c2e629d1623f27c73c4d9122677e41be8b75",
         )
 
     def test_minimal_vector(self):
@@ -77,7 +82,7 @@ class CacheKeyParityTests(unittest.TestCase):
         # so this vector matches Go's buildCacheKeyFromConfig byte for byte.
         self.assertEqual(
             _compute_cache_key_hash(_MINIMAL),
-            "b5169ec1a12e836561889ea08641775aae56603dce0ddd680d8f0c29d74d8d9b",
+            "d8fe2f517f6b527236d55f3165f2b3d0f015b459137a96f256d131e0899fd31f",
         )
 
     def test_abi2_fields_participate(self):

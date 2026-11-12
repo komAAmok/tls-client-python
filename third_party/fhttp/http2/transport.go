@@ -113,24 +113,26 @@ type Transport struct {
 	// MaxDataFrameSize, when > 0, caps the payload length of each DATA
 	// frame the transport writes (browsers chunk request bodies below the
 	// 16 KiB spec default; a flat 16 KiB cadence is a fingerprint tell).
+	// LOCAL PATCH.
 	MaxDataFrameSize int
 
 	// PrefacePingIdleMs, when > 0, emits a PING frame before the first
 	// HEADERS of a request when the connection has been idle for at least
 	// this long (Chromium refreshes idle H2 connections this way).
+	// LOCAL PATCH.
 	PrefacePingIdleMs int
 
 	// HPACKIndexingPolicy selects a named header-indexing behaviour for
 	// the connection encoder.  "chrome" never indexes authorization /
 	// cookie / set-cookie / content-length / age.  Empty means the
-	// default policy (index everything indexable).
+	// default policy (index everything indexable).  LOCAL PATCH.
 	HPACKIndexingPolicy string
 
 	// DisablePriorityFrames, when true, suppresses the RFC 7540 PRIORITY
 	// frame and the PRIORITY flag on HEADERS.  Chromium stopped sending
 	// PRIORITY frames in Chrome 120 (RFC 9218 priority lives in the
 	// `priority` header instead) and Safari never sends them, so a client
-	// that still emits them stands out.
+	// that still emits them stands out.  LOCAL PATCH.
 	DisablePriorityFrames bool
 
 	// PushHandler is called upon receiving PUSH_PROMISEs from the server.
@@ -196,6 +198,14 @@ type Priority struct {
 // be careful what you are doing here...
 func (t *Transport) GetT1() *http.Transport {
 	return t.t1
+}
+
+// SetT1 sets the HTTP/1 Transport whose settings, such as
+// ResponseHeaderTimeout and DisableKeepAlives, this transport uses.
+// Unlike ConfigureTransports, it does not modify t1.
+// It must be called before the transport is first used.
+func (t *Transport) SetT1(t1 *http.Transport) {
+	t.t1 = t1
 }
 
 func (t *Transport) maxHeaderListSize() uint32 {
@@ -345,7 +355,7 @@ type ClientConn struct {
 	goAwayDebug string       // goAway frame's debug data, retained as a string
 
 	hbuf             bytes.Buffer // HPACK encoder writes into this
-	pingSeq          uint64 // preface-ping sequence number
+	pingSeq          uint64 // LOCAL PATCH: preface-ping sequence number
 	henc             *hpack.Encoder
 	hencMaxTableSize uint32 // effective max dynamic table size currently applied to henc (guarded by mu, like henc)
 	highestPromiseID uint32 // highest promise id so far received from server
@@ -364,6 +374,7 @@ type ClientConn struct {
 
 	mu                    sync.Mutex // guards following
 	nextStreamID          uint32
+	firstStreamID         uint32 // nextStreamID before any request: 1 unless InitialStreamID, AllowHTTP or Priorities moved it
 	peerMaxHeaderListSize uint64
 	pendingRequests       int                       // requests blocked and waiting to be sent because len(streams) == maxConcurrentStreams
 	pings                 map[[8]byte]chan struct{} // in flight ping data to notification channel
@@ -857,7 +868,7 @@ func (t *Transport) newClientConn(c net.Conn, addr string, singleUse bool) (*Cli
 	cc.fr.MaxHeaderListSize = t.maxHeaderListSize()
 
 	cc.henc = hpack.NewEncoder(&cc.hbuf)
-	if t.HPACKIndexingPolicy == "chrome" {
+	if t.HPACKIndexingPolicy == "chrome" { // LOCAL PATCH
 		cc.henc.SetIndexingDecision(hpack.IndexingChrome)
 	}
 	// The encoder starts at the HPACK protocol-default dynamic table size
@@ -910,12 +921,17 @@ func (t *Transport) newClientConn(c net.Conn, addr string, singleUse bool) (*Cli
 	}
 
 	for _, priority := range t.Priorities {
-		if t.DisablePriorityFrames {
+		if t.DisablePriorityFrames { // LOCAL PATCH
 			break
 		}
 		cc.fr.WritePriority(priority.StreamID, priority.PriorityParam)
 		cc.nextStreamID = priority.StreamID + 2
 	}
+
+	// The first stream is not always 1, so remember where this connection
+	// starts. idleStateLocked uses it to tell an unused connection from a
+	// used one.
+	cc.firstStreamID = cc.nextStreamID
 
 	// Use the dynamic connection flow value we calculated earlier
 	cc.inflow.add(int32(cc.connFlow) + int32(initialWindowSize))
@@ -995,7 +1011,7 @@ func (cc *ClientConn) idleState() clientConnIdleState {
 }
 
 func (cc *ClientConn) idleStateLocked() (st clientConnIdleState) {
-	if cc.singleUse && cc.nextStreamID > 1 {
+	if cc.singleUse && cc.nextStreamID > cc.firstStreamID {
 		return
 	}
 	var maxConcurrentOkay bool
@@ -1012,7 +1028,7 @@ func (cc *ClientConn) idleStateLocked() (st clientConnIdleState) {
 	st.canTakeNewRequest = cc.goAway == nil && !cc.closed && !cc.closing && maxConcurrentOkay &&
 		int64(cc.nextStreamID)+2*int64(cc.pendingRequests) < math.MaxInt32 &&
 		!cc.tooIdleLocked()
-	st.freshConn = cc.nextStreamID == 1 && st.canTakeNewRequest
+	st.freshConn = cc.nextStreamID == cc.firstStreamID && st.canTakeNewRequest
 
 	return
 }
@@ -1285,7 +1301,7 @@ func (cc *ClientConn) roundTrip(req *http.Request) (res *http.Response, gotErrAf
 	}()
 
 	cc.wmu.Lock()
-	if cc.t.PrefacePingIdleMs > 0 && len(cc.streams) == 0 && !cc.lastIdle.IsZero() {
+	if cc.t.PrefacePingIdleMs > 0 && len(cc.streams) == 0 && !cc.lastIdle.IsZero() { // LOCAL PATCH
 		if time.Since(cc.lastIdle) >= time.Duration(cc.t.PrefacePingIdleMs)*time.Millisecond {
 			var pingData [8]byte
 			binary.BigEndian.PutUint64(pingData[:], atomic.AddUint64(&cc.pingSeq, 1))
@@ -1492,6 +1508,7 @@ func (cc *ClientConn) writeHeaders(streamID uint32, endStream bool, maxFrameSize
 			}
 			// Chromium 120+ and Safari send HEADERS without the PRIORITY
 			// flag; leaving it set adds a frame field a real browser omits.
+			// LOCAL PATCH.
 			if cc.t.DisablePriorityFrames {
 				param.Priority = PriorityParam{}
 			}
@@ -1594,7 +1611,7 @@ func (cs *clientStream) writeRequestBody(body io.Reader, bodyCloser io.Closer) (
 
 	cc.mu.Lock()
 	maxFrameSize := int(cc.maxFrameSize)
-	if cc.t.MaxDataFrameSize > 0 && cc.t.MaxDataFrameSize < maxFrameSize {
+	if cc.t.MaxDataFrameSize > 0 && cc.t.MaxDataFrameSize < maxFrameSize { // LOCAL PATCH
 		maxFrameSize = cc.t.MaxDataFrameSize
 	}
 	cc.mu.Unlock()
@@ -1862,13 +1879,19 @@ func (cc *ClientConn) encodeHeaders(req *http.Request, addGzipHeader bool, trail
 		if hdrs == nil {
 			hdrs = make(http.Header)
 		}
-		if _, ok := req.Header["content-length"]; !ok && shouldSendReqContentLength(req.Method, contentLength) {
+		// Content-Length comes from the request, not from the caller's header map, as in net/http.
+		for k := range hdrs {
+			if strings.EqualFold(k, "content-length") {
+				delete(hdrs, k)
+			}
+		}
+		if shouldSendReqContentLength(req.Method, contentLength) {
 			hdrs["content-length"] = []string{strconv.FormatInt(contentLength, 10)}
 		}
 
 		// Does not include accept-encoding header if its defined in req.Header
 		if _, ok := hdrs["accept-encoding"]; !ok && addGzipHeader {
-			hdrs["accept-encoding"] = []string{"gzip, deflate, br"}
+			hdrs["accept-encoding"] = []string{"gzip, deflate, br, zstd"}
 		}
 
 		// Formats and writes headers with f function
@@ -2566,7 +2589,11 @@ func (b transportResponseBody) Close() error {
 	cs := b.cs
 	cc := cs.cc
 
-	serverSentStreamEnd := cs.bufPipe.Err() == io.EOF
+	pipeErr := cs.bufPipe.Err()
+	if pipeErr == errClosedResponseBody {
+		return nil
+	}
+	serverSentStreamEnd := pipeErr == io.EOF
 	unread := cs.bufPipe.Len()
 
 	if unread > 0 || !serverSentStreamEnd {
