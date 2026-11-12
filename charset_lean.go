@@ -30,6 +30,25 @@
 // a codec means adding a case, and the test in charset_lean_test.go pins both
 // the decoding behaviour and the recognised label set.
 //
+// Scope of the saving (measured 2026-11-12)
+// -----------------------------------------
+// The devirtualisation above pays off in a **pure-Go** build: `go build .`
+// and the test binaries link 0 bytes of encode tables.  The shipped artifact is
+// built with `-buildmode=c-shared`, which forces external linking, and the
+// external linker keeps the full encoding.Encoding interface itab — with
+// NewEncoder, and therefore the 338 KB of CJK encode tables.  Measured on
+// linux/amd64: 26 encode symbols / 338,320 bytes in the .so, against 0 in the
+// executable from the same source.
+//
+// Two things follow.  First, do not "fix" this by rewriting the calls again:
+// routing them through a one-method interface was tried in this sync and
+// changed nothing in the .so.  Second, the comment above is about the source
+// property that is still worth keeping (a pure-Go consumer of this package
+// gets the lean link), not about the .so size.  The comment stays because the
+// property is real; the number to watch is the budget in
+// python_tests/test_binary_size_guard.py, which measures the artifact that
+// actually ships.
+//
 // Fidelity
 // --------
 // The replacement is a drop-in for html/charset.NewReader: it applies the same

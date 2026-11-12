@@ -161,13 +161,27 @@ class ShippedBinaryTests(unittest.TestCase):
         #     Store anchor list for the 0xCA34 extension;
         #   * new captures (Chrome 154, Safari 27.2) in the profile catalogue.
         #
-        # The discriminator this test exists for is still exact: the budget is
-        # 15,100,000, which the fat build would exceed once the ~110 KB
-        # html/charset block is linked back on top of the new baseline
-        # (15,016,072 + 110,000 > 15,100,000).  The whitespace-free check in
-        # CharsetLeanTests above pins the actual property; this one catches the
-        # case where charset_lean.go is bypassed wholesale.
-        budget = 15_100_000
+        # 2026-11-12 second pass: three redundant dependency paths were removed,
+        # bringing the artifact back to 14,070,664 (-945,408 from the sync
+        # baseline, and -1.3 % below the pre-sync 1.16.0.7 binary):
+        #   * cffi_binding/ech.go no longer pulls the standard-library HTTP
+        #     client: the DoH query goes through fhttp (already linked) and the
+        #     DoH JSON envelope is read by a ~200-line scanner instead of
+        #     encoding/json (-711 KB, and net/http/crypto/x509/asn1/mime/http2
+        #     leave the link entirely);
+        #   * github.com/tam7t/hpkp is gone: it exists to parse RFC 7469
+        #     response headers (removed from browsers in 2018) and imports
+        #     net/http; pinner.go now carries the 40 lines actually used;
+        #   * third_party/brotli drops the server-side http.go wrapper, which
+        #     was the last net/http importer (-238 KB).
+        # Budget 14,300,000 sits ~229 KB above the measured artifact: enough for
+        # an ordinary dependency bump, tight enough that reintroducing any of
+        # the three (or html/charset, ~110 KB on top) fails.
+        #
+        # The whitespace-free checks in CharsetLeanTests above pin the source
+        # property; this one catches the case where a dependency quietly brings
+        # its own HTTP stack back.
+        budget = 14_300_000
         size = target.stat().st_size
         self.assertLess(
             size,

@@ -10,13 +10,15 @@ package main
 import (
 	"encoding/base64"
 	"encoding/hex"
-	"encoding/json"
 	"fmt"
-	"net/http"
+	"io"
 	"net/url"
 	"os"
+	"strconv"
 	"sync"
 	"time"
+
+	http "github.com/bogdanfinn/fhttp"
 )
 
 /*
@@ -47,8 +49,8 @@ type echCacheEntry struct {
 }
 
 var (
-	echCache   sync.Map // host -> echCacheEntry
-	echClient  = &http.Client{Timeout: dohTimeout}
+	echCache  sync.Map // host -> echCacheEntry
+	echClient = &http.Client{Timeout: dohTimeout}
 )
 
 // extractECHFromRDATA parses an HTTPS RR RDATA and returns the raw
@@ -93,14 +95,393 @@ func extractECHFromRDATA(rdata []byte) []byte {
 	return nil
 }
 
+// dohAnswer is one entry of a DoH JSON "Answer" array.  Only the two fields
+// the resolver needs are decoded.
 type dohAnswer struct {
-	Type int    `json:"type"`
-	Data string `json:"data"`
+	Type int
+	Data string
 }
 
+// dohResponse is the subset of the DoH JSON envelope this resolver reads.
 type dohResponse struct {
-	Status int         `json:"Status"`
-	Answer []dohAnswer `json:"Answer"`
+	Status int
+	Answer []dohAnswer
+}
+
+// parseDoHResponse decodes the DoH JSON envelope without encoding/json.
+//
+// The envelope is a flat object whose only interesting members are the numeric
+// "Status" and the "Answer" array of {"type":N,"data":"..."} objects.  Pulling
+// in encoding/json to read it costs the reflective marshaller, its struct-field
+// cache and the entire encoding/json/v2 dependency (plus encoding/base32, cmp
+// and the unicode tables) - measured at ~200 KB of .text for a resolver that
+// needs none of it.  This scanner accepts the RFC 8484 JSON profile: one flat
+// object, a string-or-number status, and an array of flat objects.  It is a
+// validator as much as a parser, so a malformed response is an error rather
+// than a silently empty result.
+func parseDoHResponse(body []byte) (dohResponse, error) {
+	var out dohResponse
+
+	p := &jsonScanner{b: body}
+	if err := p.expect('{'); err != nil {
+		return out, fmt.Errorf("DoH response is not a JSON object: %w", err)
+	}
+
+	for {
+		p.skipSpace()
+		if p.done() {
+			return out, fmt.Errorf("DoH response: unterminated object")
+		}
+		if p.peek() == '}' {
+			p.i++
+			break
+		}
+
+		key, err := p.string()
+		if err != nil {
+			return out, fmt.Errorf("DoH response key: %w", err)
+		}
+		if err := p.expect(':'); err != nil {
+			return out, err
+		}
+
+		switch key {
+		case "Status":
+			// RFC 8484 says Status is a number; some servers quote it.
+			p.skipSpace()
+			if !p.done() && p.peek() == '"' {
+				raw, err := p.string()
+				if err != nil {
+					return out, fmt.Errorf("DoH response Status: %w", err)
+				}
+				n, convErr := strconv.Atoi(raw)
+				if convErr != nil {
+					return out, fmt.Errorf("DoH response Status is not a number: %q", raw)
+				}
+				out.Status = n
+			} else {
+				n, err := p.number()
+				if err != nil {
+					return out, fmt.Errorf("DoH response Status: %w", err)
+				}
+				out.Status = int(n)
+			}
+		case "Answer":
+			answers, err := p.answerArray()
+			if err != nil {
+				return out, fmt.Errorf("DoH response Answer: %w", err)
+			}
+			out.Answer = answers
+		default:
+			if err := p.skipValue(); err != nil {
+				return out, fmt.Errorf("DoH response field %q: %w", key, err)
+			}
+		}
+
+		p.skipSpace()
+		if p.done() {
+			return out, fmt.Errorf("DoH response: unterminated object")
+		}
+		if p.peek() == ',' {
+			p.i++
+			continue
+		}
+		if p.peek() == '}' {
+			p.i++
+			break
+		}
+		return out, fmt.Errorf("DoH response: expected ',' or '}' at offset %d", p.i)
+	}
+
+	p.skipSpace()
+	if !p.done() {
+		return out, fmt.Errorf("DoH response: trailing data at offset %d", p.i)
+	}
+	return out, nil
+}
+
+// answerArray decodes the "Answer" member: an array of flat objects with
+// numeric "type" and string "data" members.  Unknown members are skipped.
+func (p *jsonScanner) answerArray() ([]dohAnswer, error) {
+	var out []dohAnswer
+
+	if err := p.expect('['); err != nil {
+		return nil, err
+	}
+	for {
+		p.skipSpace()
+		if p.done() {
+			return nil, fmt.Errorf("unterminated array")
+		}
+		if p.peek() == ']' {
+			p.i++
+			return out, nil
+		}
+
+		if err := p.expect('{'); err != nil {
+			return nil, err
+		}
+		var answer dohAnswer
+		for {
+			p.skipSpace()
+			if p.done() {
+				return nil, fmt.Errorf("unterminated answer object")
+			}
+			if p.peek() == '}' {
+				p.i++
+				break
+			}
+			key, err := p.string()
+			if err != nil {
+				return nil, err
+			}
+			if err := p.expect(':'); err != nil {
+				return nil, err
+			}
+			switch key {
+			case "type":
+				n, err := p.number()
+				if err != nil {
+					return nil, err
+				}
+				answer.Type = int(n)
+			case "data":
+				v, err := p.string()
+				if err != nil {
+					return nil, err
+				}
+				answer.Data = v
+			default:
+				if err := p.skipValue(); err != nil {
+					return nil, err
+				}
+			}
+			p.skipSpace()
+			if p.done() {
+				return nil, fmt.Errorf("unterminated answer object")
+			}
+			if p.peek() == ',' {
+				p.i++
+				continue
+			}
+			if p.peek() == '}' {
+				p.i++
+				break
+			}
+			return nil, fmt.Errorf("expected ',' or '}' at offset %d", p.i)
+		}
+		out = append(out, answer)
+
+		p.skipSpace()
+		if p.done() {
+			return nil, fmt.Errorf("unterminated array")
+		}
+		if p.peek() == ',' {
+			p.i++
+			continue
+		}
+		if p.peek() == ']' {
+			p.i++
+			return out, nil
+		}
+		return nil, fmt.Errorf("expected ',' or ']' at offset %d", p.i)
+	}
+}
+
+// jsonScanner walks a JSON document byte by byte.
+type jsonScanner struct {
+	b []byte
+	i int
+}
+
+func (p *jsonScanner) done() bool { return p.i >= len(p.b) }
+
+func (p *jsonScanner) peek() byte { return p.b[p.i] }
+
+func (p *jsonScanner) skipSpace() {
+	for p.i < len(p.b) {
+		switch p.b[p.i] {
+		case ' ', '\t', '\n', '\r':
+			p.i++
+		default:
+			return
+		}
+	}
+}
+
+func (p *jsonScanner) expect(c byte) error {
+	p.skipSpace()
+	if p.done() || p.b[p.i] != c {
+		return fmt.Errorf("expected %q at offset %d", c, p.i)
+	}
+	p.i++
+	return nil
+}
+
+func (p *jsonScanner) string() (string, error) {
+	p.skipSpace()
+	if err := p.expect('"'); err != nil {
+		return "", err
+	}
+	var b []byte
+	for p.i < len(p.b) {
+		c := p.b[p.i]
+		switch c {
+		case '"':
+			p.i++
+			return string(b), nil
+		case '\\':
+			p.i++
+			if p.done() {
+				return "", fmt.Errorf("unterminated escape")
+			}
+			switch esc := p.b[p.i]; esc {
+			case 'n':
+				b = append(b, '\n')
+			case 't':
+				b = append(b, '\t')
+			case 'r':
+				b = append(b, '\r')
+			case 'b':
+				b = append(b, '\b')
+			case 'f':
+				b = append(b, '\f')
+			case 'u':
+				// \uXXXX: decode to UTF-8.  Surrogate pairs are not needed for
+				// base64 payloads, so a lone surrogate becomes U+FFFD in keeping
+				// with encoding/json.
+				if p.i+4 >= len(p.b) {
+					return "", fmt.Errorf("short \\u escape at offset %d", p.i)
+				}
+				cp32, err := strconv.ParseUint(string(p.b[p.i+1:p.i+5]), 16, 32)
+				if err != nil {
+					return "", fmt.Errorf("bad \\u escape at offset %d", p.i)
+				}
+				p.i += 4
+				b = appendRune(b, rune(cp32))
+			default:
+				b = append(b, esc)
+			}
+			p.i++
+		default:
+			b = append(b, c)
+			p.i++
+		}
+	}
+	return "", fmt.Errorf("unterminated string")
+}
+
+func (p *jsonScanner) number() (float64, error) {
+	p.skipSpace()
+	start := p.i
+	for p.i < len(p.b) {
+		c := p.b[p.i]
+		if (c >= '0' && c <= '9') || c == '-' || c == '+' || c == '.' || c == 'e' || c == 'E' {
+			p.i++
+			continue
+		}
+		break
+	}
+	if start == p.i {
+		return 0, fmt.Errorf("expected a number at offset %d", start)
+	}
+	return strconv.ParseFloat(string(p.b[start:p.i]), 64)
+}
+
+// skipValue validates and discards one JSON value of any shape.
+func (p *jsonScanner) skipValue() error {
+	p.skipSpace()
+	if p.done() {
+		return fmt.Errorf("unexpected end of input")
+	}
+	switch c := p.peek(); {
+	case c == '"':
+		_, err := p.string()
+		return err
+	case c == '{':
+		p.i++
+		for {
+			p.skipSpace()
+			if p.done() {
+				return fmt.Errorf("unterminated object")
+			}
+			if p.peek() == '}' {
+				p.i++
+				return nil
+			}
+			if _, err := p.string(); err != nil {
+				return err
+			}
+			if err := p.expect(':'); err != nil {
+				return err
+			}
+			if err := p.skipValue(); err != nil {
+				return err
+			}
+			p.skipSpace()
+			if p.done() {
+				return fmt.Errorf("unterminated object")
+			}
+			if p.peek() == ',' {
+				p.i++
+				continue
+			}
+			if p.peek() == '}' {
+				p.i++
+				return nil
+			}
+			return fmt.Errorf("expected ',' or '}' at offset %d", p.i)
+		}
+	case c == '[':
+		p.i++
+		for {
+			p.skipSpace()
+			if p.done() {
+				return fmt.Errorf("unterminated array")
+			}
+			if p.peek() == ']' {
+				p.i++
+				return nil
+			}
+			if err := p.skipValue(); err != nil {
+				return err
+			}
+			p.skipSpace()
+			if p.done() {
+				return fmt.Errorf("unterminated array")
+			}
+			if p.peek() == ',' {
+				p.i++
+				continue
+			}
+			if p.peek() == ']' {
+				p.i++
+				return nil
+			}
+			return fmt.Errorf("expected ',' or ']' at offset %d", p.i)
+		}
+	case c == 't' || c == 'f' || c == 'n':
+		for p.i < len(p.b) {
+			c := p.b[p.i]
+			if c >= 'a' && c <= 'z' {
+				p.i++
+				continue
+			}
+			break
+		}
+		return nil
+	default:
+		_, err := p.number()
+		return err
+	}
+}
+
+// appendRune appends r as UTF-8, mapping surrogates to U+FFFD.
+func appendRune(b []byte, r rune) []byte {
+	if r >= 0xD800 && r <= 0xDFFF {
+		r = 0xFFFD
+	}
+	return append(b, string(r)...)
 }
 
 func fetchECHConfigFromDNS(host string) ([]byte, error) {
@@ -120,8 +501,12 @@ func fetchECHConfigFromDNS(host string) ([]byte, error) {
 		return nil, fmt.Errorf("DoH query status %d", resp.StatusCode)
 	}
 
-	var parsed dohResponse
-	if err := json.NewDecoder(resp.Body).Decode(&parsed); err != nil {
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return nil, err
+	}
+	parsed, err := parseDoHResponse(body)
+	if err != nil {
 		return nil, err
 	}
 	for _, answer := range parsed.Answer {

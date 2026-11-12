@@ -9,7 +9,6 @@ require (
 	github.com/bogdanfinn/utls v1.8.2-barnius
 	github.com/bogdanfinn/websocket v1.5.9-barnius
 	github.com/stretchr/testify v1.11.1
-	github.com/tam7t/hpkp v0.0.0-20160821193359-2b70b4024ed5
 	golang.org/x/net v0.59.0
 	golang.org/x/text v0.42.0
 )
@@ -40,3 +39,5 @@ require (
 // PRIORITY-frame suppression. See UPSTREAM_SYNC.md (third_party/fhttp overlay
 // points). The vendored copy tracks upstream fhttp v0.7.3.
 replace github.com/bogdanfinn/fhttp => ./third_party/fhttp
+
+replace github.com/andybalholm/brotli => ./third_party/brotli

@@ -306,6 +306,48 @@ reader goroutines instead of leaking them.
 `trust_anchors_payload`. Python's CDEF mirrors both. The Python wrapper
 refuses ABI-2-only features against legacy (ABI 1) libraries.
 
+## Dependency pruning (2026-11-12)
+
+Three dependency paths brought code this project never executes into the shared
+library.  Each is removed at its source rather than by a build flag, because
+each was a correctness hazard as much as a size one.
+
+| Removed | Size | Why it was dead |
+| --- | --- | --- |
+| stdlib HTTP client inside `cffi_binding/ech.go` | −711 KB | The ECH resolver used `net/http` for its DoH query and `encoding/json` for the answer. The DoH query now goes through `fhttp` (already linked, and the stack the whole project exists for), and the JSON envelope is read by `parseDoHResponse` — a scanner for exactly the RFC 8484 shape. That drops `net/http`, `net/http/internal/http2`, `net/http/httptrace`, `mime`, `crypto/x509` (the stdlib copy) and `encoding/asn1` from the link. Two HTTP stacks in one process was also the wrong shape: only fhttp carries the fingerprint behaviour. |
+| `github.com/tam7t/hpkp` | −238 KB | It exists to parse RFC 7469 HPKP *response headers* — a mechanism browsers deleted in 2018. `pinner.go` used exactly two things: `base64(SHA256(RawSubjectPublicKeyInfo))` and a host→pins map with a subdomain walk. Both are now local (`pinStorage`, `certificateFingerprint`). Removing it also removed its `net/http` import, which was the last one. |
+| `third_party/brotli/http.go` | included above | A server-side `HTTPCompressor` helper for `http.ResponseWriter`. Nothing calls it — the engine only ever uses `brotli.NewReader` to decompress. It imported `net/http`, so it kept the standard-library client stack alive after the ECH fix. |
+
+Artifact: **15,016,072 → 14,070,664 bytes** on linux/amd64 (−6.3 %), which is
+also below the pre-sync 1.16.0.7 binary (13,980,632 → still +0.6 %, explained by
+ML-KEM/ML-DSA, zstd and the trust anchors; see the budget note in
+`python_tests/test_binary_size_guard.py`).
+
+New tests pinning the replacements: `cffi_binding/doh_parse_test.go`
+(`TestParseDoHResponse`) and `pinner_test.go`
+(`TestPinStorageSubdomainWalk`, `TestPinStorageLookupReturnsCopy`,
+`TestCertificateFingerprintMatchesSpkiHash`). The pinner was also verified
+end-to-end: a wrong pin still fails the handshake with `SSLError`.
+
+### Measured and rejected
+
+- **x/text CJK encode tables (338 KB).** The linker keeps them under
+  `-buildmode=c-shared` because external linking preserves the full
+  `encoding.Encoding` interface itab. A pure-Go `go build .` from the same
+  source links **0 bytes** of encode tables, so the source-side property
+  `charset_lean.go` documents is real — it just does not reach the shipped
+  artifact. Routing the decoder calls through a one-method interface was tried
+  and changed nothing in the .so; the finding is recorded in that file so the
+  next person does not repeat it. `-linkmode=internal` is not available:
+  `c-shared` requires external linking.
+- **go-brrr encoder tables (270 KB).** utls only calls `brrr.NewReader` (cert
+  decompression), yet `internal/encoder` is still reachable through
+  `PrepareDictionary`/error values, and its `static_dict.go` `init()` drags
+  256 KB of packed dictionary hashes in. Cutting it means editing the internals
+  of an upstream dependency's encoder, and removing the files does not compile
+  (`hash2.go`/`hash10.go` reference them). Not worth the maintenance cost for
+  270 KB.
+
 ## Build
 
 `cffi_binding/build_binding.py` produces a single full-fidelity build with
