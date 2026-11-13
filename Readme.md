@@ -16,7 +16,7 @@
 
 **CFFI-based, high-performance Python binding for [`tls-client`](https://github.com/bogdanfinn/tls-client) — drop-in compatible with [`requests`](https://github.com/psf/requests) and [`Python-Tls-Client`](https://github.com/FlorianREGAZ/Python-Tls-Client).**
 
-> **Engine: upstream `tls-client` v1.18.1** · package `1.18.1.0` · native ABI **4**
+> **Engine: upstream `tls-client` v1.18.1** · package `1.18.1.1` · native ABI **4**
 > (Go 1.27, utls 1.8.2 with ML-KEM/ML-DSA, fhttp 0.7.3).
 ---
 
