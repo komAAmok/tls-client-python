@@ -2306,12 +2306,36 @@ func RequestAsync(opts *C.RequestOptions, requestID C.uintptr_t, cb unsafe.Point
 // ---------------------------------------------------------------------------
 
 var (
-	wsHandleSeq     atomic.Uint64
-	wsHandles       sync.Map // uint64 -> *tls_client.Websocket
-	wsConnOwner     sync.Map // connID -> owning wsID
-	wsConnHandleSeq atomic.Uint64
-	wsConnHandles   sync.Map // uint64 -> *websocket.Conn
+	wsHandleSeq atomic.Uint64
+	wsHandles   sync.Map // uint64 -> *tls_client.Websocket
+	wsConnOwner sync.Map // connID -> owning wsID
+	// wsHandshakeTimeoutMs maps wsID -> handshake timeout in ms.
+	//
+	// Per client, not global: a global would let one session's 800 ms timeout
+	// silently apply to every other session, which is exactly the bug this
+	// replaced.
+	wsHandshakeTimeoutMs sync.Map
+	wsConnHandleSeq      atomic.Uint64
+	wsConnHandles        sync.Map // uint64 -> *websocket.Conn
 )
+
+// defaultWSHandshakeTimeout bounds a WebSocket upgrade when the caller does not
+// set one.
+//
+// Zero cannot mean "wait forever" here: the handshake runs on the calling
+// thread, so a peer that completes the TCP connection and then never answers the
+// upgrade blocks that thread indefinitely.  Measured against a black-hole server,
+// connect() hung past a 20 s external timeout with no error at all.  30 s matches
+// the engine's default for ordinary requests and leaves room for a slow TLS
+// handshake.
+//
+// WebsocketSetDefaultHandshakeTimeout can lower it at runtime.  That matters for
+// the test suite: waiting the real 30 s once per run costs half a minute for a
+// property that is "finite", not "exactly 30".  A load-time environment read was
+// not good enough -- by the time a test module sets the variable the library is
+// already loaded, so the value would be ignored (observed: the suite still
+// waited 30 s).
+var defaultWSHandshakeTimeout = 30 * time.Second
 
 func setWsErr(errMsg **C.char, msg string) {
 	if errMsg != nil {
@@ -2396,6 +2420,10 @@ func WebsocketNew(opts *C.WebsocketOptions, errMsg **C.char) (id C.uintptr_t) {
 	}
 	handle := wsHandleSeq.Add(1)
 	wsHandles.Store(handle, ws)
+	// Remember the per-client handshake timeout so Connect can bound the dial.
+	if ms := int(opts.handshake_timeout_milliseconds); ms > 0 {
+		wsHandshakeTimeoutMs.Store(uint64(handle), int64(ms))
+	}
 	return C.uintptr_t(handle)
 }
 
@@ -2413,7 +2441,19 @@ func WebsocketConnect(wsID C.uintptr_t, errMsg **C.char) (id C.uintptr_t) {
 		return 0
 	}
 	ws := v.(*tls_client.Websocket)
-	conn, err := ws.Connect(context.Background())
+	// A deadline is mandatory: see defaultWSHandshakeTimeout.  The option's own
+	// HandshakeTimeout covers the upgrade round trip, this covers the dial and
+	// the TLS handshake around it.
+	timeout := defaultWSHandshakeTimeout
+	if v, ok := wsHandshakeTimeoutMs.Load(uint64(wsID)); ok {
+		if ms := v.(int64); ms > 0 {
+			timeout = time.Duration(ms) * time.Millisecond
+		}
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), timeout)
+	defer cancel()
+
+	conn, err := ws.Connect(ctx)
 	if err != nil {
 		setWsErr(errMsg, err.Error())
 		return 0
@@ -2545,6 +2585,7 @@ func WebsocketFreeHandle(handleID C.uintptr_t) {
 	// touched, which is what the association below tracks.
 	releaseConnectionsForClient(uint64(handleID))
 	wsHandles.Delete(uint64(handleID))
+	wsHandshakeTimeoutMs.Delete(uint64(handleID))
 }
 
 // ---------------------------------------------------------------------------
@@ -2666,6 +2707,20 @@ func WebsocketHandleStats(clients *C.int, connections *C.int, owners *C.int, pum
 	if pumps != nil {
 		*pumps = count(&wsPumps)
 	}
+}
+
+// Sets the default upgrade deadline in milliseconds; <0 restores 30 s.
+// Returns the previous value.
+//
+//export WebsocketSetDefaultHandshakeTimeout
+func WebsocketSetDefaultHandshakeTimeout(ms C.int) C.int {
+	prev := C.int(defaultWSHandshakeTimeout / time.Millisecond)
+	if ms < 0 {
+		defaultWSHandshakeTimeout = 30 * time.Second
+	} else if ms > 0 {
+		defaultWSHandshakeTimeout = time.Duration(ms) * time.Millisecond
+	}
+	return prev
 }
 
 //export WebsocketStopReadPump

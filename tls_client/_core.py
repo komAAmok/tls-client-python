@@ -1292,6 +1292,7 @@ int            WebsocketStartReadPump(uintptr_t connID, int capacity, char** err
 int            WebsocketPumpRead(uintptr_t connID, int timeoutMs, WebsocketMessage** msg, char** errMsg);
 int            WebsocketPumpStats(uintptr_t connID, long long* delivered, int* capacity, int* pending);
 void           WebsocketStopReadPump(uintptr_t connID);
+int            WebsocketSetDefaultHandshakeTimeout(int milliseconds);
 void           WebsocketHandleStats(int* clients, int* connections, int* owners, int* pumps);
 
 // Runtime introspection: present only in -tags profile builds.
@@ -5330,6 +5331,21 @@ def set_go_memory_limit(limit_bytes: int) -> int:
 def force_go_gc() -> None:
     _require_profile_build()
     _lib.ForceGC()
+
+
+def websocket_set_default_handshake_timeout(milliseconds: int) -> int:
+    """Lower the default WebSocket upgrade deadline; <0 restores 30 s.
+
+    Returns the previous value in milliseconds.  The suite uses this to keep a
+    30 s wait out of every run while still testing that the deadline fires.
+    """
+    _get_ffi()
+    if not hasattr(_lib, "WebsocketSetDefaultHandshakeTimeout"):
+        raise RuntimeError(
+            "this tls-client build has no WebsocketSetDefaultHandshakeTimeout "
+            "export; rebuild the native library from current source"
+        )
+    return int(_lib.WebsocketSetDefaultHandshakeTimeout(milliseconds))
 
 
 def websocket_handle_stats() -> Dict[str, int]:

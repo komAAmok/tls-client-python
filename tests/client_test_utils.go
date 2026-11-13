@@ -46,6 +46,13 @@ const (
 	safariIos     = "safari_IOS"
 	okhttpAndroid = "okhttp_Android"
 
+	// LOCAL NOTE: the fingerprint expectations in clientFingerprints were
+	// captured from peet.ws, so the comparison must read peet.ws.  The suite
+	// used to fetch browserleaks and compare against peet values, which cannot
+	// match: browserleaks renders the same HTTP/2 SETTINGS list without the
+	// stream weights ("3:201" where peet says "3:0:0:201"), and returns no
+	// http2 object at all, so the akamai comparison was comparing two different
+	// encodings of the same fingerprint.
 	browserleaksEndpoint = "https://tls.browserleaks.com/json"
 	peetApiEndpoint      = "https://tls.peet.ws/api/all"
 
@@ -329,10 +336,15 @@ var clientFingerprints = map[string]map[string]map[string]string{
 			akamaiFingerprintHash: "ad8424af1cc590e09f7b0c499bf7fcdb",
 		},
 		profiles.Safari_IOS_18_0.GetClientHelloStr(): map[string]string{
-			ja3String:             "771,4865-4866-4867-49196-49195-52393-49200-49199-52392-49162-49161-49172-49171-157-156-53-47-49160-49170-10,0-23-65281-10-11-16-5-13-18-51-45-43-27-21,29-23-24-25,0",
-			ja3Hash:               "773906b0efdefa24a7f2b8eb6985bf37",
-			akamaiFingerprint:     "2:0;3:100;4:2097152;:1;9:1|10420225|0|m,s,a,p",
-			akamaiFingerprintHash: "62317f06028f316631c157c720223e43",
+			ja3String: "771,4865-4866-4867-49196-49195-52393-49200-49199-52392-49162-49161-49172-49171-157-156-53-47-49160-49170-10,0-23-65281-10-11-16-5-13-18-51-45-43-27-21,29-23-24-25,0",
+			ja3Hash:   "773906b0efdefa24a7f2b8eb6985bf37",
+			// ``;:1`` above was a transcription slip: the setting in that slot
+			// is ENABLE_CONNECT_PROTOCOL, id 8.  Safari_IOS_18_0's profile carries
+			// {ENABLE_PUSH:0, MAX_CONCURRENT_STREAMS:100, INITIAL_WINDOW_SIZE:2097152,
+			// ENABLE_CONNECT_PROTOCOL:1, NO_RFC7540_PRIORITIES:1}, so the wire value
+			// has always been ``8:1``.
+			akamaiFingerprint:     "2:0;3:100;4:2097152;8:1;9:1|10420225|0|m,s,a,p",
+			akamaiFingerprintHash: "d4a2dcbfde511b5040ed5a5190a8d78b",
 		},
 		profiles.Safari_IOS_18_5.GetClientHelloStr(): map[string]string{
 			ja3String:             "771,4865-4866-4867-49196-49195-52393-49200-49199-52392-49162-49161-49172-49171-157-156-53-47-49160-49170-10,0-23-65281-10-11-16-5-13-18-51-45-43-27-21,29-23-24-25,0",
