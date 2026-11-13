@@ -31,6 +31,14 @@ PING = 9
 PONG = 10
 
 
+class ConnectionClosed(RuntimeError):
+    """The peer closed the WebSocket stream.
+
+    Distinct from a timeout so a read loop can tell "nothing yet" from "no more
+    ever".  Subclasses :class:`RuntimeError` so existing handlers keep working.
+    """
+
+
 # Return codes of WebsocketPumpRead.
 PUMP_MESSAGE = 0
 PUMP_WOULD_WAIT = 1
@@ -75,10 +83,13 @@ class WebSocketConnection:
 
         Returns a ``(message_type, data)`` tuple.  ``message_type`` is one of
         :data:`TEXT` / :data:`BINARY` / :data:`PING` / :data:`PONG` / etc.;
-        ``data`` is the raw payload bytes.  Returns ``None`` when the peer
-        closes the connection cleanly.
+        ``data`` is the raw payload bytes.
 
-        Raises :class:`RuntimeError` on a transport error.
+        Raises :class:`ConnectionClosed` once the peer has closed the stream, and
+        :class:`RuntimeError` on any other transport error.  A closed stream is a
+        distinct outcome rather than ``None``: a caller looping on ``None` would
+        spin forever against a dead socket, and one treating any error as a close
+        would drop a recoverable failure on the floor.
         """
         if self._closed:
             raise RuntimeError("websocket connection is closed")
@@ -86,7 +97,13 @@ class WebSocketConnection:
         err = ffi.new("char **")
         msg = lib.WebsocketReadMessage(self._conn_id, err)
         if msg == ffi.NULL:
-            raise RuntimeError("websocket read failed: %s" % _read_error(ffi, lib, err))
+            detail = _read_error(ffi, lib, err)
+            # The engine reports a peer-initiated close through the same NULL
+            # return as a transport failure; the message text is what
+            # distinguishes them.
+            if "close" in detail.lower() or "EOF" in detail:
+                raise ConnectionClosed("websocket closed by peer: %s" % detail)
+            raise RuntimeError("websocket read failed: %s" % detail)
         try:
             message_type = int(msg.message_type)
             if msg.data != ffi.NULL and int(msg.data_len) > 0:
@@ -130,10 +147,17 @@ class WebSocketConnection:
     def pump_read(self, timeout: float = -1.0) -> Optional[Tuple[int, bytes]]:
         """Read the next message from the pump.
 
-        ``timeout`` is in seconds; negative waits indefinitely.  Returns
-        ``(message_type, data)`, or ``None`` when the timeout expires -- so a
-        caller can poll without blocking a thread.  Raises on a transport error
-        and returns ``None`` once the peer closed cleanly.
+        ``timeout`` is in seconds; negative waits indefinitely.
+
+        Returns ``(message_type, data)` for a message.
+
+        Returns ``None`` when the timeout expires with no message: the
+        connection is still open and a caller may poll again.
+
+        Raises :class:`ConnectionClosed` once the peer has closed the stream.  The
+        two outcomes are deliberately different values: returning ``None` for
+        both would make a caller poll a dead socket forever (or mistake a quiet
+        peer for a closed one).
 
         Requires :meth:`start_read_pump` first.
         """
@@ -147,7 +171,11 @@ class WebSocketConnection:
         if status == PUMP_WOULD_WAIT:
             return None
         if status == PUMP_CLOSED:
-            return None
+            # The engine may or may not have filled errMsg; _read_error handles
+            # both and frees the C buffer when there is one.
+            raise ConnectionClosed(
+                "websocket closed by peer: %s" % _read_error(ffi, lib, err)
+            )
         if status == PUMP_ERROR:
             raise RuntimeError(
                 "websocket pump read failed: %s" % _read_error(ffi, lib, err)
@@ -212,8 +240,13 @@ class WebSocketConnection:
         # reader from delivering into a channel nobody will drain.
         if hasattr(lib, "WebsocketStopReadPump"):
             lib.WebsocketStopReadPump(self._conn_id)
+        # WebsocketClose removes the connection from the handle table and closes
+        # the socket.  It must NOT be followed by WebsocketFreeHandle: that one
+        # releases a *client* handle, and client ids and connection ids come from
+        # two independent counters that both start at 1 -- passing a connection id
+        # there deleted an unrelated, still-open client and made its next
+        # connect() fail with "invalid websocket handle".
         lib.WebsocketClose(self._conn_id, err)
-        lib.WebsocketFreeHandle(self._conn_id)
         self._conn_id = 0
         self._closed = True
 

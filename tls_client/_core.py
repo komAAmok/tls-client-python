@@ -1292,6 +1292,7 @@ int            WebsocketStartReadPump(uintptr_t connID, int capacity, char** err
 int            WebsocketPumpRead(uintptr_t connID, int timeoutMs, WebsocketMessage** msg, char** errMsg);
 int            WebsocketPumpStats(uintptr_t connID, long long* delivered, int* capacity, int* pending);
 void           WebsocketStopReadPump(uintptr_t connID);
+void           WebsocketHandleStats(int* clients, int* connections, int* owners, int* pumps);
 
 // Runtime introspection: present only in -tags profile builds.
 // cffi resolves symbols lazily, so declaring them costs nothing when absent.
@@ -5329,6 +5330,32 @@ def set_go_memory_limit(limit_bytes: int) -> int:
 def force_go_gc() -> None:
     _require_profile_build()
     _lib.ForceGC()
+
+
+def websocket_handle_stats() -> Dict[str, int]:
+    """Live entry counts in the WebSocket handle tables.
+
+    A leak test can assert that connect/close cycles bring these back to their
+    starting size, which is a direct measurement instead of inferring it from
+    heap numbers.
+    """
+    _get_ffi()
+    if not hasattr(_lib, "WebsocketHandleStats"):
+        raise RuntimeError(
+            "this tls-client build has no WebsocketHandleStats export; rebuild "
+            "the native library from current source"
+        )
+    clients = _ffi.new("int *")
+    connections = _ffi.new("int *")
+    owners = _ffi.new("int *")
+    pumps = _ffi.new("int *")
+    _lib.WebsocketHandleStats(clients, connections, owners, pumps)
+    return {
+        "clients": int(clients[0]),
+        "connections": int(connections[0]),
+        "owners": int(owners[0]),
+        "pumps": int(pumps[0]),
+    }
 
 
 def clear_client_pool() -> None:

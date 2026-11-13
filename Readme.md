@@ -539,6 +539,11 @@ with ws.connect() as conn:
 already being flow-controlled. Two readers on one socket are refused: they would
 interleave frames.
 
+`pump_read` reports the two "no message" outcomes as different values: `None` for
+a timeout (the connection is still open, poll again) and `ConnectionClosed` once
+the peer has closed the stream. `read_message` raises the same exception, so a
+read loop can tell "nothing yet" from "no more ever".
+
 ```python
 from tls_client import WebSocket, TEXT, BINARY
 

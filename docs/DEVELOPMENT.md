@@ -255,6 +255,15 @@ permessage-deflate）不等于 Python 暴露了它。加特性时要沿
 **并发路径要读快照。** `_core.py` 里逐请求覆盖必须基于请求构造时的
 快照解析，不能读会话当前值 —— 否则并发改标识符会让头与指纹错配。
 
+**句柄表按 ID 匹配，但 ID 来自不同的计数器。** `wsHandles`（客户端）和
+`wsConnHandles`（连接）各自用独立计数器，都从 1 开始，所以两个 ID 会撞车。
+把连接 ID 传给操作客户端表的函数，删掉的是**另一个还活着的客户端**。加新的
+ws 导出时先确认它操作哪张表；`test_websocket_read_pump` 会断言所有 handle
+表在 connect/close 循环后回到起始大小。
+
+**"超时"和"对端关闭"必须是两个值。** 都返回 `None` 会让读循环在死连接上
+空转，或者把一次安静误判成关闭。
+
 **测试要用本地服务器。** 打外网的测试会随对端行为漂移；能做成
 `httptest` / 本地 socket 的，就在本地做。`tests/cookie_jar_test.go`、
 `tests/firefox_unsupported_group_test.go`、`test_websocket_compression.py`

@@ -2504,6 +2504,10 @@ func WebsocketClose(connID C.uintptr_t, errMsg **C.char) (ret C.int) {
 		return 0 // already closed / unknown handle is a no-op
 	}
 	wsConnHandles.Delete(uint64(connID))
+	// Forget the owner record too: without this, every connection that is closed
+	// normally leaves one entry behind forever (it was only removed when the
+	// whole client was released, or when releaseConnectionsForClient swept).
+	wsConnOwner.Delete(uint64(connID))
 	// Tear the read pump down first: its goroutine may be blocked in
 	// ReadMessage, and closing the socket is what releases it.
 	pumpAwareClose(uint64(connID))
@@ -2635,6 +2639,35 @@ func WebsocketPumpStats(connID C.uintptr_t, delivered *C.longlong, capacity *C.i
 // Releases a reader blocked on send.  The socket close that releases a reader
 // blocked in recv happens in WebsocketClose.
 //
+// Live entry counts in the two handle tables, plus the owner map.
+//
+// Exposed so a leak test can assert that connect/close cycles return the tables
+// to their starting size, instead of inferring it from heap numbers.
+//
+//export WebsocketHandleStats
+func WebsocketHandleStats(clients *C.int, connections *C.int, owners *C.int, pumps *C.int) {
+	count := func(m *sync.Map) C.int {
+		var n C.int
+		m.Range(func(any, any) bool {
+			n++
+			return true
+		})
+		return n
+	}
+	if clients != nil {
+		*clients = count(&wsHandles)
+	}
+	if connections != nil {
+		*connections = count(&wsConnHandles)
+	}
+	if owners != nil {
+		*owners = count(&wsConnOwner)
+	}
+	if pumps != nil {
+		*pumps = count(&wsPumps)
+	}
+}
+
 //export WebsocketStopReadPump
 func WebsocketStopReadPump(connID C.uintptr_t) {
 	stopWsReadPump(uint64(connID))

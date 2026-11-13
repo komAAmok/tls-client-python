@@ -130,6 +130,19 @@ class DecoderDevirtualisationTests(unittest.TestCase):
         )
 
 
+def _binary_exports(path, symbol: bytes) -> bool:
+    """True when *symbol* appears in the shared object's dynamic symbols.
+
+    Avoids depending on binutils: the export name is a plain string in the
+    .dynstr section, and a release build never contains it.
+    """
+    try:
+        blob = path.read_bytes()
+    except OSError:
+        return False
+    return symbol in blob
+
+
 class ShippedBinaryTests(unittest.TestCase):
     """The committed binaries should carry the lean build, not the old one."""
 
@@ -181,13 +194,25 @@ class ShippedBinaryTests(unittest.TestCase):
         # The whitespace-free checks in CharsetLeanTests above pin the source
         # property; this one catches the case where a dependency quietly brings
         # its own HTTP stack back.
-        budget = 14_300_000
+        # 2026-11-13: the WebSocket read pump adds ~20 KB (the goroutine, the
+        # bounded channel and the four exports), and a *profile* build carries
+        # runtime/pprof + runtime/debug for ~230 KB more.  A budget that cannot
+        # tell the two apart is the bug this test just had: it failed on a
+        # profile build while blaming html/charset.  So the assertion now has
+        # two thresholds and names which build it is looking at.
+        release_budget = 14_300_000
+        profile_budget = release_budget + 400_000  # pprof + debug headroom
+
         size = target.stat().st_size
+        is_profile = _binary_exports(target, b"GetRuntimeStats")
+        budget = profile_budget if is_profile else release_budget
         self.assertLess(
             size,
             budget,
-            "%s is %d bytes (budget %d); it may have been rebuilt with "
-            "html/charset linked back in" % (target.name, size, budget),
+            "%s is %d bytes (budget %d for a %s build); check whether a "
+            "dependency brought its own HTTP stack back"
+            % (target.name, size, budget,
+               "profile" if is_profile else "release"),
         )
 
 

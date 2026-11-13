@@ -93,6 +93,9 @@ from tls_client.websocket import (
     CLOSE as CLOSE,
 )
 from tls_client.websocket import (
+    ConnectionClosed as ConnectionClosed,
+)
+from tls_client.websocket import (
     PING as PING,
 )
 from tls_client.websocket import (
@@ -248,6 +251,7 @@ __all__ = [  # noqa: RUF022 - grouped by purpose, not alphabetically
     "TEXT",
     "BINARY",
     "CLOSE",
+    "ConnectionClosed",
     "PING",
     "PONG",
     # -- metadata -----------------------------------------------------------
