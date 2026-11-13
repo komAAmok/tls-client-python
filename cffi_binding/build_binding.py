@@ -128,9 +128,12 @@ def _go_type_to_c(go_type: str) -> str:
     go_type = go_type.strip()
     if go_type in _GO_C_TYPE_MAP:
         return _GO_C_TYPE_MAP[go_type]
-    # Pointer to a struct declared in the preamble: *C.RequestOptions.
-    if go_type.startswith("*C."):
-        return go_type[3:] + "*"
+    # Pointer to a struct declared in the preamble: *C.RequestOptions, and the
+    # out-parameter form **C.WebsocketMessage (a pointer to a pointer, used to
+    # return an owned struct through a C argument).
+    if go_type.startswith("*C.") or go_type.startswith("**C."):
+        depth = len(go_type) - len(go_type.lstrip("*"))
+        return go_type[depth + 2:] + "*" * depth
     raise RuntimeError(
         "no C spelling known for Go type %r — add it to _GO_C_TYPE_MAP"
         % go_type
@@ -483,7 +486,7 @@ def build_go_library(
     env["GOOS"] = goos
     env["GOARCH"] = goarch
 
-    tags = "netgo,osusergo"
+    tags = os.environ.get("TLS_CLIENT_BUILD_TAGS", "netgo,osusergo")
     ldflags = "-s -w -buildid="
 
     cmd = [

@@ -2308,6 +2308,7 @@ func RequestAsync(opts *C.RequestOptions, requestID C.uintptr_t, cb unsafe.Point
 var (
 	wsHandleSeq     atomic.Uint64
 	wsHandles       sync.Map // uint64 -> *tls_client.Websocket
+	wsConnOwner     sync.Map // connID -> owning wsID
 	wsConnHandleSeq atomic.Uint64
 	wsConnHandles   sync.Map // uint64 -> *websocket.Conn
 )
@@ -2419,6 +2420,9 @@ func WebsocketConnect(wsID C.uintptr_t, errMsg **C.char) (id C.uintptr_t) {
 	}
 	handle := wsConnHandleSeq.Add(1)
 	wsConnHandles.Store(handle, conn)
+	// Remember the owning client so releasing it can close its connections
+	// rather than leaving them in the table (and open on the socket).
+	wsConnOwner.Store(handle, uint64(wsID))
 	return C.uintptr_t(handle)
 }
 
@@ -2500,6 +2504,9 @@ func WebsocketClose(connID C.uintptr_t, errMsg **C.char) (ret C.int) {
 		return 0 // already closed / unknown handle is a no-op
 	}
 	wsConnHandles.Delete(uint64(connID))
+	// Tear the read pump down first: its goroutine may be blocked in
+	// ReadMessage, and closing the socket is what releases it.
+	pumpAwareClose(uint64(connID))
 	conn := v.(*websocket.Conn)
 	if err := conn.Close(); err != nil {
 		setWsErr(errMsg, err.Error())
@@ -2519,10 +2526,118 @@ func WebsocketFreeMessage(msg *C.WebsocketMessage) {
 	C.free(unsafe.Pointer(msg))
 }
 
+// Releases a *client* handle (the value WebsocketNew returned).
+//
+// It must not touch wsConnHandles: client handles and connection handles come
+// from two independent counters (wsHandleSeq / wsConnHandleSeq) that both start
+// at 1, so the IDs collide.  Deleting from both tables by one ID dropped a live
+// connection's handle whenever its client was released -- the connection then
+// failed with "invalid websocket connection handle" even though it was open.
+//
 //export WebsocketFreeHandle
 func WebsocketFreeHandle(handleID C.uintptr_t) {
-	wsConnHandles.Delete(uint64(handleID))
+	// A client that still has live connections must tear them down with it,
+	// otherwise its connections leak.  Only connections this client created are
+	// touched, which is what the association below tracks.
+	releaseConnectionsForClient(uint64(handleID))
 	wsHandles.Delete(uint64(handleID))
+}
+
+// ---------------------------------------------------------------------------
+// WebSocket read pump — C surface
+//
+// The logic lives in ws_pump.go; the cgo types are declared here, in the file
+// that owns the preamble, because cgo resolves C types per file.
+// ---------------------------------------------------------------------------
+
+// capacity <= 0 selects the default (64 messages).
+//
+//export WebsocketStartReadPump
+func WebsocketStartReadPump(connID C.uintptr_t, capacity C.int, errMsg **C.char) C.int {
+	defer func() {
+		if r := recover(); r != nil {
+			setWsErr(errMsg, fmt.Sprintf("go panic in WebsocketStartReadPump: %v", r))
+		}
+	}()
+	v, ok := wsConnHandles.Load(uint64(connID))
+	if !ok {
+		setWsErr(errMsg, "invalid websocket connection handle")
+		return -1
+	}
+	conn := v.(*websocket.Conn)
+	if err := startWsReadPump(uint64(connID), conn, int(capacity)); err != nil {
+		setWsErr(errMsg, err.Error())
+		return -1
+	}
+	return 0
+}
+
+// Waits up to timeoutMs for the next message and reports one of
+// pumpMessage / pumpWouldWait / pumpClosed / pumpError.  *msg is assigned only
+// on pumpMessage and must be released with WebsocketFreeMessage.
+//
+//export WebsocketPumpRead
+func WebsocketPumpRead(connID C.uintptr_t, timeoutMs C.int, msg **C.WebsocketMessage, errMsg **C.char) C.int {
+	defer func() {
+		if r := recover(); r != nil {
+			setWsErr(errMsg, fmt.Sprintf("go panic in WebsocketPumpRead: %v", r))
+		}
+	}()
+	p, ok := getWsPump(uint64(connID))
+	if !ok {
+		setWsErr(errMsg, "connection has no read pump; call WebsocketStartReadPump first")
+		return pumpError
+	}
+	out, status, err := p.next(int(timeoutMs))
+	if status == pumpError && err != nil {
+		setWsErr(errMsg, err.Error())
+		return pumpError
+	}
+	if status != pumpMessage {
+		return C.int(status)
+	}
+
+	raw := (*C.WebsocketMessage)(C.malloc(C.size_t(unsafe.Sizeof(C.WebsocketMessage{}))))
+	if raw == nil {
+		setWsErr(errMsg, "failed to allocate websocket message")
+		return pumpError
+	}
+	raw.message_type = C.int(out.messageType)
+	raw.data_len = C.int(len(out.data))
+	if len(out.data) > 0 {
+		raw.data = (*C.char)(C.CBytes(out.data))
+	}
+	*msg = raw
+	return C.int(pumpMessage)
+}
+
+// delivered / capacity / pending describe the pump's queue.  Returns -1 when
+// there is no pump for this connection.
+//
+//export WebsocketPumpStats
+func WebsocketPumpStats(connID C.uintptr_t, delivered *C.longlong, capacity *C.int, pending *C.int) C.int {
+	p, ok := getWsPump(uint64(connID))
+	if !ok {
+		return -1
+	}
+	if delivered != nil {
+		*delivered = C.longlong(p.credits.Load())
+	}
+	if capacity != nil {
+		*capacity = C.int(cap(p.ch))
+	}
+	if pending != nil {
+		*pending = C.int(len(p.ch))
+	}
+	return 0
+}
+
+// Releases a reader blocked on send.  The socket close that releases a reader
+// blocked in recv happens in WebsocketClose.
+//
+//export WebsocketStopReadPump
+func WebsocketStopReadPump(connID C.uintptr_t) {
+	stopWsReadPump(uint64(connID))
 }
 
 //export FreeCString

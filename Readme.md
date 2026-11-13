@@ -515,6 +515,30 @@ header ordering as regular requests.  The handshake is forced to HTTP/1.1
 transparently compresses/decompresses messages once the server accepts it —
 which is what browsers and iOS `URLSession` do.
 
+#### Read pump: backpressure without a thread per socket
+
+`read_message()` parks the calling thread in a blocking recv, so N idle
+connections cost N threads and nothing bounds how far a fast peer runs ahead of
+a slow reader. `start_read_pump()` moves the read into one Go goroutine per
+connection that feeds a **bounded** channel; when the channel fills the
+goroutine stops reading the socket, so TCP flow control reaches the peer.
+
+```python
+ws = WebSocket(url="wss://example.com/stream")
+with ws.connect() as conn:
+    conn.start_read_pump(capacity=64)     # 0 = default (64 messages)
+
+    msg = conn.pump_read(timeout=5.0)     # None on timeout, never blocks a thread
+    if msg:
+        message_type, data = msg
+
+    print(conn.pump_stats())              # {'delivered': .., 'capacity': .., 'pending': ..}
+```
+
+`pending == capacity` means the consumer is the bottleneck and the peer is
+already being flow-controlled. Two readers on one socket are refused: they would
+interleave frames.
+
 ```python
 from tls_client import WebSocket, TEXT, BINARY
 

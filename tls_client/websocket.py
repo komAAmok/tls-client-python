@@ -31,6 +31,13 @@ PING = 9
 PONG = 10
 
 
+# Return codes of WebsocketPumpRead.
+PUMP_MESSAGE = 0
+PUMP_WOULD_WAIT = 1
+PUMP_CLOSED = 2
+PUMP_ERROR = 3
+
+
 def _read_error(ffi, lib, err_ptr) -> str:
     """Drain a ``char**`` out-param into a Python string, freeing the C buffer."""
     if err_ptr[0] == ffi.NULL:
@@ -49,9 +56,14 @@ class WebSocketConnection:
     next frame (blocking).
     """
 
-    def __init__(self, conn_id: int) -> None:
+    def __init__(self, conn_id: int, owner: "WebSocket" = None) -> None:
         self._conn_id = conn_id
         self._closed = False
+        # Hold the owning client: dropping the WebSocket object would run its
+        # __del__, release the client handle and tear this connection down --
+        # so a caller that writes ``WebSocket(...).connect()` and keeps only the
+        # connection would see it die at the next GC.
+        self._owner = owner
 
     @property
     def closed(self) -> bool:
@@ -85,6 +97,90 @@ class WebSocketConnection:
         finally:
             lib.WebsocketFreeMessage(msg)
 
+    def start_read_pump(self, capacity: int = 0) -> None:
+        """Move the blocking read off this thread into a Go goroutine.
+
+        Without a pump, :meth:`read_message` parks the calling OS thread inside
+        a blocking ``recv`` until the peer speaks.  One connection per Python
+        thread then costs a thread per socket, and nothing bounds how far a fast
+        peer may run ahead of a slow reader.
+
+        With a pump, one goroutine per connection reads into a **bounded**
+        channel (``capacity`` messages, default 64).  When the channel is full the
+        goroutine stops reading the socket, so TCP flow control reaches the peer:
+        that is the backpressure.  Nothing is dropped and nothing is buffered
+        without limit.
+
+        Call this once per connection, then use :meth:`pump_read`.  Calling it
+        twice raises, because two readers on one socket would interleave frames.
+        """
+        ffi, lib = _core._get_ffi()
+        if not hasattr(lib, "WebsocketStartReadPump"):
+            raise RuntimeError(
+                "this tls-client build has no WebSocket read pump; rebuild the "
+                "native library from current source (see UPSTREAM_SYNC.md)"
+            )
+        err = ffi.new("char **")
+        rc = lib.WebsocketStartReadPump(self._conn_id, capacity, err)
+        if rc != 0:
+            raise RuntimeError(
+                "websocket start_read_pump failed: %s" % _read_error(ffi, lib, err)
+            )
+
+    def pump_read(self, timeout: float = -1.0) -> Optional[Tuple[int, bytes]]:
+        """Read the next message from the pump.
+
+        ``timeout`` is in seconds; negative waits indefinitely.  Returns
+        ``(message_type, data)`, or ``None`` when the timeout expires -- so a
+        caller can poll without blocking a thread.  Raises on a transport error
+        and returns ``None`` once the peer closed cleanly.
+
+        Requires :meth:`start_read_pump` first.
+        """
+        if self._closed:
+            raise RuntimeError("websocket connection is closed")
+        ffi, lib = _core._get_ffi()
+        timeout_ms = -1 if timeout < 0 else int(timeout * 1000)
+        err = ffi.new("char **")
+        msg = ffi.new("WebsocketMessage **")
+        status = lib.WebsocketPumpRead(self._conn_id, timeout_ms, msg, err)
+        if status == PUMP_WOULD_WAIT:
+            return None
+        if status == PUMP_CLOSED:
+            return None
+        if status == PUMP_ERROR:
+            raise RuntimeError(
+                "websocket pump read failed: %s" % _read_error(ffi, lib, err)
+            )
+        raw = msg[0]
+        try:
+            message_type = int(raw.message_type)
+            if raw.data != ffi.NULL and int(raw.data_len) > 0:
+                data = ffi.buffer(raw.data, int(raw.data_len))[:]
+            else:
+                data = b""
+            return message_type, data
+        finally:
+            lib.WebsocketFreeMessage(raw)
+
+    def pump_stats(self) -> Dict[str, int]:
+        """``delivered``, ``capacity`` and ``pending`` for the pump queue.
+
+        ``pending`` sitting at ``capacity`` means the consumer is the bottleneck and
+        the peer is already being flow-controlled.
+        """
+        ffi, lib = _core._get_ffi()
+        delivered = ffi.new("long long *")
+        capacity = ffi.new("int *")
+        pending = ffi.new("int *")
+        if lib.WebsocketPumpStats(self._conn_id, delivered, capacity, pending) != 0:
+            raise RuntimeError("websocket connection has no read pump")
+        return {
+            "delivered": int(delivered[0]),
+            "capacity": int(capacity[0]),
+            "pending": int(pending[0]),
+        }
+
     def send(self, data, message_type: int = TEXT) -> None:
         """Send one frame.  ``data`` may be ``str`` (UTF-8) or ``bytes``."""
         if self._closed:
@@ -112,6 +208,10 @@ class WebSocketConnection:
             return
         ffi, lib = _core._get_ffi()
         err = ffi.new("char **")
+        # Go tears the pump down inside Close; stopping here as well keeps a
+        # reader from delivering into a channel nobody will drain.
+        if hasattr(lib, "WebsocketStopReadPump"):
+            lib.WebsocketStopReadPump(self._conn_id)
         lib.WebsocketClose(self._conn_id, err)
         lib.WebsocketFreeHandle(self._conn_id)
         self._conn_id = 0
@@ -225,7 +325,7 @@ class WebSocket:
         conn_id = lib.WebsocketConnect(self._ws_id, err)
         if conn_id == 0:
             raise RuntimeError("websocket connect failed: %s" % _read_error(ffi, lib, err))
-        return WebSocketConnection(conn_id)
+        return WebSocketConnection(conn_id, self)
 
     def close(self) -> None:
         """Release the client handle (idempotent)."""

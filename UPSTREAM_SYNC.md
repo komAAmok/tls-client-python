@@ -356,6 +356,32 @@ end-to-end: a wrong pin still fails the handshake with `SSLError`.
 
 ### Measured and rejected
 
+- **Two-level cache key ("split the invariant part, hash only the rest").**
+  Measured first: `_compute_cache_key_hash` costs **6.0 µs** against a request
+  total of ~1500 µs, i.e. **0.4 %**.  The number that made it look worth doing
+  (590 µs, from cProfile) is profiler amplification: the function makes ~40
+  f-string joins and dict lookups, and cProfile charges its own per-call
+  overhead to each of them.  Re-timed with `time.perf_counter` around the real
+  call it is 6 µs.  Splitting the key would need both hash implementations
+  changed in lockstep for a 0.4 % gain, so it stays as it is.
+
+  The same investigation produced the layer attribution worth keeping:
+
+  | layer | µs |
+  | --- | --- |
+  | raw socket HTTP/1.1 keep-alive | 309 |
+  | Go stdlib `net/http` | 743 |
+  | this engine, plain Go, no headers | 851 |
+  | this engine, plain Go, 13 real headers | 927 |
+  | `NativeSession.get()` through CFFI | 1525 (p50 1209, min 606) |
+
+  The gap between 927 and 1525 is **not** a fixed per-request cost: the
+  minimum observed is 606 µs, below the plain-Go number, and the spread is
+  localhost TCP jitter (p95 2959, max 10045).  cgo itself is 50 ns per call and
+  161 ns per `C.GoString` — 73 of them per request is 12 µs.  Anything measured
+  against localhost should be re-measured against a remote target before it is
+  optimised.
+
 - **x/text CJK encode tables (338 KB).** The linker keeps them under
   `-buildmode=c-shared` because external linking preserves the full
   `encoding.Encoding` interface itab. A pure-Go `go build .` from the same

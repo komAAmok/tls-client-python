@@ -1287,6 +1287,20 @@ void           SetPoolMaxEntries(int entries);
 int            GetAbiVersion(void);
 char*          ResolveECHConfig(char* host);
 
+// WebSocket read pump (opt-in per connection).
+int            WebsocketStartReadPump(uintptr_t connID, int capacity, char** errMsg);
+int            WebsocketPumpRead(uintptr_t connID, int timeoutMs, WebsocketMessage** msg, char** errMsg);
+int            WebsocketPumpStats(uintptr_t connID, long long* delivered, int* capacity, int* pending);
+void           WebsocketStopReadPump(uintptr_t connID);
+
+// Runtime introspection: present only in -tags profile builds.
+// cffi resolves symbols lazily, so declaring them costs nothing when absent.
+int            GetRuntimeStats(int* goroutines, long long* heapObjects, long long* heapInuse, long long* heapAlloc, int* numGC);
+int            DumpGoroutineProfile(char* path);
+int            SetGCPercent(int percent);
+long long      SetMemoryLimit(long long limit);
+void           ForceGC(void);
+
 typedef void (*async_callback_fn)(uintptr_t request_id, ResponseResult* response);
 int            RequestAsync(RequestOptions* opts, uintptr_t request_id, async_callback_fn cb);
 
@@ -2228,7 +2242,12 @@ class Session:
             if cached is not None:
                 version, snapshot = cached
                 if version == self._defaults_version:
-                    return {k: _copy_snapshot_value(v) for k, v in snapshot.items()}
+                    # Handed out as-is: callers only read it (the per-request
+                    # dict is a separate 'resolved' build).  Re-copying ~61
+                    # entries here cost ~1/3 of the fixed per-request overhead
+                    # measured at 1.08 ms (24,400 dict copies + 143,200
+                    # isinstance calls per 400 requests).
+                    return snapshot
 
             snapshot = {
                 name: _clone_default_value(self.defaults[name])
@@ -2239,7 +2258,7 @@ class Session:
                 self._defaults_version,
                 snapshot,
             )
-            return {k: _copy_snapshot_value(v) for k, v in snapshot.items()}
+            return snapshot
 
     # ------------------------------------------------------------------
     # Writable session properties — users can read/write after construction.
@@ -5262,6 +5281,56 @@ class AsyncSession:
 
 
 # Convenience top-level function
+
+def _require_profile_build() -> None:
+    # A release build omits runtime/pprof and runtime/debug (~230 KB),
+    # so the introspection exports exist only with -tags profile.
+    # Failing loudly beats returning zeros a leak test would read as
+    # 'no leak'.
+    _get_ffi()
+    if not hasattr(_lib, "GetRuntimeStats"):
+        raise RuntimeError(
+            "this tls-client build has no runtime introspection; rebuild with TLS_CLIENT_BUILD_TAGS=profile,netgo,osusergo python cffi_binding/build_binding.py --lib (see cffi_binding/introspect_profile.go)"
+        )
+
+
+def runtime_stats() -> Dict[str, int]:
+    _require_profile_build()
+    g = _ffi.new("int *")
+    ho = _ffi.new("long long *")
+    hi = _ffi.new("long long *")
+    ha = _ffi.new("long long *")
+    ng = _ffi.new("int *")
+    _lib.GetRuntimeStats(g, ho, hi, ha, ng)
+    return {
+        "goroutines": int(g[0]),
+        "heap_objects": int(ho[0]),
+        "heap_inuse": int(hi[0]),
+        "heap_alloc": int(ha[0]),
+        "num_gc": int(ng[0]),
+    }
+
+
+def dump_goroutines(path: str) -> int:
+    _require_profile_build()
+    return int(_lib.DumpGoroutineProfile(path.encode("utf-8")))
+
+
+def set_go_gc_percent(percent: int) -> int:
+    _require_profile_build()
+    return int(_lib.SetGCPercent(percent))
+
+
+def set_go_memory_limit(limit_bytes: int) -> int:
+    _require_profile_build()
+    return int(_lib.SetMemoryLimit(limit_bytes))
+
+
+def force_go_gc() -> None:
+    _require_profile_build()
+    _lib.ForceGC()
+
+
 def clear_client_pool() -> None:
     """Close all idle connections in the global Go client pool (synchronous)."""
     Session.clear_client_pool()
