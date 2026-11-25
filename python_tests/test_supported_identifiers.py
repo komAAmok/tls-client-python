@@ -82,7 +82,7 @@ class CapturedIdentifierTests(unittest.TestCase):
             session = tls_client.Session()
             try:
                 tls_client.fingerprints.apply(session, name)
-            except Exception as exc:  # noqa: BLE001 - report every failure at once
+            except Exception as exc:  # report every failure at once
                 failures.append("%s: %s: %s" % (name, type(exc).__name__, exc))
         self.assertEqual(failures, [])
 

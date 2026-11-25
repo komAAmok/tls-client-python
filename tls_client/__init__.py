@@ -93,9 +93,6 @@ from tls_client.websocket import (
     CLOSE as CLOSE,
 )
 from tls_client.websocket import (
-    ConnectionClosed as ConnectionClosed,
-)
-from tls_client.websocket import (
     PING as PING,
 )
 from tls_client.websocket import (
@@ -103,6 +100,9 @@ from tls_client.websocket import (
 )
 from tls_client.websocket import (
     TEXT as TEXT,
+)
+from tls_client.websocket import (
+    ConnectionClosed as ConnectionClosed,
 )
 from tls_client.websocket import (
     WebSocket as WebSocket,

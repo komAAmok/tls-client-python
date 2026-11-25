@@ -83,7 +83,7 @@ class WebsocketHandshakeTimeoutTests(unittest.TestCase):
     def _attempt(self, client=None):
         client = client or self._client()
         start = time.perf_counter()
-        with self.assertRaises(Exception):
+        with self.assertRaisesRegex(RuntimeError, "websocket connect failed"):
             client.connect()
         return time.perf_counter() - start
 
@@ -117,7 +117,7 @@ class WebsocketHandshakeTimeoutTests(unittest.TestCase):
         short_client = self._client(handshake_timeout_milliseconds=400)
         try:
             start = time.perf_counter()
-            with self.assertRaises(Exception):
+            with self.assertRaisesRegex(RuntimeError, "websocket connect failed"):
                 short_client.connect()
             self.assertLess(time.perf_counter() - start, 3.0)
         except Exception:

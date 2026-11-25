@@ -99,9 +99,12 @@ jobs:
       - name: Static scan (requests API surface)
         run: python3 -m tls_client._static_scan --json
 
+      # Pinned, not floating: an unpinned ruff turns every new release's new rule
+      # into a red build this file cannot predict.  Bump it deliberately, together
+      # with the violations the new release reports.
       - name: Lint the Python surface
         run: |
-          python3 -m pip install --upgrade ruff
+          python3 -m pip install --upgrade "ruff==0.16.10"
           ruff check tls_client python_tests tools
 
       - name: Requests compatibility tests

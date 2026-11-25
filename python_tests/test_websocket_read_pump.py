@@ -23,9 +23,9 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
-import _ws_server  # noqa: E402
+import _ws_server
 
-from tls_client.websocket import (  # noqa: E402
+from tls_client.websocket import (
     ConnectionClosed,
     WebSocket,
 )
