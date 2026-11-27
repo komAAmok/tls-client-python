@@ -2,8 +2,8 @@
 
 ## 1. 实测数据
 
-环境：linux/amd64，Go 1.27.4，仓库 HEAD `5bac0a3`，`tls_client/bin/tls-client-linux-amd64.so`
-（CI 重建产物，14,102,944 字节，md5 `89e17e76…`）。
+环境：linux/amd64，Go 1.27.4，`tls_client/bin/tls-client-linux-amd64.so`
+（CI 重建产物，14,102,944 字节，ABI 4；md5 随每次 CI 重建变化）。
 
 审计当日的本地构建产物为 14,095,240 字节（md5 `5575630d…`），两者相差约 7.7 KB，
 ABI 均为 4、导出符号集一致（§4 有校验）。段构成以本地构建为准（同一源码、同参数）：
