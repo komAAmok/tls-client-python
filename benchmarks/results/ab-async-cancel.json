@@ -1,0 +1,36 @@
+{
+  "metrics": {
+    "cancelled": {
+      "a_all": [
+        1.0,
+        1.0,
+        1.0
+      ],
+      "a_median": 1.0,
+      "b_all": [
+        1.0,
+        1.0,
+        1.0
+      ],
+      "b_median": 1.0,
+      "change_pct": 0.0
+    },
+    "timed_out": {
+      "a_all": [
+        0.0,
+        0.0,
+        0.0
+      ],
+      "a_median": 0.0,
+      "b_all": [
+        0.0,
+        0.0,
+        0.0
+      ],
+      "b_median": 0.0,
+      "change_pct": null
+    }
+  },
+  "rounds": 3,
+  "scenario": "async-cancel-timeout"
+}
