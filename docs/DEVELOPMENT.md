@@ -36,6 +36,8 @@ Requests 兼容层的契约在 [`REQUESTS_API.md`](REQUESTS_API.md)。
 
 需要 Go **1.27+**（`go.mod` 声明 `go 1.27`）、Python 3.8+、gcc。
 
+这里的 Python 3.8+ 是**开发工具链**的门槛（`tools/` 与 `python_tests/` 可以用新语法）；发行包自身的运行期地板是 **3.6**（`requires-python = ">=3.6, <3.15"`），由 `test_py36_compat` 守卫：包的每个模块都要能按 3.6 语法解析，3.8+ 才有的 `typing` 名必须包在 `try/except ImportError` 里（回落到 typing_extensions），注解不得出现运行期求值的 PEP 585/604 写法。
+
 ```bash
 # Python 侧
 python3 -m venv .venv && .venv/bin/pip install -e . cffi
@@ -121,6 +123,7 @@ git diff --check                                        # 空白字符
 | `test_supported_identifiers` | 引擎注册的每个 identifier 都被 Python 接受 |
 | `test_binary_size_guard` | 产物体积 + 源码层"只用解码器"的性质 |
 | `test_requests_api_parity` | 生成模块未过期 + 静态扫描通过 |
+| `test_py36_compat` | 包的 3.6 地板：语法、未包 `try` 的 3.8+ `typing` 名、运行期求值的 PEP 585/604 注解 |
 
 ## 5. ABI 演进规则
 

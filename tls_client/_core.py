@@ -3992,10 +3992,39 @@ def _apply_future_state(future: "asyncio.Future", is_exc: bool, value: Any) -> N
         pass  # cancelled/resolved between the done() check and now
 
 
+def _future_loop(future: "asyncio.Future"):
+    """Return the event loop *future* is attached to.
+
+    ``asyncio.Future.get_loop()`` is new in Python 3.7; 3.6 exposes the loop
+    only as the private ``_loop`` attribute, which is read here so the async
+    bridge keeps working on the oldest supported interpreter.
+    """
+    get_loop = getattr(future, "get_loop", None)
+    if get_loop is not None:
+        return get_loop()
+    return future._loop  # Python 3.6
+
+
+def _current_loop():
+    """Return the loop running on this thread, or ``None`` when there is none.
+
+    ``asyncio.get_running_loop()`` is 3.7+.  On 3.6 - and on any thread with no
+    loop - there is no reliable answer, so ``None`` is returned and callers
+    defer the work through ``call_soon_threadsafe`` instead.
+    """
+    get_running_loop = getattr(asyncio, "get_running_loop", None)
+    if get_running_loop is None:  # Python 3.6
+        return None
+    try:
+        return get_running_loop()
+    except RuntimeError:  # no running event loop on this thread
+        return None
+
+
 def _apply_future_exception(future: "asyncio.Future", exc: BaseException) -> None:
     """Fail *future* with *exc* from a possibly non-loop thread."""
     try:
-        future.get_loop().call_soon_threadsafe(
+        _future_loop(future).call_soon_threadsafe(
             _apply_future_state, future, True, exc
         )
     except RuntimeError:
@@ -4022,11 +4051,8 @@ def _cancel_timeout_handle(future, timeout_handle) -> None:
     """
     if timeout_handle is None or future is None:
         return
-    loop = future.get_loop()
-    try:
-        running_loop = asyncio.get_running_loop()
-    except RuntimeError:
-        running_loop = None  # not on any loop thread — must defer
+    loop = _future_loop(future)
+    running_loop = _current_loop()  # None off-loop, and on Python 3.6
     if running_loop is loop:
         timeout_handle.cancel()
         return
@@ -4181,7 +4207,7 @@ def _make_async_callback(ffi, lib):
             # stays alive until _resolve_async_response drops raw_gc.
             raw_gc = ffi.gc(raw_res, lib.FreeResponse)
             gc_bound = True
-            loop = future.get_loop()
+            loop = _future_loop(future)
             loop.call_soon_threadsafe(_resolve_async_response, ffi, future, raw_gc)
 
         except BaseException:
@@ -4546,8 +4572,11 @@ class AsyncSession:
             raise RuntimeError("AsyncSession is closed")
         ffi, lib = _get_ffi()
         callback = _get_async_callback(ffi, lib)
-        get_running_loop = getattr(asyncio, "get_running_loop", asyncio.get_event_loop)
-        loop = get_running_loop()
+        get_running_loop = getattr(asyncio, "get_running_loop", None)
+        if get_running_loop is not None:
+            loop = get_running_loop()
+        else:  # Python 3.6: no get_running_loop(), the running loop is awaited in
+            loop = asyncio.get_event_loop()
         defaults = self._session._snapshot_selected_defaults(ASYNC_REQUEST_DEFAULT_KEYS)
         effective_proxy = _resolve_proxy_url(
             kwargs.get("proxy", defaults.get("proxy")),

@@ -2,10 +2,22 @@
 
 Mirrors requests._types.  These names are internal: use them only when writing
 annotations for code that must accept the same inputs requests does.
+
+Import-safe from Python 3.6 through 3.14: PEP 544 (``Protocol``,
+``runtime_checkable``) only reached ``typing`` in 3.8, so 3.6-3.7 take both from
+``typing_extensions`` - a declared dependency on those versions, see the
+``requires-python`` markers in pyproject.toml.  tls_client/__init__.py imports
+every submodule eagerly, so an unguarded import here fails the whole package
+rather than one feature.
 """
 
 from collections.abc import Callable, Mapping
-from typing import Any, Protocol, TypeVar, runtime_checkable
+from typing import Any, TypeVar
+
+try:  # Python >= 3.8
+    from typing import Protocol, runtime_checkable
+except ImportError:  # Python 3.6-3.7: typing.Protocol is new in 3.8
+    from typing_extensions import Protocol, runtime_checkable
 
 _T_co = TypeVar("_T_co", covariant=True)
 _KT_co = TypeVar("_KT_co", covariant=True)

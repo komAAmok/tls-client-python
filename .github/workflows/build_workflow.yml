@@ -99,6 +99,13 @@ jobs:
       - name: Static scan (requests API surface)
         run: python3 -m tls_client._static_scan --json
 
+      # requires-python advertises 3.6-3.14 but every job here runs one
+      # interpreter, so nothing else notices a construct that parses on 3.11 and
+      # fails on 3.6 - an unguarded "from typing import Protocol" shipped once
+      # already and made "import tls_client" an ImportError below 3.8.
+      - name: Check the Python 3.6 compatibility floor
+        run: python3 -m unittest python_tests.test_py36_compat -v
+
       # Pinned, not floating: an unpinned ruff turns every new release's new rule
       # into a red build this file cannot predict.  Bump it deliberately, together
       # with the violations the new release reports.
