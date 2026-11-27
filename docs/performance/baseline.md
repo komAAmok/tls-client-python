@@ -11,7 +11,7 @@
 | Python | 3.12.3（`.venv`） |
 | Go | go1.27.4 linux/amd64 |
 | gcc | 13.3.0 |
-| 共享库 | `tls_client/bin/tls-client-linux-amd64.so`，14,095,240 B，md5 `5575630d…` |
+| 共享库 | `tls_client/bin/tls-client-linux-amd64.so`，14,102,944 B，md5 `89e17e76…`（CI 重建，ABI 4）。审计当日的本地产物为 14,095,240 B / `5575630d…` |
 | origin | `benchmarks/server`（本地 Go 服务，HTTP/1.1 keep-alive） |
 
 **负载警告**：采集期间本机同时运行浏览器（渲染进程常驻一个核），
@@ -80,8 +80,10 @@ go build -o /tmp/benchserver ./benchmarks/server
 ## 复现检查清单
 
 1. `go version` ≥ 1.27，`python3 -V` = 3.12
-2. `tls_client/bin/tls-client-linux-amd64.so` 的 md5 = `5575630d95c865f91e70259165974601`
-   （若不同，说明本地重建过，数字不可比）
+2. 记下 `tls_client/bin/tls-client-linux-amd64.so` 的 md5 并保持一致。
+   二进制会随 CI 重建而变化（审计期间就发生过一次：`5575630d…` → `89e17e76…`，
+   两者 ABI 均为 4、导出符号集相同）。**同一轮对比中两棵代码树必须共用同一份库**，
+   跨轮次比较前先核对 md5。
 3. 确认 `/tmp/benchserver` 已构建
 4. 先跑 `python benchmarks/harness.py --scenario sync-sequential` 两次，
    若两次 rps 相差 > 15 %，说明主机负载不稳，此时只能相信 `ab.py` 的结果

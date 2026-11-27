@@ -1,0 +1,19 @@
+{
+  "a": "/tmp/tree_base",
+  "b": "/home/sj/\u684c\u9762/tls-python/tls-client-python",
+  "per_round": 4,
+  "results": {
+    "1048576": {
+      "a_median_ms": 5.942,
+      "a_min": 3.022,
+      "a_p95": 7.434,
+      "b_median_ms": 4.37,
+      "b_min": 2.692,
+      "b_p95": 5.757,
+      "change_pct": -26.5,
+      "load": 2.87,
+      "samples": 8
+    }
+  },
+  "rounds": 2
+}

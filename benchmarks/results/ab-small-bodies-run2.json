@@ -1,0 +1,35 @@
+{
+  "1024": {
+    "a_median_ms": 1.512,
+    "b_median_ms": 1.527,
+    "change_pct": 1.0,
+    "a_min": 1.174,
+    "b_min": 1.087,
+    "a_p95": 3.275,
+    "b_p95": 2.249,
+    "samples": 40,
+    "load": 5.24
+  },
+  "4096": {
+    "a_median_ms": 1.512,
+    "b_median_ms": 1.538,
+    "change_pct": 1.7,
+    "a_min": 1.197,
+    "b_min": 1.145,
+    "a_p95": 3.618,
+    "b_p95": 2.376,
+    "samples": 40,
+    "load": 5.14
+  },
+  "65536": {
+    "a_median_ms": 2.119,
+    "b_median_ms": 1.76,
+    "change_pct": -17.0,
+    "a_min": 1.205,
+    "b_min": 1.261,
+    "a_p95": 4.675,
+    "b_p95": 3.741,
+    "samples": 40,
+    "load": 5.45
+  }
+}

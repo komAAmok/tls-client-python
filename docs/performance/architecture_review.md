@@ -3,9 +3,10 @@
 > 本文件只记录从当前仓库真实代码与真实测量中得到的事实。未验证的内容标记 **待验证**。
 >
 > 采集环境：`Linux x86_64`，8 核（Intel i7-14650HX），Python 3.12.3，Go 1.27.4，gcc 13.3.0，
-> 仓库 `tls-client-python` HEAD `cd0bd44`。共享库 `tls_client/bin/tls-client-linux-amd64.so`
-> （14,095,240 字节）由本仓库源码重建后与仓库内产物 **逐字节相同**（md5
-> `5575630d95c865f91e70259165974601`），说明该二进制确实来自当前源码。
+> 仓库 `tls-client-python` HEAD `5bac0a3`。共享库 `tls_client/bin/tls-client-linux-amd64.so`
+> 为 CI 重建产物（14,102,944 字节，md5 `89e17e762c4e5dad0f8d2bb1b04436d4`，ABI 4）。
+> 审计期间使用的本地构建产物是 14,095,240 字节（md5 `5575630d…`），与本仓库源码
+> 重建后逐字节相同；两者 ABI 与导出符号集完全一致，§4 有对 CI 产物的独立校验。
 
 ---
 

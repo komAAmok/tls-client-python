@@ -40,9 +40,9 @@ Session / AsyncSession (tls_client/_core.py)
 | Sync QPS（1 KiB，单线程） | 646.4 | 659.9 | +2.1 % | 实测·交替 A/B 5 轮（在噪声带内，不宣称收益） |
 | Async QPS（gather c16） | 1699.6 | 1699 量级 | 未测得稳定变化 | 实测·交替 A/B 3 轮（噪声内） |
 | Async 100×1 MiB 完成时间 | 0.661 / 0.749 / 0.864 s | 0.401 / 0.384 / 0.440 s | **快 1.7–1.9×** | 实测·交替 A/B 3 轮 |
-| 256 KiB 响应 | 3.082 ms | 2.568 ms | **−16.7 %** | 实测·交替 A/B 3 轮 |
-| 1 MiB 响应 | 7.119 ms | 5.271 ms | **−26.0 %** | 实测·交替 A/B 3 轮 |
-| 10 MiB 响应 | 56.478 ms | 38.779 ms | **−31.3 %** | 实测·交替 A/B 3 轮 |
+| 256 KiB 响应 | 3.396 / 2.929 ms | 2.745 / 2.039 ms | **−19.2 % / −30.4 %** | 实测·逐样本穿插 A/B，2 次独立运行 |
+| 1 MiB 响应 | 7.063 / 5.941 ms | 4.272 / 3.149 ms | **−39.5 % / −47.0 %** | 同上 |
+| 10 MiB 响应 | 51.775 / 53.078 ms | 20.344 / 19.178 ms | **−60.7 % / −63.9 %** | 同上 |
 | 10 MiB 单次 p50 | 32.4 ms | 20.9 ms | −35 % | 实测·单次运行（仅供量级参考） |
 | ≤64 KiB 响应 | — | — | ±11 % 内 | 实测·交替 A/B（噪声内，**不宣称**） |
 | p95 延迟（sync 1 KiB） | 2.031 ms | 1.953 ms | −3.8 % | 实测·交替 A/B 5 轮（噪声边缘） |
@@ -53,8 +53,57 @@ Session / AsyncSession (tls_client/_core.py)
 | Python allocations（netrc / 500 req） | — | 27.3 KiB | 无 per-request 泄漏 | 实测·tracemalloc |
 | HTTP/2 QPS | — | — | 未测试 | 无本地可重复 h2 origin |
 | HTTP/3 QPS | — | — | 未测试 | 无本地可重复 h3 origin |
-| 原生二进制体积（linux/amd64） | 14,095,240 B | 14,095,240 B | 0 | 实测，且逐字节可复现 |
+| 原生二进制体积（linux/amd64） | 14,095,240 B | 14,102,944 B | +0.05 % | 实测；差异来自 CI 重建，非本次改动 |
 | Wheel 体积（全平台，本机构建） | — | 62,202,008 B | 未对比 | 实测单点；CI 按平台分包，本机未跑 CI |
+
+## 3.5 复核记录（推送后按三项逐条查实）
+
+推送后按要求逐条复核，其中**两项推翻了先前的说法**，已回改。
+
+### 3.5.1 变基完整性
+
+用 `git patch-id --stable` 逐提交比对变基前后的内容哈希：
+
+```
+IDENTICAL    pre=e8f6fe5eb541 post=e8f6fe5eb541
+IDENTICAL    pre=5e946c16f8d0 post=5e946c16f8d0
+IDENTICAL    pre=b1ad02c2c4f3 post=b1ad02c2c4f3
+```
+
+三个提交一行未改。另外在独立 worktree 里 checkout 中间提交 `8659cb3`，
+确认它能单独 `import tls_client` 并通过 `test_py36_compat`——变基没有制造
+"只有末提交才成立"的隐性依赖。两个 CI 提交经 `--numstat` 确认**零文本行改动**
+（0f2ddee 动 12 个二进制、68977d2 动 8 个），本地 `bin/` 与远程逐字节一致。
+
+### 3.5.2 远程二进制校验（先前不完整，已补齐）
+
+原说法是"确认 ABI 4、Session 能构造"，但那**只测了 12 个库里的 linux/amd64 一个**。
+补齐后的结论见 [`binary_size_analysis.md`](binary_size_analysis.md) §4.2–4.3：
+
+* 12/12 架构正确、15 个 ABI 导出齐全（Mach-O 与 PE 用自写导出表解析，
+  因为 `nm -D` 读不了这两种格式——**第一次用错工具得出了"全部缺失"的错误结论**）。
+* linux/amd64 加载正常、274 项测试通过。
+* **CI 产物不能在本机逐字节复现**（14,127,600 vs 14,102,944），
+  已定位到 buildinfo 记录了 `-trimpath` 字面路径，剩余差异未定位。
+  因此不声称"CI 产物可由源码复现"，只声称 ABI 与依赖表一致。
+* 其余 11 个平台**只做了静态校验，没有运行过**。
+
+### 3.5.3 性能收益在新二进制上复测（先前方法不合格，已重做）
+
+先前的"复测"是**单次运行**，正是本文档开头明令禁止的做法。改用逐样本穿插 A/B
+（工具已入库为 `benchmarks/interleaved_ab.py`，5 轮 × 8 样本，两树共用同一份
+CI 二进制）后，两次独立运行 + 一次工具冒烟（1 MiB −26.5 %）：
+
+| 响应体 | 运行1 变化 | 运行2 变化 |
+| --- | --- | --- |
+| 256 KiB | −19.2 % | −30.4 % |
+| 1 MiB | −39.5 % | −47.0 % |
+| 10 MiB | −60.7 % | −63.9 % |
+
+**收益比初版记录的更大**（初版 −16.7 / −26.0 / −31.3 % 是测量协议偏弱造成的低估）。
+小响应体两次测量符号不一致，仍判定为无收益。
+
+---
 
 ## 4. 文件修改清单
 
@@ -68,6 +117,7 @@ Session / AsyncSession (tls_client/_core.py)
 | `benchmarks/server/main.go` | 新增：本地 Go origin | 原 Python origin 上限约 800 rps，会成为被测对象 | 自测通过 |
 | `benchmarks/go/engine_bench/main.go` | 新增：绕开 CGO 的引擎基准 | 分离"引擎问题"与"绑定问题" | 自测通过 |
 | `docs/performance/*.md` | 新增 5 份文档 | 交付 | — |
+| `benchmarks/interleaved_ab.py`、`benchmarks/_ab_child.py` | 新增：逐样本穿插 A/B 工具 | 粗粒度交替在本机负载下会低估且不稳定 | 实跑通过 |
 | `benchmarks/results/*.json` | 原始数据 | 交付 | — |
 
 **未修改任何上游文件**（`AGENTS.md` 约束），因此不需要在 `UPSTREAM_SYNC.md` 登记新的 overlay point。
@@ -76,12 +126,12 @@ Session / AsyncSession (tls_client/_core.py)
 
 | 项目 | 状态 |
 | --- | --- |
-| linux/amd64 编译 | ✅ 已构建，产物与仓库内二进制逐字节相同（md5 `5575630d…`） |
+| linux/amd64 编译 | ✅ 本地构建产物与审计当日仓库内二进制逐字节相同（`5575630d…`）；CI 重建后为 `89e17e76…`，ABI 与导出符号集一致，但**不可本地逐字节复现**（见 binary_size_analysis.md §4.2） |
 | linux/amd64 运行测试 | ✅ 274 项 Python 测试通过 |
 | linux/amd64 基准 | ✅ 见上 |
-| linux/arm64、arm、386、musl 变体 | ❌ 未编译验证 |
-| Windows 386/amd64/arm64 | ❌ 未验证 |
-| macOS amd64/arm64 | ❌ 未验证 |
+| linux/arm64、arm、386、musl 变体 | ⚠️ 仅静态校验：架构正确 + 15 个 ABI 导出齐全；**未运行** |
+| Windows 386/amd64/arm64 | ⚠️ 仅静态校验：PE 导出表 24 个符号齐全；**未运行** |
+| macOS amd64/arm64 | ⚠️ 仅静态校验：Mach-O 59 个外部符号齐全；**未运行** |
 | Python 3.6–3.11、3.13、3.14 | ❌ 本机只有 3.12.3；`test_py36_compat` 通过（语法级） |
 
 **本次改动全部是纯 Python 且不含平台相关代码路径**（唯一平台分支是
