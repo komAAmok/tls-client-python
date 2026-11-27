@@ -18,12 +18,22 @@ no second interpreter):
 3. **Runtime-evaluated annotations** - ``list[int]`` and ``int | None`` are legal
    syntax on 3.6 but raise TypeError when the annotation is evaluated, and no
    module here uses ``from __future__ import annotations``.
+4. **Subscripting a pre-PEP-585 class in value position** - an alias assignment
+   such as ``HookType = Callable[..., Any]`` is not an annotation, and it
+   shipped: with ``Callable`` imported from collections.abc it raised
+   "TypeError: 'ABCMeta' object is not subscriptable" on 3.6-3.8, killing
+   ``import tls_client`` outright. Check 3 never looked at assignments, so
+   1.18.1.2 went out broken on the versions requires-python advertises. Now
+   covered statically and by a subprocess that emulates a pre-3.9 runtime.
 
 Keep PACKAGE_SYNTAX_FLOOR in step with requires-python: if the floor is ever
 raised, this file changes with it, deliberately.
 """
 
 import ast
+import os
+import subprocess
+import sys
 import unittest
 from pathlib import Path
 
@@ -240,6 +250,105 @@ class PackageSyntaxFloorTest(unittest.TestCase):
                 r"typing_extensions[^\n]*python_version\s*<\s*'3\.7'",
                 "%s must keep installing typing_extensions on 3.6" % name,
             )
+
+
+# collections.abc classes gained __class_getitem__ only in Python 3.9
+# (PEP 585); subscripting any of them raises TypeError on 3.6-3.8.
+_PEP585_GENERIC_BUILTINS = frozenset(
+    {"list", "dict", "set", "frozenset", "tuple", "type", "bytearray", "bytes"}
+)
+
+
+def _hazardous_subscripts(tree):
+    """Yield (lineno, expression) for subscripts that break on 3.6-3.8.
+
+    Covers value position as well as annotations: an alias assignment such as
+    HookType = Callable[..., Any] is not an annotation, and that is exactly the
+    line that shipped broken in 1.18.1.2.
+    """
+    abc_imported = set()
+    for node in ast.walk(tree):
+        if isinstance(node, ast.ImportFrom) and node.module == "collections.abc":
+            for alias in node.names:
+                abc_imported.add(alias.asname or alias.name)
+
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.Subscript):
+            continue
+        value = node.value
+        hit = None
+        if isinstance(value, ast.Name):
+            if value.id in abc_imported:
+                hit = "%s imported from collections.abc" % value.id
+            elif value.id in _PEP585_GENERIC_BUILTINS:
+                hit = "builtin generic %s" % value.id
+        elif isinstance(value, ast.Attribute):
+            if isinstance(value.value, ast.Name) and value.value.id == "collections":
+                hit = "collections.%s" % value.attr
+        if hit:
+            yield node.lineno, ast.unparse(node), hit
+
+
+class RuntimeSubscriptFloorTest(unittest.TestCase):
+    """Catch "subscriptable here, TypeError on 3.6-3.8" defects."""
+
+    def test_no_subscript_of_a_pre_pep585_class(self):
+        problems = []
+        for path in package_modules():
+            tree = parse_module(path)
+            for lineno, expr, why in _hazardous_subscripts(tree):
+                problems.append(
+                    "%s:%d: %s  (%s) -- not subscriptable before Python 3.9; "
+                    "import the subscriptable name from typing instead"
+                    % (path.relative_to(REPO_ROOT), lineno, expr, why)
+                )
+        self.assertEqual(
+            [], problems, "\n".join(["", "pre-PEP 585 subscript:", *problems])
+        )
+
+    def test_import_survives_a_pre_pep585_interpreter(self):
+        """Strip __class_getitem__ from collections.abc, then import the package.
+
+        This is the only check here that executes the import under 3.6-3.8
+        semantics. Those classes did not define __class_getitem__ before PEP 585,
+        so removing it reproduces the exact TypeError users hit regardless of
+        which interpreter runs the suite. The emulation is asserted effective
+        first: a simulation that fails to break the old pattern proves nothing.
+        """
+        script = "\n".join([
+            "import collections.abc",
+            "for _n in dir(collections.abc):",
+            "    _o = getattr(collections.abc, _n)",
+            "    if isinstance(_o, type) and '__class_getitem__' in _o.__dict__:",
+            "        delattr(_o, '__class_getitem__')",
+            "from typing import Any",
+            "def _still_subscriptable(name):",
+            "    cls = getattr(collections.abc, name)",
+            "    try:",
+            "        cls[Any]",
+            "    except TypeError:",
+            "        return False",
+            "    return True",
+            "for _p in ('Callable', 'Mapping', 'Sequence', 'Iterable'):",
+            "    if _still_subscriptable(_p):",
+            "        raise SystemExit('emulation ineffective for %s' % _p)",
+            "import tls_client",
+            "print(tls_client.__version__)",
+        ])
+        proc = subprocess.run(
+            [sys.executable, "-c", script],
+            cwd=str(REPO_ROOT),
+            capture_output=True,
+            text=True,
+            timeout=300,
+            env=dict(os.environ, PYTHONPATH=str(REPO_ROOT)),
+        )
+        self.assertEqual(
+            0,
+            proc.returncode,
+            "import tls_client fails on a pre-PEP-585 (3.6-3.8) runtime:\n%s"
+            % proc.stderr[-2000:],
+        )
 
 
 if __name__ == "__main__":

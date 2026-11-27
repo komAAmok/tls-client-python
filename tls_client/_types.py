@@ -11,8 +11,14 @@ every submodule eagerly, so an unguarded import here fails the whole package
 rather than one feature.
 """
 
-from collections.abc import Callable, Mapping
-from typing import Any, TypeVar
+# Callable / Mapping come from typing, NOT collections.abc.  The aliases below
+# are subscripted at import time (HookType = Callable[..., Any]), and
+# collections.abc classes only gained __class_getitem__ in Python 3.9 (PEP 585).
+# With the collections.abc versions, `import tls_client` raised
+# "TypeError: 'ABCMeta' object is not subscriptable" on 3.6-3.8 - the very
+# versions requires-python advertises.  typing.Callable has been subscriptable
+# since 3.5.1, so it works on every supported interpreter.
+from typing import Any, Callable, Mapping, TypeVar
 
 try:  # Python >= 3.8
     from typing import Protocol, runtime_checkable
