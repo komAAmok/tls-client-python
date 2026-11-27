@@ -633,7 +633,16 @@ def should_bypass_proxies(url: str, no_proxy: Optional[str]) -> bool:
 
     with set_environ("no_proxy", no_proxy_arg):
         try:
-            bypass = proxy_bypass(hostname)
+            # On POSIX proxy_bypass(host) re-derives the entire proxy
+            # environment through proxy_bypass_environment() before it reads
+            # no_proxy out of it.  Handing it the mapping getproxies() already
+            # produced removes a second full os.environ scan per request.
+            # Windows keeps its registry lookup, which this mapping cannot
+            # answer.
+            if os.name == "nt":
+                bypass = proxy_bypass(hostname)
+            else:
+                bypass = proxy_bypass(hostname, getproxies())
         except (TypeError, socket.gaierror):
             bypass = False
 
